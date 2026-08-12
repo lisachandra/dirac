@@ -28,6 +28,7 @@ export interface TaskOptions {
 	reasoningEffort?: OpenaiReasoningEffort
 	speed?: InferenceSpeed
 	maxConsecutiveMistakes?: string | number
+	apiErrorMaxRetries?: string | number
 	yolo?: boolean
 	autoApproveAll?: boolean
 	doubleCheckCompletion?: boolean

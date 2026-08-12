@@ -626,10 +626,10 @@ export class LifecycleManager {
 					msg.content.card.header === "API Error (Retrying)" &&
 					(msg.content.card.status === CardStatus.PENDING || msg.content.card.status === CardStatus.ERROR)
 				) {
-					const attempt = msg.content.card.body?.match(/attempt (\d+\/\d+)/)?.[1] ?? "?/?"
+					const attempt = msg.content.card.body?.match(/attempt (\d+(?:\/\d+)?)/)?.[1] ?? "?"
 					await this.dependencies.messageStateHandler.patchCardById(msg.content.card.id, {
 						header: "API Error (Cancelled)",
-						body: "API Error (attempt " + attempt + "). Cancelled.",
+						body: `API Error (attempt ${attempt}). Cancelled.`,
 						status: CardStatus.CANCELLED,
 						endTime: Date.now(),
 					})

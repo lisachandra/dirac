@@ -24,6 +24,14 @@ export function parsePositiveInteger(value: string): number {
 	return parsed
 }
 
+export function parseNonNegativeInteger(value: string): number {
+	const parsed = Number(value)
+	if (value.trim() === "" || !Number.isSafeInteger(parsed) || parsed < 0) {
+		throw new InvalidArgumentError("Value must be a non-negative whole number")
+	}
+	return parsed
+}
+
 export function parseThinkingBudget(value: string): number {
 	const parsed = Number(value)
 	if (value.trim() === "" || !Number.isSafeInteger(parsed) || parsed < 0) {

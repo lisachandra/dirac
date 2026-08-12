@@ -25,8 +25,10 @@ import { HookRegistry } from "./HookRegistry"
 import { HookResponseParser } from "./HookResponseParser"
 import { type HookTelemetryContext, HookTelemetryRecorder } from "./HookTelemetryRecorder"
 
-// Hook execution timeout (10 seconds)
-const HOOK_EXECUTION_TIMEOUT_MS = 10000
+// Hook execution timeout (240 seconds) — gives hooks like per-file
+// oxlint/oxfmt PostToolUse lint hooks room to finish even on a cold
+// type-aware lint cache (measured 10s warm, ~60s cold per file on Windows).
+const HOOK_EXECUTION_TIMEOUT_MS = 240000
 
 export interface Hooks {
 	PreToolUse: {
@@ -99,7 +101,7 @@ export abstract class HookRunner<Name extends HookName> {
 			slug: params.model?.slug?.trim() || "unknown",
 		}
 
-		return {
+		const input = {
 			diracVersion,
 			hookName: this.hookName,
 			timestamp: Date.now().toString(),
@@ -107,7 +109,30 @@ export abstract class HookRunner<Name extends HookName> {
 			userId: getDistinctId(), // Always available: Dirac User ID, machine ID, or generated UUID
 			...params,
 			model,
+		} as any
+
+		// The generated proto declares parameters as map<string,string>, so any
+		// non-string value (e.g. execute_command's commands array or edit_file's
+		// files array) would be destroyed by String() -> "[object Object]" in
+		// fromPartial. Serialize non-string values as JSON strings so hooks can
+		// recover them with `fromjson? // .`.
+		//
+		// IMPORTANT: parameters are the tool's live arguments (block.params),
+		// so build a fresh object instead of mutating in place — otherwise the
+		// tool itself would receive JSON strings (e.g. get_file_skeleton's
+		// paths array would become a string and be iterated character by
+		// character).
+		for (const hookData of [input.preToolUse, input.postToolUse]) {
+			if (hookData?.parameters && typeof hookData.parameters === "object") {
+				const serialized: Record<string, string> = {}
+				for (const [key, value] of Object.entries(hookData.parameters)) {
+					serialized[key] = typeof value === "string" ? value : JSON.stringify(value)
+				}
+				hookData.parameters = serialized
+			}
 		}
+
+		return input
 	}
 }
 
@@ -172,7 +197,18 @@ class StdioHookRunner<Name extends HookName> extends HookRunner<Name> {
 		}
 
 		try {
-			await hookProcess.run(inputJson)
+			// HookProcess.run rejects on non-zero exit, but hooks that block
+			// intentionally return valid JSON AND a non-zero exit code. Only
+			// timeout/cancellation should abort here; anything else falls
+			// through so the JSON response is parsed and honored below.
+			try {
+				await hookProcess.run(inputJson)
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error)
+				if (message.includes("timed out") || message.includes("cancelled")) {
+					throw error
+				}
+			}
 
 			const stdout = hookProcess.getStdout()
 			const stderr = hookProcess.getStderr()

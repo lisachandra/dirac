@@ -55,6 +55,21 @@ export async function normalizeMaxConsecutiveMistakes(value?: string | number): 
 	return parsed
 }
 
+export async function normalizeApiErrorMaxRetries(value?: string | number): Promise<number | undefined> {
+	if (value === undefined) {
+		return undefined
+	}
+
+	const parsed = typeof value === "number" ? value : Number(value)
+	if (!Number.isSafeInteger(parsed) || parsed < 0) {
+		throw new Error(
+			`Invalid API error max retries '${value}'. Expected a non-negative integer (0 = retry forever).`,
+		)
+	}
+
+	return parsed
+}
+
 export async function applyTaskOptions(options: TaskOptions, workspaceRoot: string, controller: Controller): Promise<void> {
 	const { StateManager } = await import("@/core/storage/StateManager")
 	const { telemetryService } = await import("@/services/telemetry")
@@ -206,6 +221,12 @@ export async function applyTaskOptions(options: TaskOptions, workspaceRoot: stri
 	if (maxConsecutiveMistakes !== undefined) {
 		stateManager.setSessionOverride("maxConsecutiveMistakes", maxConsecutiveMistakes)
 		telemetryService.captureHostEvent("max_consecutive_mistakes_flag", String(maxConsecutiveMistakes))
+	}
+
+	const apiErrorMaxRetries = await normalizeApiErrorMaxRetries(options.apiErrorMaxRetries)
+	if (apiErrorMaxRetries !== undefined) {
+		stateManager.setSessionOverride("apiErrorMaxRetries", apiErrorMaxRetries)
+		telemetryService.captureHostEvent("api_error_max_retries_flag", String(apiErrorMaxRetries))
 	}
 
 	// Set yolo mode as a session-scoped override so AutoApprove picks it up,

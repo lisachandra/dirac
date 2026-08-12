@@ -12,6 +12,7 @@ import { isGoalRequest, UNSUPPORTED_GOAL_CLI_MESSAGE } from "./utils/goals"
 import { parseTimeoutSeconds } from "./utils/task-timeout"
 import {
 	parseInferenceSpeed,
+	parseNonNegativeInteger,
 	parsePositiveInteger,
 	parseReasoningEffort,
 	parseThinkingBudget,
@@ -65,6 +66,11 @@ program
 		"--max-consecutive-mistakes <count>",
 		"Maximum consecutive mistakes before halting in yolo mode",
 		parsePositiveInteger,
+	)
+	.option(
+		"--api-error-max-retries <count>",
+		"Maximum API error retries before prompting (0 = retry forever)",
+		parseNonNegativeInteger,
 	)
 	.option("--json", "Output messages as JSON instead of styled text")
 	.option("--double-check-completion", "Reject first completion attempt to force re-verification")
@@ -220,6 +226,11 @@ program
 		"--max-consecutive-mistakes <count>",
 		"Maximum consecutive mistakes before halting in yolo mode",
 		parsePositiveInteger,
+	)
+	.option(
+		"--api-error-max-retries <count>",
+		"Maximum API error retries before prompting (0 = retry forever)",
+		parseNonNegativeInteger,
 	)
 	.option("--json", "Output messages as JSON instead of styled text")
 	.option("--double-check-completion", "Reject first completion attempt to force re-verification")
