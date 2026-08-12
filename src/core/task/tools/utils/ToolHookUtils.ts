@@ -47,6 +47,12 @@ export class ToolHookUtils {
 		if (block.params.command) {
 			pendingToolInfo.command = block.params.command
 		}
+		if (block.params.commands) {
+			pendingToolInfo.commands = block.params.commands
+		}
+		if (block.params.script) {
+			pendingToolInfo.script = block.params.script
+		}
 		if (block.params.content && typeof block.params.content === "string") {
 			pendingToolInfo.content = block.params.content.slice(0, 200)
 		}
@@ -78,14 +84,13 @@ export class ToolHookUtils {
 			pendingToolInfo,
 		})
 
-		// Handle cancellation from hook
+		// Handle blocking from the hook: deny this tool call, but keep the task
+		// running so the model can recover with a different approach.
 		if (preToolResult.cancel === true) {
 			// Clear the active hook execution state BEFORE calling cancelTask
 			// This prevents abortTask from trying to "cancel" an already-completed hook
 			await config.callbacks.clearActiveHookExecution()
 
-			// Abort the entire task (consistent with PostToolUse and other hook cancellations)
-			await config.callbacks.cancelTask()
 			throw new PreToolUseHookCancellationError(preToolResult.errorMessage || "PreToolUse hook requested cancellation")
 		}
 

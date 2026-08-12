@@ -142,6 +142,9 @@ These options apply to both **dirac** [*prompt*] and **dirac task** [*prompt*], 
 **-t**, **--timeout** *seconds*
 : Abort after a positive number of seconds. No timeout is applied unless this option is supplied.
 
+**--api-error-max-retries** *count*
+: Maximum API error retries before showing a retry prompt. Use 0 to retry forever (with capped backoff).
+
 **-m**, **--model** *model*
 : Override the configured model for this invocation.
 

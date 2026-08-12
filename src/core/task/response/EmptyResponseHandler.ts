@@ -7,7 +7,9 @@ import { ResponseProcessorDependencies } from "../types/response-processor"
 const BASE_ERROR_MESSAGE =
 	"Invalid API Response: The provider returned an empty or unparsable response. This is a provider-side issue where the model failed to generate valid output or returned tool calls that Dirac cannot process. Retrying the request may help resolve this issue."
 const NO_RESPONSE_ERROR_MESSAGE = "No assistant message was received. Would you like to retry the request?"
-const MAX_RETRY_ATTEMPTS = 3
+const DEFAULT_MAX_RETRY_ATTEMPTS = 3
+/** Cap the exponential backoff so unlimited retries never wait hours between attempts. */
+const MAX_RETRY_DELAY_MS = 60_000
 
 // Handles empty assistant responses — creates error cards, auto-retries with
 // exponential backoff, and prompts user for manual retry after max attempts.
@@ -60,19 +62,22 @@ export class EmptyResponseHandler {
 
 	// Handle retry logic — auto-retry with backoff or prompt user
 	private async handleRetry(): Promise<boolean> {
-		if (this.deps.taskState.emptyResponseRetryAttempts < MAX_RETRY_ATTEMPTS) return this.autoRetry()
-		return this.promptManualRetry()
+		const maxAttempts = this.getMaxRetryAttempts()
+		if (maxAttempts === 0 || this.deps.taskState.emptyResponseRetryAttempts < maxAttempts) {
+			return this.autoRetry(maxAttempts)
+		}
+		return this.promptManualRetry(maxAttempts)
 	}
 
 	// Auto-retry with exponential backoff
-	private async autoRetry(): Promise<boolean> {
+	private async autoRetry(maxAttempts: number): Promise<boolean> {
 		this.deps.taskState.emptyResponseRetryAttempts++
-		const delay = 2000 * 2 ** (this.deps.taskState.emptyResponseRetryAttempts - 1)
+		const delay = Math.min(2_000 * 2 ** (this.deps.taskState.emptyResponseRetryAttempts - 1), MAX_RETRY_DELAY_MS)
 		const card = await this.deps.taskMessenger.createCard({
 			header: "Auto-Retry",
 			body: JSON.stringify({
 				attempt: this.deps.taskState.emptyResponseRetryAttempts,
-				maxAttempts: MAX_RETRY_ATTEMPTS,
+				maxAttempts,
 				delaySeconds: delay / 1000,
 				errorMessage: NO_RESPONSE_ERROR_MESSAGE,
 			}),
@@ -84,12 +89,17 @@ export class EmptyResponseHandler {
 	}
 
 	// Prompt user for manual retry after auto-retry exhaustion
-	private async promptManualRetry(): Promise<boolean> {
+	private async promptManualRetry(maxAttempts: number): Promise<boolean> {
+		if (this.shouldAutoRetryInAutonomousMode()) {
+			this.deps.taskState.emptyResponseRetryAttempts = 0
+			return false // retry requested
+		}
+
 		const cardHandle = await this.deps.taskMessenger.createCard({
 			header: "Auto-Retry Failed",
 			body: JSON.stringify({
-				attempt: MAX_RETRY_ATTEMPTS,
-				maxAttempts: MAX_RETRY_ATTEMPTS,
+				attempt: maxAttempts,
+				maxAttempts,
 				delaySeconds: 0,
 				failed: true,
 				errorMessage: NO_RESPONSE_ERROR_MESSAGE,
@@ -118,5 +128,20 @@ export class EmptyResponseHandler {
 		await cardHandle.finalize(response === DiracAskResponse.APPROVE ? CardStatus.SUCCESS : CardStatus.CANCELLED)
 		if (response === DiracAskResponse.APPROVE) this.deps.taskState.emptyResponseRetryAttempts = 0
 		return response !== DiracAskResponse.APPROVE
+	}
+
+	private shouldAutoRetryInAutonomousMode(): boolean {
+		return (
+			this.deps.stateManager.getGlobalSettingsKey("autoApproveAllToggled") ||
+			this.deps.stateManager.getGlobalSettingsKey("yoloModeToggled")
+		)
+	}
+
+	private getMaxRetryAttempts(): number {
+		const configured = this.deps.stateManager.getGlobalSettingsKey("apiErrorMaxRetries")
+		if (typeof configured === "number" && Number.isSafeInteger(configured) && configured >= 0) {
+			return configured
+		}
+		return DEFAULT_MAX_RETRY_ATTEMPTS
 	}
 }

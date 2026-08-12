@@ -89,6 +89,13 @@ export class HookResponseParser {
 
 	/** Creates a validated HookOutput from parsed data, returning null if validation fails. */
 	private static createValidatedOutput(outputData: any, hookName: string): HookOutput | null {
+		// Claude Code compatibility: hooks written for Claude Code return
+		// additionalContext instead of contextModification. Normalize it so
+		// downstream consumers only need to read contextModification.
+		if (typeof outputData.additionalContext === "string" && !outputData.contextModification) {
+			outputData.contextModification = outputData.additionalContext
+		}
+
 		const validation = validateHookOutput(outputData)
 		if (!validation.valid) return null // Return null to let caller decide based on exit code
 

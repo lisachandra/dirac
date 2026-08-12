@@ -9,7 +9,12 @@ import { suppressConsoleUnlessVerbose } from "./utils/console"
 import { getCliLogFilePath } from "./vscode-shim"
 import { setupSignalHandlers } from "./utils/errors"
 import { parseTimeoutSeconds } from "./utils/task-timeout"
-import { parsePositiveInteger, parseReasoningEffort, parseThinkingBudget } from "./utils/command-parsers"
+import {
+	parseNonNegativeInteger,
+	parsePositiveInteger,
+	parseReasoningEffort,
+	parseThinkingBudget,
+} from "./utils/command-parsers"
 
 import { OPENAI_REASONING_EFFORT_OPTIONS } from "@shared/storage/types"
 // CLI-only behavior: suppress console output unless verbose mode is enabled.
@@ -57,6 +62,11 @@ program
 		"--max-consecutive-mistakes <count>",
 		"Maximum consecutive mistakes before halting in yolo mode",
 		parsePositiveInteger,
+	)
+	.option(
+		"--api-error-max-retries <count>",
+		"Maximum API error retries before prompting (0 = retry forever)",
+		parseNonNegativeInteger,
 	)
 	.option("--json", "Output messages as JSON instead of styled text")
 	.option("--double-check-completion", "Reject first completion attempt to force re-verification")
@@ -186,6 +196,11 @@ program
 		"--max-consecutive-mistakes <count>",
 		"Maximum consecutive mistakes before halting in yolo mode",
 		parsePositiveInteger,
+	)
+	.option(
+		"--api-error-max-retries <count>",
+		"Maximum API error retries before prompting (0 = retry forever)",
+		parseNonNegativeInteger,
 	)
 	.option("--json", "Output messages as JSON instead of styled text")
 	.option("--double-check-completion", "Reject first completion attempt to force re-verification")

@@ -159,6 +159,7 @@ Frequently used task options include:
 | `--thinking [tokens]` | Enable extended thinking; the default budget is 1024. |
 | `--reasoning-effort <level>` | Set `none`, `low`, `medium`, `high`, or `xhigh`. |
 | `--timeout <seconds>` | Stop a standalone task after a positive number of seconds. |
+| `--api-error-max-retries <count>` | Maximum API error retries before prompting (0 = retry forever). |
 | `--verbose` | Expand reasoning and task diagnostics. |
 | `--json` | Emit newline-delimited JSON events. |
 

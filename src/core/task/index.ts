@@ -153,6 +153,10 @@ type TaskParams = {
 	enqueuePreRequestSteeringMessages?: () => Promise<void>
 }
 
+const DEFAULT_API_ERROR_MAX_RETRIES = 3
+/** Cap the exponential backoff so unlimited retries never wait hours between attempts. */
+const MAX_API_ERROR_RETRY_DELAY_MS = 60_000
+
 export class Task {
 	// Core task variables
 	readonly taskId: string
@@ -1651,6 +1655,14 @@ export class Task {
 		return { systemPrompt, toolSnapshot, contextManagementMetadata, providerInfo }
 	}
 
+	private getApiErrorMaxRetries(): number {
+		const configured = this.stateManager.getGlobalSettingsKey("apiErrorMaxRetries")
+		if (typeof configured === "number" && Number.isSafeInteger(configured) && configured >= 0) {
+			return configured
+		}
+		return DEFAULT_API_ERROR_MAX_RETRIES
+	}
+
 	private async handleApiRequestError(params: {
 		error: unknown
 		previousApiReqIndex: number
@@ -1698,11 +1710,23 @@ export class Task {
 
 		const isAuthError = diracError.isErrorType(DiracErrorType.Auth)
 		const isPaymentError = diracError.isErrorType(DiracErrorType.Payment)
+		const apiErrorMaxRetries = this.getApiErrorMaxRetries()
 
 		let response: DiracAskResponse
-		if (!isAuthError && !isPaymentError && this.taskState.apiErrorRetryAttempts < 3) {
+		if (
+			!isAuthError &&
+			!isPaymentError &&
+			(apiErrorMaxRetries === 0 || this.taskState.apiErrorRetryAttempts < apiErrorMaxRetries)
+		) {
 			this.taskState.apiErrorRetryAttempts++
-			const delay = 2000 * 2 ** (this.taskState.apiErrorRetryAttempts - 1)
+			const delay = Math.min(
+				2_000 * 2 ** (this.taskState.apiErrorRetryAttempts - 1),
+				MAX_API_ERROR_RETRY_DELAY_MS,
+			)
+			const attemptLabel =
+				apiErrorMaxRetries === 0
+					? `attempt ${this.taskState.apiErrorRetryAttempts}`
+					: `attempt ${this.taskState.apiErrorRetryAttempts}/${apiErrorMaxRetries}`
 
 			await updateApiReqMsg({
 				messageStateHandler: this.messageStateHandler,
@@ -1724,7 +1748,7 @@ export class Task {
 			const autoRetryCard = await this.taskMessenger.createCard({
 				status: CardStatus.PENDING,
 				header: "API Error (Retrying)",
-				body: `API Error (attempt ${this.taskState.apiErrorRetryAttempts}/3). Retrying in ${delay / 1000}s...`,
+				body: `API Error (${attemptLabel}). Retrying in ${delay / 1000}s...`,
 			})
 
 			const autoRetryApiReqIndex = findLastIndex(
@@ -1754,19 +1778,19 @@ export class Task {
 			if (this.taskState.abort) {
 				await autoRetryCard.update({
 					header: "API Error (Cancelled)",
-					body: `API Error (attempt ${this.taskState.apiErrorRetryAttempts}/3). Cancelled.`,
+					body: `API Error (${attemptLabel}). Cancelled.`,
 				})
 				await autoRetryCard.finalize(CardStatus.CANCELLED)
 				throw new Error("Task instance aborted")
 			}
-			await autoRetryCard.update({ body: `API Error (attempt ${this.taskState.apiErrorRetryAttempts}/3). Retrying...` })
+			await autoRetryCard.update({ body: `API Error (${attemptLabel}). Retrying...` })
 			await autoRetryCard.finalize(CardStatus.ERROR)
 		} else {
-			if (!isAuthError && !isPaymentError) {
+			if (!isAuthError && !isPaymentError && apiErrorMaxRetries !== 0) {
 				await this.taskMessenger.createCard({
 					status: CardStatus.ERROR,
 					header: "API Error (Retries Exhausted)",
-					body: `The API request failed after 3 attempts. ${diracError.toDisplayMessage()}`,
+					body: `The API request failed after ${apiErrorMaxRetries} attempts. ${diracError.toDisplayMessage()}`,
 				})
 			}
 			if (isPaymentError) {
@@ -1783,33 +1807,43 @@ export class Task {
 					body: diracError.toDisplayMessage(),
 				})
 			}
-			this.taskState.status = TaskStatus.AWAITING_USER_INPUT
-
-			const cardHandle = await this.taskMessenger.createCard({
-				requireApproval: true,
-				header: "API Request Failed",
-				body: diracError.toDisplayMessage(),
-				actions: [
-					{ label: "Retry", value: DiracAskResponse.APPROVE, primary: true },
-					{ label: "Cancel", value: DiracAskResponse.REJECT },
-				],
-			})
-			try {
-				const askResult = await cardHandle.waitForInteraction()
-				response = askResult.response
-			} catch (error) {
-				if (error instanceof ToolSkippedByUserMessage) {
-					await cardHandle.finalize(CardStatus.SKIPPED)
-					this.taskState.pendingUserMessage = error.userMessage
-					this.taskState.pendingUserImages = error.userImages
-					this.taskState.pendingUserFiles = error.userFiles
-					response = DiracAskResponse.APPROVE
-				} else {
-					throw error
-				}
-			}
-			if (response === DiracAskResponse.APPROVE) {
+			const shouldAutoRetryInAutonomousMode =
+				!isAuthError &&
+				!isPaymentError &&
+				(this.stateManager.getGlobalSettingsKey("autoApproveAllToggled") ||
+					this.stateManager.getGlobalSettingsKey("yoloModeToggled"))
+			if (shouldAutoRetryInAutonomousMode) {
+				response = DiracAskResponse.APPROVE
 				this.taskState.apiErrorRetryAttempts = 0
+			} else {
+				this.taskState.status = TaskStatus.AWAITING_USER_INPUT
+
+				const cardHandle = await this.taskMessenger.createCard({
+					requireApproval: true,
+					header: "API Request Failed",
+					body: diracError.toDisplayMessage(),
+					actions: [
+						{ label: "Retry", value: DiracAskResponse.APPROVE, primary: true },
+						{ label: "Cancel", value: DiracAskResponse.REJECT },
+					],
+				})
+				try {
+					const askResult = await cardHandle.waitForInteraction()
+					response = askResult.response
+				} catch (error) {
+					if (error instanceof ToolSkippedByUserMessage) {
+						await cardHandle.finalize(CardStatus.SKIPPED)
+						this.taskState.pendingUserMessage = error.userMessage
+						this.taskState.pendingUserImages = error.userImages
+						this.taskState.pendingUserFiles = error.userFiles
+						response = DiracAskResponse.APPROVE
+					} else {
+						throw error
+					}
+				}
+				if (response === DiracAskResponse.APPROVE) {
+					this.taskState.apiErrorRetryAttempts = 0
+				}
 			}
 		}
 

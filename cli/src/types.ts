@@ -27,6 +27,7 @@ export interface TaskOptions {
 	thinking?: boolean | string | number
 	reasoningEffort?: OpenaiReasoningEffort
 	maxConsecutiveMistakes?: string | number
+	apiErrorMaxRetries?: string | number
 	yolo?: boolean
 	autoApproveAll?: boolean
 	doubleCheckCompletion?: boolean
