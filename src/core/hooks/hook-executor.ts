@@ -129,6 +129,29 @@ export async function executeHook<Name extends keyof Hooks>(options: HookExecuti
 
 		// Create streaming callback
 		const streamCallback = async (line: string, stream: "stdout" | "stderr", meta?: HookOutputStreamMeta) => {
+			const trimmed = line.trim()
+			// Hide workspace hook banner noise in Paseo ([workspace stdout .diracrules/hooks/PreToolUse.ps1]).
+			// But only hide empty/JSON bookkeeping lines — keep actual lint / suggest-rg output so
+			// PostToolUse contextModification (and visible Hook: PostToolUse card via ToolHookRunner)
+			// remains available even if the hook prints to stdout instead of contextModification JSON.
+			const scriptTail = meta?.scriptPath?.split(/[/\\]/).filter(Boolean).slice(-3).join("/") ?? ""
+			const isDiracHookBanner =
+				scriptTail.includes(".diracrules/hooks/PreToolUse") || scriptTail.includes(".diracrules/hooks/PostToolUse")
+			if (isDiracHookBanner) {
+				if (!trimmed) return
+				if (trimmed.startsWith('{"contextModification"') || trimmed.startsWith('{"cancel"') || trimmed.includes('"suppressOutput"')) return
+				// PreToolUse banners are mostly noise; PostToolUse may carry lint output, so don't hide all.
+				if (scriptTail.includes("PreToolUse")) return
+			}
+			if (!trimmed) {
+				return
+			}
+			// HookOutput JSON lines (e.g. {"cancel":false,"contextModification":"",...,"suppressOutput":true})
+			// are parsed from full stdout, not this line stream. Don't echo them as
+			// "[workspace stdout .diracrules/hooks/PreToolUse.ps1] {\"suppressOutput\":true}"noise.
+			if (trimmed.startsWith('{"contextModification"') || trimmed.startsWith('{"cancel"') || trimmed.includes('"suppressOutput"')) {
+				return
+			}
 			// Preserve script identity for multi-hook (global + workspace) scenarios.
 			// Without this, concurrent hooks interleave output and it's hard to tell which
 			// script produced which line (and can look like only one hook is printing).

@@ -69,8 +69,11 @@ export class EditFileApplier {
 				await card.update({
 					header,
 					status: CardStatus.SUCCESS,
+					toolName: card.toolName ?? "edit_file",
 					body: [prepared.diff, failureSummary].filter(Boolean).join("\n\n"),
 					renderType: "diff",
+					rawInput: { tool: "edit_file", path: batch.displayPath },
+					locations: [{ path: batch.displayPath }],
 					diffs: [
 						{
 							path: batch.displayPath,
@@ -79,6 +82,7 @@ export class EditFileApplier {
 						},
 					],
 				})
+				await card.finalize(CardStatus.SUCCESS)
 			}),
 		)
 

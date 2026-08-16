@@ -1644,6 +1644,16 @@ export class DiracAgent implements acp.Agent {
 			await this.sendAvailableCommands(params.sessionId, controller)
 			await this.setSessionTitleFromFirstExchange(session, textContent)
 
+			// Persist user input as ACP journal history so loadSession replays
+			// include user turns. Otherwise the journal is assistant-only and
+			// Paseo resumes show "Start chatting..." with no user context.
+			if (textContent.trim().length > 0) {
+				await this.emitSessionUpdate(params.sessionId, {
+					sessionUpdate: "user_message_chunk",
+					content: { type: "text", text: textContent },
+				} as acp.SessionUpdate)
+			}
+
 			const interceptedReviewResponse =
 				imageContent.length === 0 && fileResources.length === 0
 					? await handleAcpReviewCommand({
@@ -1738,25 +1748,16 @@ export class DiracAgent implements acp.Agent {
 					})
 
 					if (resumeResult === "completed") {
-						// Completed history is terminal: resumeTaskFromHistory() intentionally does
-						// not issue a resume card or wait for a response. Start a fresh task for
-						// the first new ACP prompt rather than waiting forever for that card.
-						Logger.debug("[DiracAgent] Starting a new task from completed loaded session:", taskIdToResume)
-						await controller.initTask(
-							textContent,
-							imageContent,
-							fileResources,
-							undefined,
-							undefined,
-							undefined,
-							undefined,
-							this.pinnedContextInitializationOptions(params.sessionId),
-						)
-						if (controller.task) {
-							await recordTaskForSession(params.sessionId, controller.task.taskId)
-							session.taskId = controller.task.taskId
-						}
-					} else {
+							// Preserve conversation context: completed tasks remain available for
+							// follow-ups with the same apiConversationHistory (LifecycleManager
+							// sets status=COMPLETED but still waits for the next prompt). Continue
+							// the resumed task instead of discarding its history with a fresh task.
+							Logger.debug("[DiracAgent] Continuing completed loaded session with preserved history:", taskIdToResume)
+							subscribeToCurrentTask()
+							await task.submitCardResponse("", DiracAskResponse.MESSAGE, textContent, imageContent, fileResources)
+							session.taskId = task.taskId
+							await recordTaskForSession(params.sessionId, task.taskId)
+						} else {
 						subscribeToCurrentTask()
 						await task.submitCardResponse("", DiracAskResponse.MESSAGE, textContent, imageContent, fileResources)
 					}
@@ -2220,11 +2221,35 @@ export class DiracAgent implements acp.Agent {
 		const persistedUpdates = getSessionUpdates(sessionId)
 		if (persistedUpdates.length > 0) {
 			const emitter = this.emitterForSession(sessionId)
+			const hasUserChunk = persistedUpdates.some(
+				(u) => u.kind === "session_update" && u.update.sessionUpdate === "user_message_chunk",
+			)
 			for (const persistedUpdate of persistedUpdates) {
 				if (persistedUpdate.kind === "session_update") {
 					emitter.emit(persistedUpdate.update.sessionUpdate, persistedUpdate.update)
 				} else if (persistedUpdate.kind === "client_annotation") {
 					emitter.emit("client_annotation", persistedUpdate.annotation)
+				}
+			}
+			// Backfill user chunks for old journals that only have assistant output
+			if (!hasUserChunk) {
+				const replayState: AcpSessionState = {
+					sessionId,
+					status: AcpSessionStatus.Idle,
+					pendingToolCalls: new Map(),
+				}
+				// Re-emit only user inputs interleaved in sequence order is not
+				// possible without resequencing; emit them before persisted updates'
+				// next load will be journaled. For now inject at front so at least
+				// resume shows user context above assistant history.
+				for (const m of uiMessages) {
+					if (m.content.type === DiracMessageType.MARKDOWN && m.content.role === "user" && m.content.content) {
+						emitter.emit("user_message_chunk", {
+							sessionUpdate: "user_message_chunk",
+							content: { type: "text", text: m.content.content },
+							_meta: { [SEQUENCE_META_KEY]: 0 },
+						} as unknown as acp.SessionUpdate & { _meta: Record<string, unknown> })
+					}
 				}
 			}
 
@@ -2273,11 +2298,12 @@ export class DiracAgent implements acp.Agent {
 		await bridge.restoreUsage(sessionId, uiMessages, true)
 	}
 
+	// Dirac's plan tool is a thinking/planning mode, not a Paseo workspace task.
+	// Suppress forwarding: treat Proposed Plan as body markdown like Task Completed.
 	private async emitPlanFromMessage(sessionId: string, message: DiracMessage): Promise<void> {
-		const plan = this.planFromMessage(message)
-		if (!plan) return
-
-		await this.emitSessionUpdate(sessionId, { sessionUpdate: "plan", ...plan })
+		// Intentionally no-op. See messageTranslator: Proposed Plan is suppressed there
+		// and rendered as agent_message_chunk; we don't emit sessionUpdate:"plan" -> todo.
+		void sessionId; void message;
 	}
 
 	private planFromMessage(message: DiracMessage): acp.Plan | undefined {

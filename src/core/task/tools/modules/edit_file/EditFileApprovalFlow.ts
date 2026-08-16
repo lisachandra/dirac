@@ -32,12 +32,18 @@ export class EditFileApprovalFlow {
 			const card = await env.ui.createCard({
 				header: `Apply ${totalRequestedEdits} edit(s) to ${fileSummary}?`,
 				icon: DiracIcon.FILE_EDIT,
+				toolName: DiracDefaultTool.EDIT_FILE,
 				status: CardStatus.WAITING_FOR_INPUT,
 				requireApproval: true,
 				collapsed: false,
 				renderType: "diff",
 				body: aggregatedDiffs,
 				maxHeight: 10000,
+				rawInput: { tool: DiracDefaultTool.EDIT_FILE, files: preparedBatches.map((b) => ({ path: b.displayPath, edits: b.prepared!.resolvedEdits.map((r) => r.edit) })) },
+				locations: preparedBatches.map((b) => ({ path: b.displayPath })),
+				diffs: preparedBatches
+					.filter((b) => b.prepared?.content !== undefined && b.prepared?.finalContent !== undefined)
+					.map((b) => ({ path: b.displayPath, oldText: b.prepared!.content, newText: b.prepared!.finalContent })),
 			})
 
 			const result = await card.waitForInteraction()

@@ -66,8 +66,19 @@ export class ToolHookRunner {
 			await card.finalize(CardStatus.ERROR)
 			return true
 		}
-		if (postToolResult.contextModification)
+		if (postToolResult.contextModification?.trim()) {
+			const trimmed = postToolResult.contextModification.trim()
 			this.addHookContextToConversation(postToolResult.contextModification, "PostToolUse")
+			// Surface advisory feedback (lint output, suggest-rg) as a visible ACP card.
+			// LLM still receives <hook_context>; Paseo now shows Hook: PostToolUse via messageTranslator.
+			const hookCard = await this.taskMessenger.createCard({
+				header: `Hook: PostToolUse`,
+				body: trimmed,
+				status: CardStatus.SUCCESS,
+				toolName: "hook_feedback",
+			} as any)
+			await hookCard.finalize(CardStatus.SUCCESS)
+		}
 		return false
 	}
 

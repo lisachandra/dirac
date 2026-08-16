@@ -90,8 +90,18 @@ export class ToolHookUtils {
 			// Clear the active hook execution state BEFORE calling cancelTask
 			// This prevents abortTask from trying to "cancel" an already-completed hook
 			await config.callbacks.clearActiveHookExecution()
-
-			throw new PreToolUseHookCancellationError(preToolResult.errorMessage || "PreToolUse hook requested cancellation")
+			const blockReason = preToolResult.errorMessage || "PreToolUse hook blocked this tool"
+			// Visible card so ACP surfaces "Blocked by hook" instead of a silent Other retry.
+			try {
+				const blockCard = await config.taskMessenger.createCard({
+					header: `Hook: Blocked ${block.name}`,
+					body: blockReason,
+					status: "error" as any,
+					toolName: "hook_block",
+				} as any)
+				await (blockCard as any).finalize?.("error")
+			} catch {}
+			throw new PreToolUseHookCancellationError(blockReason)
 		}
 
 		// If task was aborted (e.g., via cancel button during hook), throw cancellation error
@@ -100,8 +110,19 @@ export class ToolHookUtils {
 		}
 
 		// Add context modification to the conversation if provided by the hook
-		if (preToolResult.contextModification) {
+		if (preToolResult.contextModification?.trim()) {
 			ToolHookUtils.addHookContextToConversation(config, preToolResult.contextModification, "PreToolUse")
+			// Advisory hooks (suggest-rg) still reach the LLM, but also get a visible card.
+			const advisory = preToolResult.contextModification.trim()
+			try {
+				const advisoryCard = await config.taskMessenger.createCard({
+					header: `Hook: PreToolUse`,
+					body: advisory,
+					status: "success" as any,
+					toolName: "hook_feedback",
+				} as any)
+				await (advisoryCard as any).finalize?.("success")
+			} catch {}
 		}
 
 		return true // Hook succeeded, continue execution

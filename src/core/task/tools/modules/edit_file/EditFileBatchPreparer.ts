@@ -76,7 +76,10 @@ export class EditFileBatchPreparer {
 				cards[absolutePath] = await env.ui.createCard({
 					header: `Editing ${displayPath}${partialSuffix}`,
 					icon: DiracIcon.FILE_EDIT,
+					toolName: DiracDefaultTool.EDIT_FILE,
 					collapsed: true,
+					rawInput: { tool: DiracDefaultTool.EDIT_FILE, path: displayPath, edits: file.edits },
+					locations: [{ path: displayPath }],
 				})
 				const cardBody = [stripHashesFromDiff(prepared.diff), ...failureMessages].filter(Boolean).join("\n\n")
 				await cards[absolutePath].update({ body: cardBody })
