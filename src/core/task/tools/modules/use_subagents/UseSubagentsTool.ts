@@ -148,7 +148,8 @@ export class UseSubagentsTool implements IDiracTool {
 				const cardPromise = env.ui.createCard({
 					header: "Run Subagents",
 					icon: DiracIcon.SUBAGENTS,
-					collapsed: true,
+					collapsed: false,
+					do_not_auto_collapse: true,
 				})
 				const cardCreation = await waitForPresentationOperation(cardPromise)
 				if (cardCreation.timedOut) {
@@ -465,7 +466,8 @@ export class UseSubagentsTool implements IDiracTool {
 				try {
 					const cardPromise = env.ui.createCard({
 						header: `${entry.name}: ${request.taskTitle}`,
-						collapsed: true,
+						collapsed: false,
+						do_not_auto_collapse: true,
 						status: CardStatus.RUNNING,
 						renderType: "markdown",
 						autoScroll: true,

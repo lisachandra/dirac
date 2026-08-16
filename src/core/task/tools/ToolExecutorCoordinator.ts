@@ -110,6 +110,17 @@ export class ToolExecutorCoordinator {
 		} catch (error: any) {
 			const { PreToolUseHookCancellationError } = await import("@core/hooks/PreToolUseHookCancellationError")
 			if (error instanceof PreToolUseHookCancellationError) {
+				// Must be visible in ACP as a failed tool_call, not just LLM text
+				const reason = `Blocked by PreToolUse hook: ${error.message}`
+				try {
+					const cancelCard = await config.taskMessenger.createCard({
+						header: `Blocked: ${block.name}`,
+						body: reason,
+						status: "error" as any,
+						toolName: (block as any).name,
+					} as any)
+					await (cancelCard as any).finalize?.("error")
+				} catch {}
 				return `Cancelled by pre-tool hook: ${error.message}`
 			}
 			throw error

@@ -942,35 +942,11 @@ export class TaskMessageBridge {
 		sessionId: string,
 		message: DiracMessage,
 	): Promise<void> {
-		if (
-			message.content.type !== DiracMessageType.CARD ||
-			!isPlanResponseCard(message.content.card)
-		)
-			return;
-
-		const body = message.content.card.body;
-		if (!body) return;
-
-		const planText = this.planTextFromCard(body).trim();
-		if (!planText) return;
-
-		const numberedItems = planText
-			.split("\n")
-			.map((line) => line.trim())
-			.filter((line) => /^[-*]\s+|^\d+[.)]\s+/.test(line))
-			.map((line) => line.replace(/^[-*]\s+|^\d+[.)]\s+/, "").trim())
-			.filter(Boolean);
-		const planItems = numberedItems.length > 0 ? numberedItems : [planText];
-		const status = this.planStatusFromCard(message.content.card.status);
-
-		await this.emitSessionUpdate(sessionId, {
-			sessionUpdate: "plan",
-			entries: planItems.map((content, index) => ({
-				content,
-				priority: index === 0 ? "high" : "medium",
-				status,
-			})),
-		});
+		// No-op: Dirac's Proposed Plan is a thinking artifact, not a Paseo workspace todo.
+		// The same card is already emitted as agent_message_chunk markdown via messageTranslator,
+		// so emitting sessionUpdate:"plan" would create the duplicate checkbox you reported.
+		void sessionId;
+		void message;
 	}
 
 	private planTextFromCard(body: string): string {
@@ -1012,7 +988,15 @@ export class TaskMessageBridge {
 		const messageKey = message.ts;
 		const lastText = this.partialMessageLastContent.get(messageKey) || "";
 
-		await this.emitPlanFromMessage(sessionId, message);
+		// Dirac's Proposed Plan is a thinking artifact — do not forward as Paseo workspace todo.
+		// It is already rendered as agent_message_chunk (body markdown) via messageTranslator.
+		// Suppressing here prevents the duplicate plan->todo checkbox you reported.
+		if (
+			message.content.type === DiracMessageType.CARD &&
+			isPlanResponseCard(message.content.card as any)
+		) {
+			return false;
+		}
 
 		if (message.content.type === DiracMessageType.MARKDOWN && message.content.role === "user") {
 			if (
