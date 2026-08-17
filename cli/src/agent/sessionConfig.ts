@@ -536,7 +536,14 @@ export class SessionConfigManager {
 							? Object.keys(await refreshGithubCopilotModels()).sort((a, b) => a.localeCompare(b))
 							: []
 					}
-					if (hasStaticModels(provider)) return getModelList(provider)
+					if (hasStaticModels(provider)) {
+						let models = getModelList(provider)
+						if (provider === "openai" && process.env.DIRAC_OPENAI_ADDITIONAL_MODELS) {
+							const extra = process.env.DIRAC_OPENAI_ADDITIONAL_MODELS.split(",").map((s) => s.trim()).filter(Boolean)
+							models = [...new Set([...models, ...extra])]
+						}
+						return models
+					}
 					if (provider === "dify") return ["dify-workflow"]
 					return []
 				} catch (error) {

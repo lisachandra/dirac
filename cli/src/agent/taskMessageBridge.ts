@@ -1,7 +1,6 @@
 import type * as acp from "@agentclientprotocol/sdk";
 import type { DiracMessageChange } from "@core/task/message-state";
 import { isSuccessfulTaskCompletionCard } from "@shared/cardIdentity";
-import { isPlanResponseCard } from "@shared/responseTool";
 import { CardStatus, DiracMessage, DiracMessageType } from "@shared/ExtensionMessage";
 import { DiracAskResponse } from "@shared/WebviewMessage";
 import { Controller } from "@/core/controller";
@@ -988,15 +987,6 @@ export class TaskMessageBridge {
 		const messageKey = message.ts;
 		const lastText = this.partialMessageLastContent.get(messageKey) || "";
 
-		// Dirac's Proposed Plan is a thinking artifact — do not forward as Paseo workspace todo.
-		// It is already rendered as agent_message_chunk (body markdown) via messageTranslator.
-		// Suppressing here prevents the duplicate plan->todo checkbox you reported.
-		if (
-			message.content.type === DiracMessageType.CARD &&
-			isPlanResponseCard(message.content.card as any)
-		) {
-			return false;
-		}
 
 		if (message.content.type === DiracMessageType.MARKDOWN && message.content.role === "user") {
 			if (
