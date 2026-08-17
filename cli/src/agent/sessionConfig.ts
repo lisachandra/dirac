@@ -297,6 +297,11 @@ export class SessionConfigManager {
 			)
 		}
 
+		if (provider === "openai" && process.env.DIRAC_OPENAI_ADDITIONAL_MODELS) {
+			const extra = process.env.DIRAC_OPENAI_ADDITIONAL_MODELS.split(",").map((s) => s.trim()).filter(Boolean)
+			modelIds = [...new Set([...modelIds, ...extra])]
+		}
+
 		if (currentModelId && !modelIds.includes(currentModelId)) {
 			modelIds = [currentModelId, ...modelIds]
 		}

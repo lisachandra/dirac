@@ -1322,13 +1322,18 @@ export class DiracAgent implements acp.Agent {
 			)
 		}
 
-		// Resolve the actual taskId: check the replacement-task map first (multi-task session),
-		// then fall back to sessionId itself (the common single-task case where taskId === sessionId).
-		const resolvedTaskId = getLatestTaskIdForSession(sessionId) ?? sessionId
-
-		const persistedHistory = (StateManager.get().getGlobalStateKey("taskHistory") || []).find(
-			(item) => item.id === resolvedTaskId,
-		)
+		// Resolve the persisted task for this session. History items key the session
+		// on `ulid`, while `id` is the epoch-ms task id, so a bare `item.id ===
+		// sessionId` lookup never matches. Prefer the newest item whose ulid matches,
+		// then fall back to an id match, the replacement-task map, and finally the
+		// reserved-session path for sessions with no task yet.
+		const taskHistory = StateManager.get().getGlobalStateKey("taskHistory") || []
+		const historyMatch =
+			taskHistory
+				.filter((item) => item.ulid === sessionId)
+				.sort((a, b) => (b.ts || 0) - (a.ts || 0))[0] ?? taskHistory.find((item) => item.id === sessionId)
+		const resolvedTaskId = historyMatch?.id ?? getLatestTaskIdForSession(sessionId) ?? sessionId
+		const persistedHistory = historyMatch ?? taskHistory.find((item) => item.id === resolvedTaskId)
 
 		const ownedWorktree = getSessionWorktree(sessionId)
 		if (ownedWorktree) {
@@ -2109,6 +2114,46 @@ export class DiracAgent implements acp.Agent {
 		return this.disableProvider(params)
 	}
 
+	async unstable_setSessionModel(params: { sessionId: string; modelId: string }): Promise<void> {
+		const session = this.sessions.get(params.sessionId)
+		if (!session) {
+			throw new Error(`Session not found: ${params.sessionId}`)
+		}
+
+		const sessionOverrides = this.acpSessionOverrides.get(params.sessionId)
+		if (!sessionOverrides) throw new Error(`Session runtime configuration not found: ${params.sessionId}`)
+
+		const slashIndex = params.modelId.indexOf("/")
+		if (slashIndex === -1) {
+			throw new Error(`Invalid modelId format: ${params.modelId}. Expected "provider/modelId".`)
+		}
+
+		const parsedProvider = params.modelId.substring(0, slashIndex) as ApiProvider
+		const parsedModelId = params.modelId.substring(slashIndex + 1)
+
+		if (isValidCliProvider(parsedProvider)) {
+			// Real provider switch (e.g. "anthropic/claude-3-5-sonnet-...")
+			await this.sessionConfig.applyProviderAndModel(session, parsedProvider, parsedModelId, sessionOverrides)
+		} else {
+			// Not a recognized Dirac provider — treat the WHOLE string as the literal
+			// model id for the currently configured provider (e.g. a custom-endpoint
+			// gateway that itself routes on "vendor/model"-style names, as configured
+			// via Paseo's `additionalModels`).
+			const stateManager = StateManager.get()
+			const currentProvider = stateManager.getGlobalSettingsKey(
+				session.mode === "act" ? "actModeApiProvider" : "planModeApiProvider",
+			) as ApiProvider | undefined
+			if (!currentProvider) {
+				throw new Error("Cannot set model before a provider is configured")
+			}
+			await this.sessionConfig.applyProviderAndModel(session, currentProvider, params.modelId, sessionOverrides)
+		}
+
+		session.lastActivityAt = Date.now()
+		await StateManager.get().flushPendingState()
+		await this.emitConfigOptionsUpdate(params.sessionId)
+	}
+
 	private async publishProviderConfigChanges(): Promise<void> {
 		await Promise.all([...this.sessions.keys()].map((sessionId) => this.emitConfigOptionsUpdate(sessionId)))
 	}
@@ -2245,10 +2290,9 @@ export class DiracAgent implements acp.Agent {
 				for (const m of uiMessages) {
 					if (m.content.type === DiracMessageType.MARKDOWN && m.content.role === "user" && m.content.content) {
 						emitter.emit("user_message_chunk", {
-							sessionUpdate: "user_message_chunk",
 							content: { type: "text", text: m.content.content },
 							_meta: { [SEQUENCE_META_KEY]: 0 },
-						} as unknown as acp.SessionUpdate & { _meta: Record<string, unknown> })
+						} as any)
 					}
 				}
 			}

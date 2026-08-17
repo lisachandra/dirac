@@ -98,7 +98,7 @@ export const ALL_PROVIDERS: ApiProvider[] = [
 	"wandb",
 ]
 
-export const DEFAULT_API_PROVIDER = "openrouter" as ApiProvider
+export const DEFAULT_API_PROVIDER = "openai"
 
 export interface ApiHandlerOptions extends Partial<ApiHandlerSettings> {
 	apiProvider?: ApiProvider // Runtime provider selection (not persisted in settings)

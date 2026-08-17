@@ -1,8 +1,8 @@
 import { AutoApprovalSettings, DEFAULT_AUTO_APPROVAL_SETTINGS } from "@shared/AutoApprovalSettings"
 import {
 	ApiProvider,
-	DEFAULT_API_PROVIDER,
 	LiteLLMModelInfo,
+	DEFAULT_API_PROVIDER,
 	ModelInfo,
 	OpenAiCompatibleModelInfo,
 	ModelProviderSelection,

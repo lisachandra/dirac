@@ -11,7 +11,7 @@
 import type * as acp from "@agentclientprotocol/sdk"
 import type { DiracMessage } from "@shared/ExtensionMessage"
 import { CardStatus, DiracMessageType, isFinalStatus } from "@shared/ExtensionMessage"
-import { isPlanResponseCard, isTaskCompletionCard } from "@shared/responseTool"
+import { isPlanResponseCard } from "@shared/responseTool"
 import { CardHeader } from "@shared/cardIdentity"
 import { getBrowserActionKind } from "./browserActionTranslator.js"
 import type { AcpSessionState, TranslatedMessage } from "./types.js"

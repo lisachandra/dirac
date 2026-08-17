@@ -144,6 +144,23 @@ export function getSettingsFromEnv(): Partial<Settings> {
 		settings.minimaxApiLine = "china"
 	}
 
+	// NEW: model id for the generic OpenAI-compatible ("openai") provider,
+	// used together with OPENAI_API_BASE / OPENAI_COMPATIBLE_CUSTOM_KEY.
+	if (process.env.OPENAI_MODEL_ID) {
+		if (!process.env.OPENAI_MODEL_ID_ACT) {
+			settings.actModeOpenAiModelId = process.env.OPENAI_MODEL_ID
+		}
+		if (!process.env.OPENAI_MODEL_ID_PLAN) {
+			settings.planModeOpenAiModelId = process.env.OPENAI_MODEL_ID
+		}
+	}
+	if (process.env.OPENAI_MODEL_ID_ACT) {
+		settings.actModeOpenAiModelId = process.env.OPENAI_MODEL_ID_ACT
+	}
+	if (process.env.OPENAI_MODEL_ID_PLAN) {
+		settings.planModeOpenAiModelId = process.env.OPENAI_MODEL_ID_PLAN
+	}
+
 	Object.assign(settings, getExplicitDiracSettingsFromEnv())
 
 	return settings
