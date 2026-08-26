@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => {
 	const controllers: MockController[] = []
 
 	let resolveSubmittedResponses = true
+	let resumeParksCancelled = false
 	const conversationHistory = ["remember: established context"]
 
 	const task = {
@@ -45,7 +46,10 @@ const mocks = vi.hoisted(() => {
 		reinitExistingTaskFromId = vi.fn(async () => {
 			this.task = task
 			task.taskState.didAttemptCompletion = true
-			task.taskState.status = TaskStatus.COMPLETED
+			// Reinitialize parks the resumed task in resumeTaskFromHistory() waiting
+			// for the follow-up prompt. An interrupted transcript (e.g. daemon
+			// force-cancel) parks with status CANCELLED instead of COMPLETED.
+			task.taskState.status = resumeParksCancelled ? TaskStatus.CANCELLED : TaskStatus.COMPLETED
 		})
 		cancelTask = vi.fn(async () => {
 			this.task = task
@@ -88,6 +92,9 @@ const mocks = vi.hoisted(() => {
 		setResolveSubmittedResponses(value: boolean) {
 			resolveSubmittedResponses = value
 		},
+		setResumeParksCancelled(value: boolean) {
+			resumeParksCancelled = value
+		},
 		reset() {
 			activePromptResolver = undefined
 			controllers.splice(0)
@@ -102,6 +109,7 @@ const mocks = vi.hoisted(() => {
 			task.setApiHandler.mockClear()
 			sessionOverrideCache = {}
 			resolveSubmittedResponses = true
+			resumeParksCancelled = false
 		},
 	}
 })
@@ -266,6 +274,37 @@ describe("DiracAgent ACP conversation continuity", () => {
 		expect((agent as any).sessions.get(sessionId).awaitingCancelledTaskResume).toBe(false)
 	})
 
+	it("resumes a loaded session whose transcript parked as CANCELLED (interrupted turn)", async () => {
+		const agent = new DiracAgent({ cwd: "/tmp/workspace" })
+			; (agent as any).ctx = { extensionContext: {}, DATA_DIR: "/tmp/dirac-test-data" }
+			; (agent as any).providerConfiguration.assertProviderEnabled = vi.fn()
+			; (agent as any).sessionConfig.getSessionConfigOptions = vi.fn(async () => [])
+			; (agent as any).sessionConfig.getSessionModeState = vi.fn(() => ({ currentModeId: "act", availableModes: [] }))
+			; (agent as any).sendAvailableCommands = vi.fn(async () => undefined)
+			; (agent as any).setSessionTitleFromFirstExchange = vi.fn(async () => undefined)
+
+		// Mock a loaded session whose reinitialized task parks in CANCELLED because
+		// the transcript ended on an interrupted turn (e.g. daemon force-cancel).
+		mocks.setResumeParksCancelled(true)
+		const { sessionId } = await agent.newSession({ cwd: "/tmp/workspace", mcpServers: [] } as any)
+		const session = (agent as any).sessions.get(sessionId)
+		session.isLoadedFromHistory = true
+		session.loadedTaskId = "interrupted-task"
+		const controller = mocks.controllers[0]
+
+		await expect(
+			agent.prompt({ sessionId, prompt: [{ type: "text", text: "continue where I left off" }] } as any),
+		).resolves.toEqual({ stopReason: "end_turn" })
+
+		expect(controller.reinitExistingTaskFromId).toHaveBeenCalledWith("interrupted-task", expect.any(Object))
+		expect(mocks.task.submitCardResponse).toHaveBeenCalledWith(
+			"",
+			DiracAskResponse.MESSAGE,
+			"continue where I left off",
+			[],
+			[],
+		)
+	})
 
 	it("installs Act overrides immediately when the active prompt changes mode", async () => {
 		const agent = new DiracAgent({ cwd: "/tmp/workspace" })
