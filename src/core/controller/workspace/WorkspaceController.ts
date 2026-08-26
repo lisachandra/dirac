@@ -26,6 +26,13 @@ export class WorkspaceController {
 							stateManager: this.stateManager,
 							detectRoots: this.detectRootsFn,
 						})
+				// Hook discovery (getWorkspaceHooksDirs) reads workspaceRoots from global
+				// state, but fromLegacyCwd never persists it. Persist both fields here so
+				// CLI/ACP sessions (which always pass workspaceCwd) discover workspace hooks.
+				if (this.workspaceManager) {
+					this.stateManager.setGlobalState("workspaceRoots", this.workspaceManager.getRoots())
+					this.stateManager.setGlobalState("primaryRootIndex", this.workspaceManager.getPrimaryIndex())
+				}
 			} catch (error) {
 				Logger.error("[Controller] Failed to initialize workspace manager:", error)
 			}
