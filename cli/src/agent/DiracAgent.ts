@@ -166,6 +166,22 @@ function worktreeProvisioningRequest(params: acp.NewSessionRequest): WorktreePro
 }
 
 /**
+ * Bound an async operation so it cannot block a caller indefinitely. Used to
+ * keep ACP cancel() responsive even when the underlying task is wedged.
+ */
+function withTimeout<T>(operation: Promise<T>, ms: number, label: string): Promise<T | undefined> {
+	return Promise.race([
+		operation.then((value) => value as T | undefined),
+		new Promise<undefined>((resolve) => {
+			setTimeout(() => {
+				Logger.warn("[DiracAgent] " + label + " timed out after " + ms + "ms")
+				resolve(undefined)
+			}, ms)
+		}),
+	])
+}
+
+/**
  * Dirac's implementation of the ACP Agent interface.
  *
  * This agent bridges the ACP protocol with Dirac's core Controller,
@@ -1315,6 +1331,8 @@ export class DiracAgent implements acp.Agent {
 			sessionId,
 			status: AcpSessionStatus.Idle,
 			pendingToolCalls: new Map(),
+			emittedPlanCardIds: new Set(),
+			emittedCompletionCardIds: new Set(),
 		}
 
 		this.sessionStates.set(sessionId, sessionState)
@@ -1383,9 +1401,8 @@ export class DiracAgent implements acp.Agent {
 		// reserved-session path for sessions with no task yet.
 		const taskHistory = StateManager.get().getGlobalStateKey("taskHistory") || []
 		const historyMatch =
-			taskHistory
-				.filter((item) => item.ulid === sessionId)
-				.sort((a, b) => (b.ts || 0) - (a.ts || 0))[0] ?? taskHistory.find((item) => item.id === sessionId)
+			taskHistory.filter((item) => item.ulid === sessionId).sort((a, b) => (b.ts || 0) - (a.ts || 0))[0] ??
+			taskHistory.find((item) => item.id === sessionId)
 		const resolvedTaskId = historyMatch?.id ?? getLatestTaskIdForSession(sessionId) ?? sessionId
 		const persistedHistory = historyMatch ?? taskHistory.find((item) => item.id === resolvedTaskId)
 
@@ -1440,6 +1457,8 @@ export class DiracAgent implements acp.Agent {
 			sessionId,
 			status: AcpSessionStatus.Idle,
 			pendingToolCalls: new Map(),
+			emittedPlanCardIds: new Set(),
+			emittedCompletionCardIds: new Set(),
 		})
 		this.writeSessionRuntimeConfig(session, sessionOverrides)
 
@@ -1768,7 +1787,19 @@ export class DiracAgent implements acp.Agent {
 										isResumePromptCard(message.content.card),
 								)
 						const checkResumeState = () => {
-							if (task.taskState.status === TaskStatus.COMPLETED) return finish("completed")
+							// A loaded session resumes to a parked task regardless of how the
+							// transcript ended. LifecycleManager leaves the reinitialized task in
+							// resumeTaskFromHistory() waiting for the follow-up prompt whether the
+							// last turn finished cleanly (COMPLETED) or was interrupted/cancelled
+							// (CANCELLED). ACP has no historical resume card, so treat both parked
+							// states as a continuation point; otherwise the poll never resolves and
+							// the resumed session hangs.
+							if (
+								task.taskState.status === TaskStatus.COMPLETED ||
+								task.taskState.status === TaskStatus.CANCELLED
+							) {
+								return finish("completed")
+							}
 							if (hasResumeCard()) finish("resumed")
 						}
 						const onChanged = (change: DiracMessageChange) => {
@@ -2016,7 +2047,7 @@ export class DiracAgent implements acp.Agent {
 				const controller = this.#sessionControllers.get(session)
 				if (controller?.task) {
 					try {
-						await controller.cancelTask()
+						await withTimeout(controller.cancelTask(), 10000, "cancelTask")
 
 						// TaskController.cancelTask() recreates persisted tasks and starts their
 						// resume flow. Mark that handoff explicitly so the next ACP prompt can
@@ -2029,7 +2060,7 @@ export class DiracAgent implements acp.Agent {
 						Logger.debug("[DiracAgent] Error cancelling task:", error)
 					}
 
-					await bridge.waitForMessageWork()
+					await withTimeout(bridge.waitForMessageWork(), 5000, "waitForMessageWork")
 				}
 
 				// ACP clients retain tool calls until a terminal update arrives. Close
@@ -2327,6 +2358,8 @@ export class DiracAgent implements acp.Agent {
 					sessionId,
 					status: AcpSessionStatus.Idle,
 					pendingToolCalls: new Map(),
+					emittedPlanCardIds: new Set(),
+					emittedCompletionCardIds: new Set(),
 				}
 				// Re-emit only user inputs interleaved in sequence order is not
 				// possible without resequencing; emit them before persisted updates'
@@ -2356,6 +2389,8 @@ export class DiracAgent implements acp.Agent {
 			sessionId,
 			status: AcpSessionStatus.Idle,
 			pendingToolCalls: new Map(),
+			emittedPlanCardIds: new Set(),
+			emittedCompletionCardIds: new Set(),
 		}
 
 		for (const message of uiMessages) {
@@ -2392,7 +2427,8 @@ export class DiracAgent implements acp.Agent {
 	private async emitPlanFromMessage(sessionId: string, message: DiracMessage): Promise<void> {
 		// Intentionally no-op. See messageTranslator: Proposed Plan is suppressed there
 		// and rendered as agent_message_chunk; we don't emit sessionUpdate:"plan" -> todo.
-		void sessionId; void message;
+		void sessionId
+		void message
 	}
 
 	private planFromMessage(message: DiracMessage): acp.Plan | undefined {
