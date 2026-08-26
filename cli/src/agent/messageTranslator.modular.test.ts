@@ -57,6 +57,8 @@ function createTestSessionState(): AcpSessionState {
 		sessionId: "test-session-id",
 		status: AcpSessionStatus.Idle,
 		pendingToolCalls: new Map(),
+		emittedCompletionCardIds: new Set(),
+		emittedPlanCardIds: new Set(),
 	}
 }
 
@@ -466,6 +468,52 @@ describe("messageTranslator (Modular Architecture)", () => {
 			expect(result.permissionRequest).toBeUndefined()
 		})
 
+		it("renders follow-up questions as markdown when the client has no form elicitation", () => {
+			const result = translateMessage(
+				createCardMessage({
+					id: "question-2",
+					header: "Question: Choose a target",
+					body: "Choose a target",
+					status: CardStatus.WAITING_FOR_INPUT,
+					requireFeedback: true,
+					rawInput: responseCardInput(ResponseOperation.QUESTION, "Choose a target"),
+					actions: [
+						{ label: "Option A", value: "option-a" },
+						{ label: "Option B", value: "option-b" },
+					],
+				}),
+				sessionState,
+			)
+
+			expect(result.requiresPermission).toBe(false)
+			expect(result.updates).toHaveLength(1)
+			expect(result.updates[0].sessionUpdate).toBe("agent_message_chunk")
+			const text = (result.updates[0] as any).content.text as string
+			expect(text).toContain("Choose a target")
+			expect(text).toContain("Option A")
+			expect(text).toContain("does not support inline forms")
+		})
+
+		it("keeps follow-up questions as a tool call when the client advertises form elicitation", () => {
+			const result = translateMessage(
+				createCardMessage({
+					id: "question-3",
+					header: "Question: Choose a target",
+					body: "Choose a target",
+					status: CardStatus.WAITING_FOR_INPUT,
+					requireFeedback: true,
+					rawInput: responseCardInput(ResponseOperation.QUESTION, "Choose a target"),
+					actions: [{ label: "Option A", value: "option-a" }],
+				}),
+				sessionState,
+				{ clientCapabilities: { elicitation: { form: {} } } as any },
+			)
+
+			// Form-capable clients receive a real form via elicitation/create (in the
+			// bridge), so the translator keeps the ordinary tool-call surface.
+			expect(result.updates[0].sessionUpdate).toBe("tool_call")
+		})
+
 		it("should not create feedback permission when approval has been cleared", () => {
 			const card = {
 				id: "tool-1",
@@ -544,6 +592,60 @@ describe("messageTranslator (Modular Architecture)", () => {
 			expect(sessionState.pendingToolCalls.has(cardId)).toBe(false)
 		})
 	})
+
+		it("emits a single agent_message_chunk for a Task Completed card across add+update", () => {
+			const completionCardId = "completion-card-1"
+			const first = translateMessage(
+				createCardMessage({
+					id: completionCardId,
+					header: "Task Completed",
+					body: "Done! Here is the result.",
+					status: CardStatus.RUNNING,
+				}),
+				sessionState,
+			)
+			expect(first.updates).toHaveLength(1)
+			expect(first.updates[0].sessionUpdate).toBe("agent_message_chunk")
+			expect((first.updates[0] as any).content.text).toBe("Done! Here is the result.")
+
+			// Same card finalized: must not emit the body a second time.
+			const second = translateMessage(
+				createCardMessage({
+					id: completionCardId,
+					header: "Task Completed",
+					body: "Done! Here is the result.",
+					status: CardStatus.SUCCESS,
+				}),
+				sessionState,
+			)
+			expect(second.updates).toHaveLength(0)
+		})
+
+		it("emits Task Completed body again for a fresh completion card id", () => {
+			const first = translateMessage(
+				createCardMessage({
+					id: "completion-1",
+					header: "Task Completed",
+					body: "Result A",
+					status: CardStatus.SUCCESS,
+				}),
+				sessionState,
+			)
+			const second = translateMessage(
+				createCardMessage({
+					id: "completion-2",
+					header: "Task Completed",
+					body: "Result B",
+					status: CardStatus.SUCCESS,
+				}),
+				sessionState,
+			)
+			expect((first.updates[0] as any).content.text).toBe("Result A")
+			expect((second.updates[0] as any).content.text).toBe("Result B")
+		})
+
+
+
 
 	describe("translateMessage - API Status", () => {
 		it("should skip API_STATUS messages", () => {

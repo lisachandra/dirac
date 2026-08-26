@@ -15,6 +15,7 @@ import { CardStatus, DiracMessageType, isFinalStatus } from "@shared/ExtensionMe
 import { isPlanResponseCard } from "@shared/responseTool"
 import { CardHeader } from "@shared/cardIdentity"
 import { getBrowserActionKind } from "./browserActionTranslator.js"
+import { isFollowupQuestionCard } from "./questionCard.js"
 import type { AcpSessionState, TranslatedMessage } from "./types.js"
 import { AcpSessionStatus } from "./types.js"
 
@@ -308,6 +309,41 @@ function translateCardMessage(
 	// Task Completed and Proposed Plan outside think: render body as plain markdown.
 	// Task turn boundary (end_turn) still via checkMessageForPromptResolution.
 	const isProposedPlanBody = isPlanResponseCard(card as any)
+	// Follow-up question cards on clients without form elicitation are rendered
+	// as native markdown (like Task Completed / Proposed Plan) so the user sees
+	// the question text and options inline instead of a bare tool block. When
+	// the client negotiates `elicitation.form` the bridge answers through a
+	// first-class form, so this fallback is gated on the capability being absent.
+	const formElicitationNegotiated =
+		options?.clientCapabilities?.elicitation?.form != null
+	if (
+		!formElicitationNegotiated &&
+		isFollowupQuestionCard(message)
+	) {
+		const lines: string[] = []
+		const bodyText = typeof card.body === "string" ? card.body.trim() : ""
+		if (bodyText) lines.push(bodyText)
+		if (card.actions?.length) {
+			lines.push("")
+			lines.push("**Options:**")
+			for (const action of card.actions) {
+				lines.push(`- ${action.label}`)
+			}
+		}
+		lines.push("")
+		lines.push(
+			"*(This client does not support inline forms — provide your answer in the next prompt.)*",
+		)
+		return {
+			updates: [
+				{
+					sessionUpdate: "agent_message_chunk",
+					content: { type: "text" as const, text: lines.join("\n") },
+				} as unknown as acp.SessionUpdate,
+			],
+			requiresPermission: false,
+		}
+	}
 	if (
 		card.header === CardHeader.TASK_COMPLETED ||
 		card.header === CardHeader.LEGACY_TASK_COMPLETION ||
@@ -327,6 +363,21 @@ function translateCardMessage(
 		// The WAITING_FOR_INPUT state is still carried via TaskState/CARD for Dirac's
 		// submitCardResponse, but Paseo should show the plan inline immediately.
 		if (taskText) {
+			const isCompletionBody =
+				card.header === CardHeader.TASK_COMPLETED ||
+				card.header === CardHeader.LEGACY_TASK_COMPLETION
+			if (isCompletionBody) {
+				if (sessionState.emittedCompletionCardIds.has(card.id)) {
+					return { updates: [], requiresPermission: false }
+				}
+				sessionState.emittedCompletionCardIds.add(card.id)
+			}
+			if (isProposedPlanBody) {
+				if (sessionState.emittedPlanCardIds.has(card.id)) {
+					return { updates: [], requiresPermission: false }
+				}
+				sessionState.emittedPlanCardIds.add(card.id)
+			}
 			return {
 				updates: [
 					{
@@ -515,5 +566,7 @@ export function createSessionState(sessionId: string): AcpSessionState {
 		sessionId,
 		status: AcpSessionStatus.Idle,
 		pendingToolCalls: new Map(),
+		emittedPlanCardIds: new Set(),
+		emittedCompletionCardIds: new Set(),
 	}
 }

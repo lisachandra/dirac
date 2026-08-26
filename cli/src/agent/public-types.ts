@@ -227,6 +227,10 @@ export interface AcpSessionState {
 	autoRetryAttempts?: number
 	didAutomaticallyRetryFailedApiRequest?: boolean
 	isStreaming?: boolean
+	/** Card ids whose Proposed Plan body has already been emitted to ACP. */
+	emittedPlanCardIds: Set<string>
+	/** Card ids whose Task Completed body has already been emitted to ACP. */
+	emittedCompletionCardIds: Set<string>
 }
 
 // ============================================================
