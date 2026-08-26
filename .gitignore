@@ -64,6 +64,7 @@ tmp_*.txt
 *scratch*
 .dirac-cache
 .dirac/*
+.dirac-cache/
 
 # Scratchpad commit-message files (used to work around heredoc+backtick issues)
 COMMIT_MSG*.txt
