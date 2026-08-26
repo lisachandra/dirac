@@ -195,6 +195,8 @@ export interface ISystemTrait {
 			excludeFilePatterns?: string[]
 			debugLog?: (info: Record<string, any>) => Promise<void>
 			includeAnchors?: boolean
+			noIgnore?: boolean
+			allowedNodeModuleScopes?: string[]
 		},
 	): Promise<string>
 

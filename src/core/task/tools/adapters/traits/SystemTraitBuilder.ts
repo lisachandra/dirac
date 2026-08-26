@@ -38,6 +38,8 @@ export function buildSystemTrait(
 				options?.debugLog,
 				options?.includeAnchors,
 				() => config.context.markAnchorStateDirty(),
+				options?.noIgnore,
+				options?.allowedNodeModuleScopes,
 			)
 		},
 		getSystemInfo: async () => {

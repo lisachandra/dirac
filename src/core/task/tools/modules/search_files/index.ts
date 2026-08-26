@@ -10,6 +10,8 @@ import { IDiracTool } from "../../interfaces/IDiracTool"
 import { IToolEnvironment } from "../../interfaces/IToolEnvironment"
 import { SurfaceType } from "../../interfaces/SurfaceType"
 
+const SEARCHABLE_NODE_MODULE_SCOPES = ["@nrbx", "@rbxts", "@rbxts-js", "@lisachandra", "@isentinel", "@flamework"]
+
 export interface SearchFilesArgs {
 	paths: string[]
 	regex: string
@@ -22,6 +24,7 @@ interface SearchPathInfo {
 	absolutePath: string
 	workspaceName?: string
 	workspaceRoot?: string
+	searchIgnored?: boolean
 }
 
 interface SearchExecutionResult {
@@ -229,6 +232,28 @@ export class SearchFilesTool implements IDiracTool<SearchFilesArgs, string> {
 		return { allSearchPaths, anyUsedWorkspaceHint }
 	}
 
+	private expandNodeModuleSearchPaths(info: SearchPathInfo): SearchPathInfo[] {
+		const segments = info.absolutePath.split(path.sep)
+		const nodeModulesIndex = segments.indexOf("node_modules")
+		if (nodeModulesIndex === -1) return [info]
+
+		const scope = segments[nodeModulesIndex + 1]
+		if (scope === undefined) {
+			const base = segments.slice(0, nodeModulesIndex + 1).join(path.sep)
+			return SEARCHABLE_NODE_MODULE_SCOPES.map((scope) => ({
+				...info,
+				absolutePath: path.join(base, scope),
+				searchIgnored: true,
+			}))
+		}
+
+		if (SEARCHABLE_NODE_MODULE_SCOPES.includes(scope)) {
+			return [{ ...info, searchIgnored: true }]
+		}
+
+		return []
+	}
+
 	private async executeSearch(
 		allSearchPaths: SearchPathInfo[],
 		regex: string,
@@ -239,7 +264,23 @@ export class SearchFilesTool implements IDiracTool<SearchFilesArgs, string> {
 		includeAnchors: boolean,
 	): Promise<{ searchResults: SearchExecutionResult[]; searchDurationMs: number }> {
 		const searchStartTime = Date.now()
-		const searchPromises = allSearchPaths.map(async ({ absolutePath, workspaceName }) => {
+		const effectiveSearchPaths = allSearchPaths.flatMap((info) => this.expandNodeModuleSearchPaths(info))
+		if (effectiveSearchPaths.length === 0) {
+			const fallbackPath = allSearchPaths[0]?.absolutePath || ""
+			return {
+				searchResults: [
+					{
+						absolutePath: fallbackPath,
+						workspaceName: allSearchPaths[0]?.workspaceName,
+						workspaceResults: "Found 0 results.",
+						resultCount: 0,
+						success: true,
+					},
+				],
+				searchDurationMs: 0,
+			}
+		}
+		const searchPromises = effectiveSearchPaths.map(async ({ absolutePath, workspaceName, searchIgnored }) => {
 			if (card) {
 				await card.appendBody(`🔍 Searching in ${workspaceName || absolutePath}...\n`)
 			}
@@ -262,6 +303,8 @@ export class SearchFilesTool implements IDiracTool<SearchFilesArgs, string> {
 					contextLines,
 					excludeFilePatterns: ["!.*", "!**/.*"],
 					includeAnchors,
+					noIgnore: searchIgnored === true,
+					allowedNodeModuleScopes: searchIgnored === true ? SEARCHABLE_NODE_MODULE_SCOPES : undefined,
 				})
 
 				const firstLine = results.split("\n")[0]

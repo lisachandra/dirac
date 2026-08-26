@@ -64,6 +64,15 @@ interface FileSearchResult {
 
 const MAX_RESULTS = 30
 
+function isAllowedScopedNodeModulesPath(filePath: string, allowedScopes?: string[]): boolean {
+	if (!allowedScopes || allowedScopes.length === 0) return false
+	const parts = filePath.replace(/\\/g, "/").split("/")
+	const nodeModulesIndex = parts.indexOf("node_modules")
+	if (nodeModulesIndex === -1) return false
+	const scope = parts[nodeModulesIndex + 1]
+	return scope !== undefined && allowedScopes.includes(scope)
+}
+
 type RipgrepDebugLog = (info: Record<string, any>) => Promise<void>
 
 async function execRipgrep(args: string[], debugLog?: RipgrepDebugLog): Promise<string> {
@@ -174,6 +183,8 @@ export async function regexSearchFiles(
 	debugLog?: RipgrepDebugLog,
 	includeAnchors?: boolean,
 	onAnchorStateChanged?: () => void,
+	noIgnore?: boolean,
+	allowedNodeModuleScopes?: string[],
 ): Promise<string> {
 	// Limit context lines to 10
 	const cappedContextLines = Math.max(0, Math.min(10, contextLines || 0))
@@ -184,6 +195,9 @@ export async function regexSearchFiles(
 		}
 	}
 	args.push(directoryPath)
+	if (noIgnore) {
+		args.push("--no-ignore", "--hidden")
+	}
 	const argsDetails = {
 		info: "regexSearchFiles args",
 		args,
@@ -262,8 +276,13 @@ export async function regexSearchFiles(
 	const fileResults: FileSearchResult[] = []
 	let finalMatchCount = 0
 	for (const [filePath, lineMap] of resultsByFile.entries()) {
-		// Filter by diracIgnoreController if provided
-		if (diracIgnoreController && !diracIgnoreController.validateAccess(filePath)) {
+		// Filter by diracIgnoreController if provided. Explicitly-scoped node_modules
+		// packages are allowed through when the search targets them.
+		if (
+			diracIgnoreController &&
+			!diracIgnoreController.validateAccess(filePath) &&
+			!isAllowedScopedNodeModulesPath(filePath, allowedNodeModuleScopes)
+		) {
 			await debugLog?.({
 				info: "regexSearchFiles diracIgnore filtered file",
 				filePath,

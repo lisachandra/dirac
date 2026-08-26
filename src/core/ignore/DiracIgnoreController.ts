@@ -25,12 +25,15 @@ export class DiracIgnoreController {
 
 	private readonly cwd: string
 	private ignoreInstance: Ignore
+	private readonly defaultIgnoreInstance: Ignore
 	private fileWatcher?: IgnoreFileWatcher
 
 	constructor(cwd: string, watcherFactory: WatcherFactory = chokidar.watch) {
 		this.cwd = cwd
 		this.ignoreInstance = ignore()
 		this.ignoreInstance.add(DEFAULT_IGNORE_PATTERNS)
+		this.defaultIgnoreInstance = ignore()
+		this.defaultIgnoreInstance.add(DEFAULT_IGNORE_PATTERNS)
 		this.diracIgnoreContent = undefined
 		this.fileWatcher = new IgnoreFileWatcher(cwd, watcherFactory)
 	}
@@ -80,6 +83,17 @@ export class DiracIgnoreController {
 		} catch (_error) {
 			// ignore throws for paths outside cwd; we allow access to all files outside cwd
 			return true
+		}
+	}
+
+	/** True if `filePath` is ignored only by the built-in default patterns (not user .diracignore). */
+	isDefaultIgnoredPath(filePath: string): boolean {
+		try {
+			const absolutePath = path.resolve(this.cwd, filePath)
+			const relativePath = path.relative(this.cwd, absolutePath).toPosix()
+			return this.defaultIgnoreInstance.ignores(relativePath)
+		} catch (_error) {
+			return false
 		}
 	}
 
