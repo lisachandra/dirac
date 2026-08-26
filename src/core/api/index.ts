@@ -245,6 +245,7 @@ const PROVIDER_REGISTRY: Record<
 			})
 		}
 		return new OpenAiHandler({
+			requestTimeoutMs: cfg.requestTimeoutMs,
 			onRetryAttempt: cfg.onRetryAttempt,
 			disableRetries: cfg.disableRetries,
 			openAiApiKey: apiKey,

@@ -16,7 +16,25 @@ import { getOpenAIToolParams, ToolCallProcessor } from "../transform/tool-call-p
 import { formatOpenAiCompatibleUsage } from "../transform/openai-usage"
 import { isParallelToolCallingEnabled } from "@/utils/model-utils"
 
+/**
+ * Async-iterate `head` first, then the remainder of `iterator`. Used to splice
+ * an already-pulled first chunk back into the stream while keeping streaming of
+ * the rest intact.
+ */
+async function* withHead<T>(head: readonly T[], iterator: AsyncIterator<T>): AsyncGenerator<T> {
+	for (const item of head) {
+		yield item
+	}
+	while (true) {
+		const { value, done } = await iterator.next()
+		if (done) return
+		yield value
+	}
+}
+
 interface OpenAiHandlerOptions extends CommonApiHandlerOptions {
+	requestTimeoutMs?: number
+
 	openAiApiKey?: string
 	openAiBaseUrl?: string
 	azureApiVersion?: string
@@ -34,6 +52,43 @@ export class OpenAiHandler implements ApiHandler {
 
 	constructor(options: OpenAiHandlerOptions) {
 		this.options = options
+	}
+
+	/**
+	 * Bound the wait for the first streamed chunk. A gateway that accepts a
+	 * request for a model it cannot serve may stall the SSE stream without
+	 * emitting a chunk and without erroring. Without a deadline the turn hangs
+	 * forever, stranding the foreground turn ("A foreground turn is already
+	 * active" on retry). Surfacing the stall as an error lets the task retry or
+	 * error out and the session recover.
+	 */
+	private static readonly DEFAULT_STREAM_START_TIMEOUT_MS = 5 * 60_000
+
+	private async raceFirstChunk<T>(iterator: AsyncIterator<T>): Promise<IteratorResult<T>> {
+		const timeoutMs = this.options.requestTimeoutMs ?? OpenAiHandler.DEFAULT_STREAM_START_TIMEOUT_MS
+		if (!timeoutMs || timeoutMs <= 0) {
+			return iterator.next()
+		}
+		let timerFired = false
+		const timeout = new Promise<never>((_, reject) => {
+			setTimeout(() => {
+				timerFired = true
+				this.abortController?.abort()
+				reject(
+					new Error(
+						`OpenAI-compatible stream timed out waiting for the first chunk after ${timeoutMs}ms. ` +
+							`The configured model may not be served by this gateway or the endpoint may be unhealthy.`,
+					),
+				)
+			}, timeoutMs)
+		})
+		try {
+			return await Promise.race([iterator.next(), timeout])
+		} finally {
+			if (timerFired) {
+				this.abortController?.abort()
+			}
+		}
 	}
 
 	private shouldEnableParallelToolCalling(): boolean {
@@ -214,7 +269,13 @@ export class OpenAiHandler implements ApiHandler {
 		const toolCallProcessor = new ToolCallProcessor()
 		let stopReason: string | undefined
 
-		for await (const chunk of stream) {
+		const streamIterator = stream[Symbol.asyncIterator]()
+		const head = await this.raceFirstChunk(streamIterator)
+		const seeded = head.done
+			? ([] as OpenAI.Chat.Completions.ChatCompletionChunk[])
+			: ([head.value] as OpenAI.Chat.Completions.ChatCompletionChunk[])
+
+		for await (const chunk of withHead(seeded, streamIterator)) {
 			const delta = chunk.choices?.[0]?.delta
 			if (delta?.content) {
 				yield {
