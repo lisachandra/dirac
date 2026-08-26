@@ -27,6 +27,30 @@ const DEFAULT_IGNORE_DIRECTORIES = [
 	"*.log",
 ]
 
+// Literal directory names (no wildcards) that listFiles normally excludes. When a
+// caller explicitly targets one of these directories, we bypass those exclusions so
+// the directory contents can be listed directly instead of returning an empty list.
+const LITERAL_DEFAULT_IGNORE_DIRECTORIES = new Set<string>([
+	"node_modules",
+	"__pycache__",
+	"env",
+	"venv",
+	"target",
+	"build",
+	"dist",
+	"out",
+	"bundle",
+	"vendor",
+	"tmp",
+	"temp",
+	"deps",
+	"Pods",
+])
+
+function isTargetingDefaultIgnoredDirectory(absolutePath: string): boolean {
+	return absolutePath.split(path.sep).some((segment) => LITERAL_DEFAULT_IGNORE_DIRECTORIES.has(segment))
+}
+
 export interface FileInfo {
 	path: string
 	mtime: number
@@ -125,8 +149,8 @@ export async function listFiles(dirPath: string, recursive: boolean, limit: numb
 		dot: true, // do not ignore hidden files/directories
 		absolute: true,
 		markDirectories: true, // Append a / on any directories matched
-		gitignore: true, // globby ignores any files that are gitignored
-		ignore: ignorePatterns,
+		gitignore: !isTargetingDefaultIgnoredDirectory(absolutePath),
+		ignore: isTargetingDefaultIgnoredDirectory(absolutePath) ? [] : ignorePatterns,
 		onlyFiles: false, // include directories in results
 		suppressErrors: true,
 		stats: true,

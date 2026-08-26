@@ -98,7 +98,8 @@ export class ListFilesTool implements IDiracTool<ListFilesArgs, string> {
 				card.set(relPath, { card: fileCard, displayPath })
 			}
 			const accessAllowed = env.config.services.diracIgnoreController.validateAccess(relPath)
-			if (!accessAllowed) {
+			const isDefaultIgnored = env.config.services.diracIgnoreController.isDefaultIgnoredPath(relPath)
+			if (!accessAllowed && !isDefaultIgnored) {
 				results.push(`Access to ${relPath} is blocked by .diracignore settings.`)
 				hasError = true
 				continue

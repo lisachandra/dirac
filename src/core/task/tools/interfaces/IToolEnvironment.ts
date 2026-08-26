@@ -198,6 +198,8 @@ export interface ISystemTrait {
 			excludeFilePatterns?: string[]
 			includeAnchors?: boolean
 			signal?: AbortSignal
+			noIgnore?: boolean
+			allowedNodeModuleScopes?: string[]
 		},
 	): Promise<string>
 

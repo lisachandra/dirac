@@ -1,5 +1,7 @@
+import * as path from "node:path"
 import chokidar from "chokidar"
-import { DiracIgnorePolicy } from "@/shared/ignore/DiracIgnorePolicy"
+import ignore, { type Ignore } from "ignore"
+import { DEFAULT_IGNORE_PATTERNS, DiracIgnorePolicy } from "@/shared/ignore/DiracIgnorePolicy"
 import { Logger } from "@/shared/services/Logger"
 import { findBlockedCommandArgument } from "./CommandAccessValidator"
 import { IgnoreFileWatcher } from "./IgnoreFileWatcher"
@@ -18,11 +20,15 @@ export class DiracIgnoreController {
 	public yoloMode = false
 	diracIgnoreContent: string | undefined
 
+	private readonly cwd: string
 	private readonly ignorePolicy: DiracIgnorePolicy
+	private readonly defaultIgnoreInstance: Ignore
 	private fileWatcher?: IgnoreFileWatcher
 
 	constructor(cwd: string, watcherFactory: WatcherFactory = chokidar.watch) {
+		this.cwd = cwd
 		this.ignorePolicy = new DiracIgnorePolicy(cwd)
+		this.defaultIgnoreInstance = ignore().add(DEFAULT_IGNORE_PATTERNS)
 		this.diracIgnoreContent = undefined
 		this.fileWatcher = new IgnoreFileWatcher(cwd, watcherFactory)
 	}
@@ -50,6 +56,17 @@ export class DiracIgnoreController {
 			return this.ignorePolicy.allowsAbsolutePath(filePath)
 		} catch (_error) {
 			return true
+		}
+	}
+
+	/** True if `filePath` is ignored only by the built-in default patterns (not user .diracignore). */
+	isDefaultIgnoredPath(filePath: string): boolean {
+		try {
+			const absolutePath = path.resolve(this.cwd, filePath)
+			const relativePath = path.relative(this.cwd, absolutePath).toPosix()
+			return this.defaultIgnoreInstance.ignores(relativePath)
+		} catch (_error) {
+			return false
 		}
 	}
 

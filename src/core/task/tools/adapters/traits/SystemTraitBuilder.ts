@@ -36,6 +36,8 @@ export function buildSystemTrait(
 				options?.includeAnchors,
 				(absolutePath) => config.context.markAnchorStateDirty(absolutePath),
 				options?.signal,
+				options?.noIgnore,
+				options?.allowedNodeModuleScopes,
 			)
 		},
 		getSystemInfo: async () => {
