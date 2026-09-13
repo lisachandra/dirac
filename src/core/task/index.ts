@@ -863,6 +863,7 @@ export class Task {
 			taskState: this.taskState,
 			messageStateHandler: this.messageStateHandler,
 			api: this.api,
+			stateManager: this.stateManager,
 			taskId: this.taskId,
 			ulid: this.ulid,
 			taskMessenger: this.taskMessenger,

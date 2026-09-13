@@ -792,6 +792,7 @@ function createMockDeps(taskState: TaskState, streamHandler: StreamResponseHandl
 		ulid: "test-ulid",
 		taskId: "test-task-id",
 		getApiRequestIdSafe: () => undefined,
+		stateManager: { getGlobalSettingsKey: sinon.stub().returns(undefined) } as any,
 	}
 }
 

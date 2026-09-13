@@ -1,5 +1,6 @@
 import { ApiHandler, ApiProviderInfo } from "../../../core/api"
 import { DiffViewProvider } from "../../../integrations/editor/DiffViewProvider"
+import type { StateManager } from "../../storage/StateManager"
 import { MessageStateHandler } from "../message-state"
 import { StreamResponseHandler } from "../StreamResponseHandler"
 import { TaskMessenger } from "../TaskMessenger"
@@ -12,6 +13,7 @@ export interface ResponseProcessorDependencies {
 	taskState: TaskState
 	messageStateHandler: MessageStateHandler
 	api: ApiHandler
+	stateManager: StateManager
 	taskId: string
 	ulid: string
 	taskMessenger: TaskMessenger
