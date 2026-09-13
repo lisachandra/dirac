@@ -64,6 +64,7 @@ vi.mock("@/core/controller", () => ({
 				setApiHandler: vi.fn(),
 				applyRuntimeModeChange: vi.fn(),
 				canAcceptSteeringMessage: vi.fn(() => false),
+				submitCardResponse: vi.fn(async () => {}),
 			}
 			this.taskRunPromise = Promise.resolve()
 		})

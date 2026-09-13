@@ -1731,17 +1731,21 @@ export class DiracAgent implements acp.Agent {
 					const task = controller.task
 					const resumeResult = await new Promise<"completed" | "resumed">((resolve, reject) => {
 						let settled = false
+						let statusPoll: ReturnType<typeof setInterval> | undefined
+						let pollTimeout: ReturnType<typeof setTimeout> | undefined
 						const finish = (result: "completed" | "resumed") => {
 							if (settled) return
 							settled = true
-							clearInterval(statusPoll)
+							if (statusPoll) clearInterval(statusPoll)
+							if (pollTimeout) clearTimeout(pollTimeout)
 							task.messageStateHandler.off("diracMessagesChanged", onChanged)
 							resolve(result)
 						}
 						const onRunPromiseError = (err: unknown) => {
 							if (settled) return
 							settled = true
-							clearInterval(statusPoll)
+							if (statusPoll) clearInterval(statusPoll)
+							if (pollTimeout) clearTimeout(pollTimeout)
 							task.messageStateHandler.off("diracMessagesChanged", onChanged)
 							reject(err instanceof Error ? err : new Error(String(err)))
 						}
@@ -1778,7 +1782,12 @@ export class DiracAgent implements acp.Agent {
 								finish("resumed")
 							}
 						}
-						const statusPoll = setInterval(checkResumeState, 10)
+						statusPoll = setInterval(checkResumeState, 10)
+						pollTimeout = setTimeout(() => {
+							if (settled) return
+							Logger.warn("[DiracAgent] Loaded session resume poll timed out waiting for parked state; falling back to completed")
+							finish("completed")
+						}, 5000)
 						task.messageStateHandler.on("diracMessagesChanged", onChanged)
 						Promise.resolve(controller.taskRunPromise).catch(onRunPromiseError)
 						checkResumeState()
@@ -2012,7 +2021,7 @@ export class DiracAgent implements acp.Agent {
 				const controller = this.#sessionControllers.get(session)
 				if (controller?.task) {
 					try {
-						await withTimeout(controller.cancelTask(), 10000, "cancelTask")
+						const cancelCompleted = await withTimeout(controller.cancelTask(), 10000, "cancelTask")
 
 						// TaskController.cancelTask() recreates persisted tasks and starts their
 						// resume flow. Mark that handoff explicitly so the next ACP prompt can
@@ -2020,6 +2029,16 @@ export class DiracAgent implements acp.Agent {
 						if (controller.task) {
 							session.taskId = controller.task.taskId
 							session.awaitingCancelledTaskResume = true
+						}
+
+						// A cancelTask() that times out can leave the reinitialized task parked in
+						// LifecycleManager.resumeTaskFromHistory()'s pWaitFor(askResponse) forever:
+						// the follow-up prompt's status poll never sees COMPLETED/CANCELLED and the
+						// session hangs. Force the parked task to abort so the next prompt's
+						// submitCardResponse wakes it deterministically.
+						if (cancelCompleted === undefined && controller.task) {
+							Logger.warn("[DiracAgent] cancelTask timed out; forcing abort of reinitialized task")
+							controller.task.taskState.abort = true
 						}
 					} catch (error) {
 						Logger.debug("[DiracAgent] Error cancelling task:", error)
