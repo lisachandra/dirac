@@ -995,6 +995,12 @@ export class Task {
 	private async handleMistakeLimitReached(
 		userContent: DiracContent[],
 	): Promise<{ didEndLoop: boolean; userContent: DiracContent[] }> {
+		// Full bypass: proceed regardless of consecutive mistakes.
+		// Escape valve for CI / autonomous runs where this limit should never abort the task.
+		if (process.env.DIRAC_DISABLE_MISTAKE_LIMIT === "true") {
+			return { didEndLoop: false, userContent }
+		}
+
 		if (this.taskState.consecutiveMistakeCount < this.stateManager.getGlobalSettingsKey("maxConsecutiveMistakes")) {
 			return { didEndLoop: false, userContent }
 		}
