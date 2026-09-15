@@ -391,4 +391,26 @@ describe("SessionConfigManager task runtime behavior", () => {
 		await manager.applyModelConfigOption(s, "claude-haiku-4-5-20251001", runtime)
 		expect(runtime.actModeThinkingBudgetTokens).toBeLessThanOrEqual(63999)
 	})
+
+	it("allows arbitrary model selection for providers without fixed model pickers", async () => {
+		const manager = new SessionConfigManager()
+		const runtime: Partial<Settings> = {
+			mode: "act",
+			planActSeparateModelsSetting: false,
+			planModeApiProvider: "openai",
+			actModeApiProvider: "openai",
+			planModeOpenAiModelId: "gpt-6-astra",
+			actModeOpenAiModelId: "gpt-6-astra",
+		}
+		const customModel = "ag/gemini-3.8-flash-high"
+		const options = await manager.applyModelConfigOption(session(), customModel, runtime)
+		expect(runtime.actModeOpenAiModelId).toBe(customModel)
+		expect(runtime.planModeOpenAiModelId).toBe(customModel)
+
+		const modelOption = selectOption(options, "model")
+		expect(modelOption.currentValue).toBe(customModel)
+		expect(optionValues(modelOption)).toContain(customModel)
+
+		await expect(manager.assertTaskRuntimeAvailable(session(), runtime)).resolves.toBeUndefined()
+	})
 })

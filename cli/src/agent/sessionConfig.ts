@@ -25,7 +25,7 @@ import {
     OPENAI_REASONING_EFFORT_OPTIONS,
 } from "@/shared/storage/types"
 import { filterOpenRouterModelIds } from "@/shared/utils/model-filters"
-import { getDefaultModelId, getModelList, hasStaticModels } from "../utils/model-metadata.js"
+import { getDefaultModelId, getModelList, hasModelPicker, hasStaticModels } from "../utils/model-metadata.js"
 import { fetchOpenRouterModels, usesOpenRouterModels } from "../utils/openrouter-models"
 import { getProviderLabel, getValidCliProviders, isValidCliProvider } from "../utils/providers.js"
 import type { ProviderConfigurationManager } from "./providerConfiguration.js"
@@ -97,11 +97,11 @@ export class SessionConfigManager {
 		for (const providerValue of providers) {
 			if (!isValidCliProvider(providerValue) || !this.isProviderEnabled(providerValue)) continue
 			const provider = providerValue as ApiProvider
-			const catalog = await this.getProviderModelCatalog(provider, mode, sessionOverrides, [], true, modelCandidates)
-			if (catalog.modelIds.length === 0) continue
+				const catalog = await this.getProviderModelCatalog(provider, mode, sessionOverrides, [], true, modelCandidates)
+				if (catalog.modelIds.length === 0) continue
 
-			const currentModelId = await this.getCurrentModeModelId(mode, provider, sessionOverrides)
-			const modelId = catalog.modelIds.includes(currentModelId) ? currentModelId : catalog.defaultModelId
+				const currentModelId = await this.getCurrentModeModelId(mode, provider, sessionOverrides)
+				const modelId = catalog.modelIds.includes(currentModelId) ? currentModelId : catalog.defaultModelId
 			if (!modelId) continue
 			if (requestedProvider === provider && currentModelId === modelId) {
 				if (provider === "openrouter") {
@@ -214,15 +214,19 @@ export class SessionConfigManager {
 				currentValue: currentProvider,
 				options: providerOptions,
 			},
-			{
-				id: "model",
-				name: "Model",
-				description: "Model for the current mode",
-				type: "select",
-				category: "model",
-				currentValue: currentModelId,
-				options: currentCatalog.modelIds.map((modelId) => ({ value: modelId, name: modelId })),
-			},
+				{
+					id: "model",
+					name: "Model",
+					description: "Model for the current mode",
+					type: "select",
+					category: "model",
+					currentValue: currentModelId,
+					options: this.withCurrentSelectOption(
+						currentCatalog.modelIds.map((modelId) => ({ value: modelId, name: modelId })),
+						currentModelId,
+						currentModelId,
+					),
+				},
 			...(providerSupportsInferenceSpeed(currentProvider)
 				? [
 						{
@@ -269,18 +273,18 @@ export class SessionConfigManager {
 		const mode = this.getSessionMode(session, sessionOverrides)
 		const providerKey = mode === "act" ? "actModeApiProvider" : "planModeApiProvider"
 		const currentProvider = sessionOverrides[providerKey] as ApiProvider | undefined
-		const currentModelId = await this.getCurrentModeModelId(mode, currentProvider, sessionOverrides)
-		const modelCandidates = new Map<string, Promise<string[]>>()
-		const catalog = await this.getProviderModelCatalog(provider, mode, sessionOverrides, [], true, modelCandidates)
-		if (catalog.modelIds.length === 0 || !catalog.defaultModelId) {
-			throw new ApiConfigurationError(
-				ApiConfigurationErrorCode.ModelUnavailable,
-				`Provider ${provider} has no usable models`,
-				"Configure a model for this provider before retrying.",
-			)
-		}
+			const currentModelId = await this.getCurrentModeModelId(mode, currentProvider, sessionOverrides)
+			const modelCandidates = new Map<string, Promise<string[]>>()
+			const catalog = await this.getProviderModelCatalog(provider, mode, sessionOverrides, [], true, modelCandidates)
+			if (catalog.modelIds.length === 0 || !catalog.defaultModelId) {
+				throw new ApiConfigurationError(
+					ApiConfigurationErrorCode.ModelUnavailable,
+					`Provider ${provider} has no usable models`,
+					"Configure a model for this provider before retrying.",
+				)
+			}
 
-		const modelId = catalog.modelIds.includes(currentModelId) ? currentModelId : catalog.defaultModelId
+			const modelId = catalog.modelIds.includes(currentModelId) ? currentModelId : catalog.defaultModelId
 		await this.applyProviderAndModel(session, provider, modelId, sessionOverrides)
 		return this.getSessionConfigOptions(session, sessionOverrides, modelCandidates)
 	}
@@ -301,12 +305,13 @@ export class SessionConfigManager {
 			)
 		}
 
-		this.providerConfiguration?.assertProviderEnabled(provider)
-		const modelCandidates = new Map<string, Promise<string[]>>()
-		const catalog = await this.getProviderModelCatalog(provider, mode, sessionOverrides, [], true, modelCandidates)
-		this.assertModelAvailable(provider, modelValue, catalog.modelIds)
-		await this.applyProviderAndModel(session, provider, modelValue, sessionOverrides)
-		return this.getSessionConfigOptions(session, sessionOverrides, modelCandidates)
+			this.providerConfiguration?.assertProviderEnabled(provider)
+			const modelCandidates = new Map<string, Promise<string[]>>()
+			const extraCandidates = !hasModelPicker(provider) && modelValue.trim() ? [modelValue.trim()] : []
+			const catalog = await this.getProviderModelCatalog(provider, mode, sessionOverrides, extraCandidates, true, modelCandidates)
+			this.assertModelAvailable(provider, modelValue, catalog.modelIds)
+			await this.applyProviderAndModel(session, provider, modelValue, sessionOverrides)
+			return this.getSessionConfigOptions(session, sessionOverrides, modelCandidates)
 	}
 
 	applyReasoningEffortConfigOption(session: DiracAcpSession, effort: string, sessionOverrides: Partial<Settings>): void {
@@ -461,8 +466,9 @@ export class SessionConfigManager {
 			getValidCliProviders().map(async (providerValue) => {
 				if (!this.isProviderEnabled(providerValue)) return undefined
 				const provider = providerValue as ApiProvider
-				if (usesOpenRouterModels(provider)) return provider
-				const catalog = await this.getProviderModelCatalog(
+					if (usesOpenRouterModels(provider)) return provider
+					if (!hasModelPicker(provider)) return provider
+					const catalog = await this.getProviderModelCatalog(
 					provider,
 					mode,
 					sessionOverrides,
@@ -595,14 +601,15 @@ export class SessionConfigManager {
 		return [{ value: currentValue, name: currentName }, ...options]
 	}
 
-	private assertModelAvailable(provider: ApiProvider, modelId: string, modelIds: string[]): void {
-		if (modelIds.includes(modelId)) return
-		throw new ApiConfigurationError(
-			ApiConfigurationErrorCode.ModelUnavailable,
-			`Model ${modelId} is unavailable for provider ${provider}`,
-			"Select an available replacement model before retrying.",
-		)
-	}
+		private assertModelAvailable(provider: ApiProvider, modelId: string, modelIds: string[]): void {
+			if (!hasModelPicker(provider) && modelId.trim()) return
+			if (modelIds.includes(modelId)) return
+			throw new ApiConfigurationError(
+				ApiConfigurationErrorCode.ModelUnavailable,
+				`Model ${modelId} is unavailable for provider ${provider}`,
+				"Select an available replacement model before retrying.",
+			)
+		}
 
 	private setModeScopedSessionState(
 		currentMode: Mode,

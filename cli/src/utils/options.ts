@@ -56,18 +56,8 @@ export async function normalizeMaxConsecutiveMistakes(value?: string | number): 
 }
 
 export async function normalizeApiErrorMaxRetries(value?: string | number): Promise<number | undefined> {
-	if (value === undefined) {
-		return undefined
-	}
-
-	const parsed = typeof value === "number" ? value : Number(value)
-	if (!Number.isSafeInteger(parsed) || parsed < 0) {
-		throw new Error(
-			`Invalid API error max retries '${value}'. Expected a non-negative integer (0 = retry forever).`,
-		)
-	}
-
-	return parsed
+	// Always retry infinitely.
+	return 0
 }
 
 export async function applyTaskOptions(options: TaskOptions, workspaceRoot: string, controller: Controller): Promise<void> {
