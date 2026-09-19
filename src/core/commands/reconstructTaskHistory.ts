@@ -1,4 +1,4 @@
-import { getSavedDiracMessages, getTaskMetadata, readTaskHistoryFromState, writeTaskHistoryToState } from "@core/storage/disk"
+import { getSavedDiracMessages, getTaskMetadata, writeTaskHistoryToState } from "@core/storage/disk"
 import type { TaskMetadata } from "@core/context/context-tracking/ContextTrackerTypes"
 import { HostProvider } from "@hosts/host-provider"
 import { DiracMessage, DiracMessageType } from "@shared/ExtensionMessage"
@@ -6,7 +6,6 @@ import { HistoryItem } from "@shared/HistoryItem"
 import { ShowMessageType } from "@shared/proto/host/window"
 import { fileExistsAtPath } from "@utils/fs"
 import * as path from "path"
-import { ulid } from "ulid"
 import { getErrorMessage } from "@/shared/errors"
 import { Logger } from "@/shared/services/Logger"
 
@@ -20,9 +19,21 @@ interface TaskReconstructionResult {
 /**
  * Reconstructs task history from existing task folders
  * @param showNotifications Whether to show user-facing notifications and dialogs
+ * @param options Salvaged ULIDs and other recovery inputs
  * @returns Reconstruction result or null if cancelled
  */
-export async function reconstructTaskHistory(showNotifications = true): Promise<TaskReconstructionResult | null> {
+export type TaskHistoryReconstructionOptions = {
+	/**
+	 * ULIDs salvaged from an unparseable task history file, keyed by task id.
+	 * A ULID is the session that owns the task; an invented one hides the task from it.
+	 */
+	salvagedUlids?: Map<string, string>
+}
+
+export async function reconstructTaskHistory(
+	showNotifications = true,
+	options: TaskHistoryReconstructionOptions = {},
+): Promise<TaskReconstructionResult | null> {
 	try {
 		// Show confirmation dialog using HostProvider
 		const proceed = await HostProvider.window.showMessage({
@@ -46,7 +57,7 @@ export async function reconstructTaskHistory(showNotifications = true): Promise<
 			})
 		}
 
-		const result = await performTaskHistoryReconstruction()
+		const result = await performTaskHistoryReconstruction(options)
 
 		// Show results
 		if (showNotifications) {
@@ -78,7 +89,7 @@ export async function reconstructTaskHistory(showNotifications = true): Promise<
 	}
 }
 
-async function performTaskHistoryReconstruction(): Promise<TaskReconstructionResult> {
+async function performTaskHistoryReconstruction(options: TaskHistoryReconstructionOptions): Promise<TaskReconstructionResult> {
 	const result: TaskReconstructionResult = {
 		totalTasks: 0,
 		reconstructedTasks: 0,
@@ -110,7 +121,7 @@ async function performTaskHistoryReconstruction(): Promise<TaskReconstructionRes
 
 	for (const taskId of taskIds) {
 		try {
-			const historyItem = await reconstructTaskHistoryItem(taskId)
+			const historyItem = await reconstructTaskHistoryItem(taskId, options.salvagedUlids)
 			if (historyItem) {
 				reconstructedItems.push(historyItem)
 				result.reconstructedTasks++
@@ -133,17 +144,20 @@ async function performTaskHistoryReconstruction(): Promise<TaskReconstructionRes
 	return result
 }
 
+// Copies the raw task history file before reconstruction. That file is unparseable in exactly the
+// situation reconstruction runs in, so it is copied verbatim and never parsed here.
 async function backupExistingTaskHistory(): Promise<void> {
 	try {
-		const existingHistory = await readTaskHistoryFromState()
-		if (existingHistory.length > 0) {
-			const backupPath = path.join(HostProvider.get().globalStorageFsPath, "state", `taskHistory.backup.${Date.now()}.json`)
-
-			// Ensure state directory exists
-			const fs = await import("fs/promises")
-			await fs.mkdir(path.dirname(backupPath), { recursive: true })
-			await fs.writeFile(backupPath, JSON.stringify(existingHistory, null, 2))
+		const fs = await import("fs/promises")
+		const historyPath = path.join(HostProvider.get().globalStorageFsPath, "state", "taskHistory.json")
+		const contents = await fs.readFile(historyPath, "utf8")
+		if (contents.trim().length === 0) {
+			return
 		}
+
+		const backupPath = path.join(HostProvider.get().globalStorageFsPath, "state", `taskHistory.backup.${Date.now()}.json`)
+		await fs.mkdir(path.dirname(backupPath), { recursive: true })
+		await fs.writeFile(backupPath, contents)
 	} catch (error) {
 		// Non-fatal error, just log it
 		Logger.warn("Failed to backup existing task history:", error)
@@ -164,7 +178,10 @@ async function scanTaskDirectories(tasksDir: string): Promise<string[]> {
 	}
 }
 
-async function reconstructTaskHistoryItem(taskId: string): Promise<HistoryItem | null> {
+async function reconstructTaskHistoryItem(
+	taskId: string,
+	salvagedUlids: Map<string, string> | undefined,
+): Promise<HistoryItem | null> {
 	try {
 		// Load UI messages to extract task info
 		const diracMessages = await getSavedDiracMessages(taskId)
@@ -181,7 +198,9 @@ async function reconstructTaskHistoryItem(taskId: string): Promise<HistoryItem |
 		// Create HistoryItem
 		const historyItem: HistoryItem = {
 			id: taskId,
-			ulid: taskInfo.ulid || ulid(), // Generate new ULID if missing
+			// Session key for this task. Only a salvaged ULID preserves the owning session; the task
+			// id is a deterministic stand-in that stays resolvable, unlike a newly minted ULID.
+			ulid: salvagedUlids?.get(taskId) ?? taskId,
 			ts: taskInfo.timestamp,
 			task: taskInfo.taskDescription,
 			tokensIn: taskInfo.tokensIn,
@@ -201,7 +220,6 @@ async function reconstructTaskHistoryItem(taskId: string): Promise<HistoryItem |
 }
 
 interface TaskInfo {
-	ulid?: string
 	timestamp: number
 	taskDescription: string
 	tokensIn: number

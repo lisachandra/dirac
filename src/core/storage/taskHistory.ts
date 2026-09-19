@@ -40,18 +40,32 @@ async function parseTaskHistoryContents(filePath: string, contents: string): Pro
 		return JSON.parse(contents)
 	} catch (parseError) {
 		telemetryService.captureExtensionStorageError(parseError, "parseError_attemptingRecovery")
-		return recoverTaskHistory(filePath)
+		return recoverTaskHistory(filePath, contents)
 	}
 }
 
 // Attempts to reconstruct task history after a parse error; returns empty array if recovery fails.
-async function recoverTaskHistory(filePath: string): Promise<HistoryItem[]> {
-	const result = await reconstructTaskHistory(false)
+async function recoverTaskHistory(filePath: string, contents: string): Promise<HistoryItem[]> {
+	const result = await reconstructTaskHistory(false, { salvagedUlids: readSalvagedUlids(contents) })
 	if (!result || result.reconstructedTasks === 0) {
 		return []
 	}
 	const newContents = await fs.readFile(filePath, "utf8")
 	return JSON.parse(newContents)
+}
+
+// Salvages the id → ULID pairs from unparseable task history text. A ULID is the session that owns
+// the task, so losing it detaches the task from its session. History items are flat objects, which
+// keeps a brace-bounded scan sufficient.
+function readSalvagedUlids(contents: string): Map<string, string> {
+	const salvaged = new Map<string, string>()
+	for (const item of contents.matchAll(/\{[^{}]*"id"\s*:\s*"(\d+)"[^{}]*\}/g)) {
+		const ulidMatch = /"ulid"\s*:\s*"([^"]+)"/.exec(item[0])
+		if (ulidMatch) {
+			salvaged.set(item[1], ulidMatch[1])
+		}
+	}
+	return salvaged
 }
 
 // Atomically writes task history items to the state file.
