@@ -19,9 +19,10 @@ function writeSessionTasksMap(map: Record<string, string[]>): void {
 }
 
 /**
- * Append a replacement taskId for an ACP session into the persistent map.
- * Called only when a second (or later) task is started within a session,
- * i.e. after a terminal failure caused a fresh initTask.
+ * Append a taskId for an ACP session into the persistent map.
+ * Called when a second (or later) task is started within a session, i.e. after a
+ * terminal failure caused a fresh initTask, and when a session's task is recovered
+ * from its runtime configuration after the session-to-task mapping was lost.
  */
 export async function recordTaskForSession(sessionId: string, taskId: string): Promise<void> {
 	const map = readSessionTasksMap()

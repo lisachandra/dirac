@@ -23,23 +23,23 @@ type SessionUpdateWithMeta = acp.SessionUpdate & { _meta?: Record<string, unknow
 
 export type PersistedSessionUpdate =
 	| {
-			kind: "session_update"
-			sequenceNumber: number
-			update: SessionUpdateWithMeta
-	  }
+		kind: "session_update"
+		sequenceNumber: number
+		update: SessionUpdateWithMeta
+	}
 	| {
-			kind: "client_annotation"
-			sequenceNumber: number
-			annotation: Record<string, unknown>
-	  }
+		kind: "client_annotation"
+		sequenceNumber: number
+		annotation: Record<string, unknown>
+	}
 
 type LegacyPersistedSessionUpdate =
 	| PersistedSessionUpdate
 	| {
-			kind: "usage_update"
-			sequenceNumber: number
-			usage: Record<string, unknown>
-	  }
+		kind: "usage_update"
+		sequenceNumber: number
+		usage: Record<string, unknown>
+	}
 
 type LegacySessionUpdatesMap = Record<string, LegacyPersistedSessionUpdate[]>
 
@@ -83,7 +83,7 @@ function malformedJournalError(filePath: string, error: unknown): Error {
 	const detail = error instanceof Error ? error.message : String(error)
 	return new Error(
 		`Malformed ACP session update journal at ${filePath}: ${detail}. ` +
-			"Dirac will not overwrite or reset this file; move it aside for recovery or repair the JSON before retrying.",
+		"Dirac will not overwrite or reset this file; move it aside for recovery or repair the JSON before retrying.",
 	)
 }
 
@@ -649,6 +649,115 @@ export function getSessionUpdates(sessionId: string): PersistedSessionUpdate[] {
 		return readJournalEntries(filePath)
 	})
 }
+
+/** Update kinds whose payload is a cumulative snapshot: only the newest one describes the session. */
+const SNAPSHOT_UPDATE_KINDS = new Set([
+	"available_commands_update",
+	"config_option_update",
+	"current_mode_update",
+	"session_info_update",
+	"usage_update",
+])
+
+/** Update kinds that append streamed text to the message identified by `messageId`. */
+const TEXT_CHUNK_UPDATE_KINDS = new Set(["agent_message_chunk", "agent_thought_chunk"])
+
+type SessionUpdateEntry = Extract<PersistedSessionUpdate, { kind: "session_update" }>
+
+type StreamedMessageIdentity = { sessionUpdate: string; messageId: string | null }
+
+function streamedMessageIdentity(update: SessionUpdateWithMeta): StreamedMessageIdentity | undefined {
+	const sessionUpdate = update.sessionUpdate
+	if (!TEXT_CHUNK_UPDATE_KINDS.has(sessionUpdate)) return undefined
+	const messageId = (update as { messageId?: unknown }).messageId
+	return { sessionUpdate, messageId: typeof messageId === "string" ? messageId : null }
+}
+
+function streamedText(update: SessionUpdateWithMeta): string | undefined {
+	const content = (update as { content?: { type?: unknown; text?: unknown } }).content
+	return content?.type === "text" && typeof content.text === "string" ? content.text : undefined
+}
+
+/** Key whose intermediate versions can be dropped: snapshot kinds and per-tool updates. */
+function supersedableKey(entry: SessionUpdateEntry): string | undefined {
+	const { update } = entry
+	if (SNAPSHOT_UPDATE_KINDS.has(update.sessionUpdate)) return `kind:${update.sessionUpdate}`
+	if (update.sessionUpdate !== "tool_call_update") return undefined
+	const toolCallId = (update as { toolCallId?: unknown }).toolCallId
+	return typeof toolCallId === "string" ? `tool:${toolCallId}` : undefined
+}
+
+function mergeStreamedChunks(
+	previous: SessionUpdateEntry,
+	entry: SessionUpdateEntry,
+): SessionUpdateEntry | undefined {
+	const previousIdentity = streamedMessageIdentity(previous.update)
+	const identity = streamedMessageIdentity(entry.update)
+	if (!previousIdentity || !identity) return undefined
+	if (previousIdentity.sessionUpdate !== identity.sessionUpdate) return undefined
+	if (previousIdentity.messageId !== identity.messageId) return undefined
+
+	const previousText = streamedText(previous.update)
+	const text = streamedText(entry.update)
+	if (previousText === undefined || text === undefined) return undefined
+
+	return {
+		...entry,
+		update: {
+			...entry.update,
+			content: { type: "text", text: `${previousText}${text}` },
+		} as SessionUpdateWithMeta,
+	}
+}
+
+/**
+ * Collapse a persisted journal into the updates that still describe the session.
+ *
+ * The journal is append-only, so it holds every intermediate streamed chunk and
+ * every superseded tool or usage snapshot. Replaying it verbatim costs one client
+ * notification and one client timeline write per intermediate state, which is what
+ * makes reopening a large session slow. Replay only needs the final state of each
+ * streamed message, tool call, and snapshot.
+ */
+export function compactSessionUpdatesForReplay(
+	entries: PersistedSessionUpdate[],
+): PersistedSessionUpdate[] {
+	const lastIndexByKey = new Map<string, number>()
+
+	for (let index = 0; index < entries.length; index += 1) {
+		const entry = entries[index]
+		if (!entry || entry.kind !== "session_update") continue
+		const key = supersedableKey(entry)
+		if (key !== undefined) lastIndexByKey.set(key, index)
+	}
+
+	const compacted: PersistedSessionUpdate[] = []
+	for (let index = 0; index < entries.length; index += 1) {
+		const entry = entries[index]
+		if (!entry) continue
+		if (entry.kind !== "session_update") {
+			compacted.push(entry)
+			continue
+		}
+
+		const key = supersedableKey(entry)
+		if (key !== undefined && lastIndexByKey.get(key) !== index) continue
+
+		const previous = compacted[compacted.length - 1]
+		if (previous?.kind === "session_update") {
+			const merged = mergeStreamedChunks(previous, entry)
+			if (merged) {
+				compacted[compacted.length - 1] = merged
+				continue
+			}
+		}
+
+		compacted.push(entry)
+	}
+
+	return compacted
+}
+
 
 /** Remove the complete ACP update journal for a deleted session. */
 export function deleteSessionUpdates(sessionId: string): void {

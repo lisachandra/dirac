@@ -205,6 +205,7 @@ function translateMarkdownMessage(
 		if (text) {
 			updates.push({
 				sessionUpdate: "agent_thought_chunk",
+				messageId: message.id,
 				content: { type: "text", text },
 			})
 		}
@@ -216,6 +217,7 @@ function translateMarkdownMessage(
 		if (text) {
 			updates.push({
 				sessionUpdate: "agent_message_chunk",
+				messageId: message.id,
 				content: { type: "text", text: "\n" + text },
 			})
 		}
@@ -356,7 +358,7 @@ function translateCardMessage(
 				if (typeof parsed.response === "string" && parsed.response.trim()) {
 					taskText = parsed.response.trim()
 				}
-			} catch {}
+			} catch { }
 		}
 		// Proposed Plan is always body markdown — never a Paseo todo/plan checkbox.
 		// The WAITING_FOR_INPUT state is still carried via TaskState/CARD for Dirac's
@@ -406,7 +408,7 @@ function translateCardMessage(
 					return { updates: [], requiresPermission: false }
 				}
 			}
-		} catch {}
+		} catch { }
 		// Falls through only if hook carried advisory/error payload
 	}
 	const toolCallId = card.id

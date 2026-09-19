@@ -5,6 +5,7 @@ import { CardStatus, DiracMessage, DiracMessageType } from "@shared/ExtensionMes
 import { DiracAskResponse } from "@shared/WebviewMessage";
 import { Controller } from "@/core/controller";
 import { Logger } from "@/shared/services/Logger.js";
+import { collapseHistoryMessages } from "./historyReplay.js";
 import {
 	parseWebSearchMarkerText,
 	translateMessage,
@@ -426,10 +427,11 @@ export class TaskMessageBridge {
 	): Promise<void> {
 		await this.queueMessageWork(
 			async () => {
-				const messages =
+				const messages = collapseHistoryMessages(
 					controller.task?.messageStateHandler
 						.getDiracMessages()
-						.slice(startIndex, endIndex) ?? [];
+						.slice(startIndex, endIndex) ?? [],
+				);
 
 				for (const message of messages) {
 					const handledInlineInteraction = await this.processMessageWithDelta(
@@ -1035,6 +1037,7 @@ export class TaskMessageBridge {
 			if (textDelta) {
 				await this.emitSessionUpdate(sessionId, {
 					sessionUpdate,
+					messageId: message.id,
 					content: {
 						type: "text",
 						text: needsNewline ? `\n${textDelta}` : textDelta,

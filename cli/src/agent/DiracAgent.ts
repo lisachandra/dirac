@@ -56,6 +56,7 @@ import {
 	pinSessionMessage,
 	unpinSessionMessage,
 } from "../acp/acp-session-pins.js"
+import { resolveTaskIdFromRuntimeConfig } from "../acp/acp-session-recovery.js"
 import {
 	copyTaskRuntimeSettings,
 	deleteSessionRuntimeConfig,
@@ -65,6 +66,7 @@ import {
 } from "../acp/acp-session-runtime-config.js"
 import { deleteTasksForSession, getLatestTaskIdForSession, recordTaskForSession } from "../acp/acp-session-tasks.js"
 import {
+	compactSessionUpdatesForReplay,
 	deleteSessionUpdates,
 	getSessionUpdates,
 	recordClientAnnotation,
@@ -553,9 +555,9 @@ export class DiracAgent implements acp.Agent {
 	private applyPinnedContext(
 		task:
 			| {
-					taskState: { pinnedContext?: string }
-					setContextCompactionObserver: (observer: () => void) => void
-			  }
+				taskState: { pinnedContext?: string }
+				setContextCompactionObserver: (observer: () => void) => void
+			}
 			| undefined,
 		sessionId: string,
 	): void {
@@ -708,7 +710,7 @@ export class DiracAgent implements acp.Agent {
 
 		for (const key of TASK_RUNTIME_SETTINGS_KEYS) {
 			const systemDefault = stateManager.getSystemDefaultSettingsKey(key)
-			;(effectiveDefaults as Record<keyof Settings, unknown>)[key] = systemDefault ?? environmentSettings[key]
+				; (effectiveDefaults as Record<keyof Settings, unknown>)[key] = systemDefault ?? environmentSettings[key]
 		}
 		Object.assign(effectiveDefaults, getExplicitDiracSettingsFromEnv())
 		const environmentProvider = getProviderFromEnv()
@@ -747,13 +749,13 @@ export class DiracAgent implements acp.Agent {
 					runtimeValues[modelInfoKey] ||= structuredClone(profile.modelInfo)
 				}
 			}
-			;(overrides as Record<string, unknown>)[modelKey] =
+			; (overrides as Record<string, unknown>)[modelKey] =
 				(overrides[modelKey] as string | undefined) || getDefaultModelId(defaultProvider)
 
 			const thinkingKey = mode === "act" ? "actModeThinkingBudgetTokens" : "planModeThinkingBudgetTokens"
 			const reasoningKey = mode === "act" ? "actModeReasoningEffort" : "planModeReasoningEffort"
-			;(overrides as Record<string, unknown>)[thinkingKey] ??= 0
-			;(overrides as Record<string, unknown>)[reasoningKey] ??= "medium"
+				; (overrides as Record<string, unknown>)[thinkingKey] ??= 0
+				; (overrides as Record<string, unknown>)[reasoningKey] ??= "medium"
 		}
 
 		if (model) {
@@ -773,9 +775,9 @@ export class DiracAgent implements acp.Agent {
 
 			const modes = overrides.planActSeparateModelsSetting ? [overrides.mode] : (["plan", "act"] as const)
 			for (const mode of modes) {
-				;(overrides as Record<string, unknown>)[mode === "act" ? "actModeApiProvider" : "planModeApiProvider"] =
+				; (overrides as Record<string, unknown>)[mode === "act" ? "actModeApiProvider" : "planModeApiProvider"] =
 					targetProvider
-				;(overrides as Record<string, unknown>)[getProviderModelIdKey(targetProvider, mode)] = model
+					; (overrides as Record<string, unknown>)[getProviderModelIdKey(targetProvider, mode)] = model
 				const modelInfoKey = getProviderModelInfoKey(targetProvider, mode)
 				if (modelInfoKey) overrides[modelInfoKey] = undefined
 				if (provider?.startsWith("http://") || provider?.startsWith("https://")) {
@@ -1292,14 +1294,14 @@ export class DiracAgent implements acp.Agent {
 			configOptions,
 			...(worktree
 				? {
-						_meta: {
-							"dev.dirac/worktree": {
-								path: worktree.worktreePath,
-								branch: worktree.branch,
-								...(worktree.targetBranch ? { targetBranch: worktree.targetBranch } : {}),
-							},
+					_meta: {
+						"dev.dirac/worktree": {
+							path: worktree.worktreePath,
+							branch: worktree.branch,
+							...(worktree.targetBranch ? { targetBranch: worktree.targetBranch } : {}),
 						},
-					}
+					},
+				}
 				: {}),
 		}
 	}
@@ -1344,14 +1346,24 @@ export class DiracAgent implements acp.Agent {
 		// Resolve the persisted task for this session. History items key the session
 		// on `ulid`, while `id` is the epoch-ms task id, so a bare `item.id ===
 		// sessionId` lookup never matches. Prefer the newest item whose ulid matches,
-		// then fall back to an id match, the replacement-task map, and finally the
-		// reserved-session path for sessions with no task yet.
+		// then fall back to an id match, the replacement-task map, the task this session
+		// started, and finally the reserved-session path for sessions with no task.
 		const taskHistory = StateManager.get().getGlobalStateKey("taskHistory") || []
 		const historyMatch =
 			taskHistory.filter((item) => item.ulid === sessionId).sort((a, b) => (b.ts || 0) - (a.ts || 0))[0] ??
 			taskHistory.find((item) => item.id === sessionId)
-		const resolvedTaskId = historyMatch?.id ?? getLatestTaskIdForSession(sessionId) ?? sessionId
+		const recordedTaskId = getLatestTaskIdForSession(sessionId)
+		// Resolving from the runtime config costs a directory scan, so only pay it when neither history
+		// nor the replacement map already identifies the task.
+		const recoveredTaskId =
+			historyMatch || recordedTaskId ? undefined : resolveTaskIdFromRuntimeConfig(sessionId)
+		if (recoveredTaskId) {
+			// Persist it so later loads resolve the task directly instead of scanning for it.
+			await recordTaskForSession(sessionId, recoveredTaskId)
+		}
+		const resolvedTaskId = historyMatch?.id ?? recordedTaskId ?? recoveredTaskId ?? sessionId
 		const persistedHistory = historyMatch ?? taskHistory.find((item) => item.id === resolvedTaskId)
+		const resumeTaskId = persistedHistory || recoveredTaskId ? resolvedTaskId : undefined
 
 		const ownedWorktree = getSessionWorktree(sessionId)
 		if (ownedWorktree) {
@@ -1381,11 +1393,11 @@ export class DiracAgent implements acp.Agent {
 			mode: persistedMode,
 			createdAt: persistedRuntimeConfig.createdAt ?? Date.now(),
 			lastActivityAt: Date.now(),
-			...(persistedHistory
+			...(resumeTaskId
 				? {
-						isLoadedFromHistory: true,
-						loadedTaskId: resolvedTaskId,
-					}
+					isLoadedFromHistory: true,
+					loadedTaskId: resumeTaskId,
+				}
 				: { reservedTaskId: sessionId }),
 		}
 		const sessionOverrides = copyTaskRuntimeSettings(persistedRuntimeConfig.settings)
@@ -1397,7 +1409,7 @@ export class DiracAgent implements acp.Agent {
 			swapSessionOverrides(savedOverrides)
 		}
 
-		if (persistedHistory) {
+		if (resumeTaskId) {
 			const savedTaskOverrides = swapSessionOverrides(sessionOverrides)
 			try {
 				await controller.getTaskWithId(resolvedTaskId)
@@ -1682,12 +1694,12 @@ export class DiracAgent implements acp.Agent {
 			const interceptedReviewResponse =
 				imageContent.length === 0 && fileResources.length === 0
 					? await handleAcpReviewCommand({
-							commandText: textContent,
-							controller,
-							sessionId: params.sessionId,
-							cwd: session.cwd,
-							emitSessionUpdate: this.emitSessionUpdate.bind(this),
-						})
+						commandText: textContent,
+						controller,
+						sessionId: params.sessionId,
+						cwd: session.cwd,
+						emitSessionUpdate: this.emitSessionUpdate.bind(this),
+					})
 					: null
 
 			if (interceptedReviewResponse) {
@@ -1815,13 +1827,13 @@ export class DiracAgent implements acp.Agent {
 				const waitingCardId = controller.task.taskState.lastWaitingCardId
 				const waitingCard = waitingCardId
 					? controller.task.messageStateHandler
-							.getDiracMessages()
-							.find(
-								(message) =>
-									message.content.type === DiracMessageType.CARD &&
-									message.content.card.id === waitingCardId &&
-									message.content.card.status === CardStatus.WAITING_FOR_INPUT,
-							)
+						.getDiracMessages()
+						.find(
+							(message) =>
+								message.content.type === DiracMessageType.CARD &&
+								message.content.card.id === waitingCardId &&
+								message.content.card.status === CardStatus.WAITING_FOR_INPUT,
+						)
 					: undefined
 
 				if (waitingCard) {
@@ -2314,7 +2326,7 @@ export class DiracAgent implements acp.Agent {
 		}
 
 		const bridge = this.bridgeForSession(sessionId)
-		const persistedUpdates = getSessionUpdates(sessionId)
+		const persistedUpdates = compactSessionUpdatesForReplay(getSessionUpdates(sessionId))
 		if (persistedUpdates.length > 0) {
 			const emitter = this.emitterForSession(sessionId)
 			const hasUserChunk = persistedUpdates.some(
