@@ -9,7 +9,7 @@ import type { Anthropic } from "@anthropic-ai/sdk"
 import { removeLegacySynthetic1mModelEntries } from "@shared/storage/legacy-model-id-migration"
 
 export class TaskHistoryController {
-	constructor(private readonly stateManager: import("@core/storage/StateManager").StateManager) {}
+	constructor(private readonly stateManager: import("@core/storage/StateManager").StateManager) { }
 
 	async readOpenRouterModels(): Promise<Record<string, import("@shared/api").ModelInfo> | undefined> {
 		const openRouterModelsFilePath = path.join(await ensureCacheDirectoryExists(), GlobalFileNames.openRouterModels)
@@ -56,7 +56,8 @@ export class TaskHistoryController {
 				}
 			}
 		}
-		await this.deleteTaskFromState(id)
+		// Reading must not mutate history: a damaged or missing task file has to stay visible so the
+		// task can be repaired or deleted deliberately, not dropped as a side effect of opening it.
 		throw new Error("Task not found")
 	}
 
