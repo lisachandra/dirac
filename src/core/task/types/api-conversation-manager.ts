@@ -1,7 +1,7 @@
 import { DiracContent } from "@shared/messages/content"
 import { SkillMetadata } from "@shared/skills"
 import type { SlashCommandDirectAction } from "@core/slash-commands"
-import type { LocalConversationCompactionSource } from "../LocalConversationCompaction"
+import type { LocalConversationCompactionOutcome, LocalConversationCompactionSource } from "../LocalConversationCompaction"
 import { ApiHandler, ApiProviderInfo } from "../../../core/api"
 import { DiffViewProvider } from "../../../integrations/editor/DiffViewProvider"
 import { ContextManager } from "../../context/context-management/ContextManager"
@@ -51,7 +51,7 @@ export interface ApiConversationManagerDependencies {
 	cancelTask: () => Promise<void>
 	getPinnedContext?: () => string | undefined
 	onContextCompacted?: () => void
-	runLocalConversationCompaction: (source: LocalConversationCompactionSource) => Promise<string | undefined>
+	runLocalConversationCompaction: (source: LocalConversationCompactionSource) => Promise<LocalConversationCompactionOutcome>
 	setActiveHookExecution: (hookExecution: HookExecution | undefined) => Promise<void>
 	clearActiveHookExecution: () => Promise<void>
 

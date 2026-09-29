@@ -255,7 +255,7 @@ describe("ApiConversationManager steering delivery", () => {
 
 	it("consumes a condensation command even when local condensation cannot continue", async () => {
 		const addToApiConversationHistory = sinon.stub().resolves()
-		const runLocalConversationCompaction = sinon.stub().resolves(undefined)
+		const runLocalConversationCompaction = sinon.stub().resolves({ status: "cancelled" })
 		const manager = new ApiConversationManager({
 			taskState: new TaskState(),
 			runUserPromptSubmitHook: sinon.stub().resolves({}),
@@ -277,6 +277,7 @@ describe("ApiConversationManager steering delivery", () => {
 
 		assert.equal(runLocalConversationCompaction.callCount, 1)
 		assert.equal(result.didConsumeUserContent, true)
+		assert.match(result.directResponseText ?? "", /cancelled/)
 		assert.equal(addToApiConversationHistory.callCount, 0)
 	})
 

@@ -131,6 +131,48 @@ describe("AcpAgent", () => {
 		expect(mocks.diracAgentInstance.publishSessionSetupUpdates).toHaveBeenCalledTimes(1)
 	})
 
+	it("flushes queued session updates before the prompt response resolves", async () => {
+		const emitter = new EventEmitter()
+		mocks.diracAgentInstance.emitterForSession.mockReturnValue(emitter)
+		const agent = new AcpAgent(connection, {})
+
+		let releaseChunk!: () => void
+		const chunkFlushed = new Promise<void>((resolve) => {
+			releaseChunk = resolve
+		})
+		const order: string[] = []
+		connection.sessionUpdate.mockImplementation(async () => {
+			await chunkFlushed
+			order.push("chunk-flushed")
+		})
+		mocks.diracAgentInstance.prompt.mockImplementation(async () => {
+			// The final completion chunk is emitted while the turn is still running.
+			emitter.emit("agent_message_chunk", { content: { type: "text", text: "final answer" } })
+			order.push("prompt-returned")
+			return { stopReason: "end_turn" }
+		})
+
+		await agent.newSession({ cwd: "/tmp/workspace", mcpServers: [] })
+		const promptPromise = agent.prompt({
+			sessionId: "session-1",
+			prompt: [{ type: "text", text: "hello" }],
+		} as any)
+
+		let settled = false
+		void promptPromise.then(() => {
+			settled = true
+		})
+		await new Promise((resolve) => setTimeout(resolve, 0))
+		// The completion chunk is still in flight; the turn must not end first,
+		// or the client closes it and the tail of Task Completed is lost.
+		expect(settled).toBe(false)
+
+		releaseChunk()
+		await expect(promptPromise).resolves.toEqual({ stopReason: "end_turn" })
+		expect(order).toEqual(["prompt-returned", "chunk-flushed"])
+	})
+
+
 	it("disconnects a transport without shutting down its shared DiracAgent", async () => {
 		const emitter = new EventEmitter()
 		mocks.diracAgentInstance.emitterForSession.mockReturnValue(emitter)
@@ -249,7 +291,9 @@ describe("AcpAgent", () => {
 		expect(mocks.diracAgentInstance.replayLoadedSessionHistory).toHaveBeenCalledWith("session-1")
 
 		await vi.runAllTimersAsync()
-		expect(mocks.callOrder).toEqual(["subscribe", "replay", "publish", "publish"])
+		// Setup updates are published exactly once per session: the in-flight
+		// dedup collapses the scheduled publication with any ensure() call.
+		expect(mocks.callOrder).toEqual(["subscribe", "replay", "publish"])
 		expect(mocks.diracAgentInstance.publishSessionSetupUpdates).toHaveBeenCalledWith("session-1")
 	})
 

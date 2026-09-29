@@ -21,6 +21,7 @@ import { isResumePromptCard } from "@shared/cardIdentity"
 import type { DiracMessage } from "@shared/ExtensionMessage"
 import { CardStatus, DiracMessageType, TaskStatus } from "@shared/ExtensionMessage"
 import { isPlanResponseCard } from "@shared/responseTool"
+import { taskInitializationTimeout } from "@shared/taskInitialization"
 import { CLI_ONLY_COMMANDS, VSCODE_ONLY_COMMANDS } from "@shared/slashCommands"
 import { getExplicitDiracSettingsFromEnv, getProviderFromEnv, getSettingsFromEnv } from "@shared/storage/env-config"
 import { getProviderModelIdKey, getProviderModelInfoKey } from "@shared/storage/provider-keys"
@@ -158,14 +159,20 @@ function worktreeProvisioningRequest(params: acp.NewSessionRequest): WorktreePro
 /**
  * Bound an async operation so it cannot block a caller indefinitely. Used to
  * keep ACP cancel() responsive even when the underlying task is wedged.
+ *
+ * Timeout is reported with a distinct sentinel because the wrapped operation
+ * may legitimately resolve to `undefined` (e.g. `Promise<void>`); conflating the
+ * two would make a completed cancel look like a timed-out one to every caller.
  */
-function withTimeout<T>(operation: Promise<T>, ms: number, label: string): Promise<T | undefined> {
+const OPERATION_TIMED_OUT = Symbol("operationTimedOut")
+
+function withTimeout<T>(operation: Promise<T>, ms: number, label: string): Promise<T | typeof OPERATION_TIMED_OUT> {
 	return Promise.race([
-		operation.then((value) => value as T | undefined),
-		new Promise<undefined>((resolve) => {
+		operation,
+		new Promise<typeof OPERATION_TIMED_OUT>((resolve) => {
 			setTimeout(() => {
-				Logger.warn("[DiracAgent] " + label + " timed out after " + ms + "ms")
-				resolve(undefined)
+				Logger.warn(`[DiracAgent] ${label} timed out after ${ms}ms`)
+				resolve(OPERATION_TIMED_OUT)
 			}, ms)
 		}),
 	])
@@ -1864,33 +1871,33 @@ export class DiracAgent implements acp.Agent {
 						fileResources,
 					)
 				} else {
-					Logger.debug("[DiracAgent] Starting new task (active task cannot accept a follow-up)")
-					await controller.initTask(
-						textContent,
-						imageContent,
-						fileResources,
-						undefined,
-						undefined,
-						undefined,
-						undefined,
+					// The live task cannot accept a follow-up because its previous turn was
+					// cancelled mid-flight. Rehydrate that task's persisted history so this prompt
+					// continues the same API conversation instead of discarding it by starting a
+					// new task.
+					const unreachableTask = controller.task
+					Logger.debug("[DiracAgent] Rehydrating live task for follow-up:", unreachableTask.taskId)
+					await controller.reinitExistingTaskFromId(
+						unreachableTask.taskId,
 						this.pinnedContextInitializationOptions(params.sessionId),
 					)
-					if (controller.task) {
-						await recordTaskForSession(params.sessionId, controller.task.taskId)
-						session.taskId = controller.task.taskId
-						const replayEndIndex = controller.task.messageStateHandler.getDiracMessages().length
-						subscribeToCurrentTask()
-						await bridge.replayTaskMessages(
-							controller,
-							params.sessionId,
-							sessionState,
-							resolvePrompt!,
-							rejectPrompt!,
-							promptResolved,
-							0,
-							replayEndIndex,
+					if (!controller.task || controller.task === unreachableTask) {
+						throw new Error(
+							`Task ${unreachableTask.taskId} cannot accept a follow-up and has no persisted history to resume`,
 						)
 					}
+					const resumedTask = controller.task
+					// Rehydration is disk-bound and scales with transcript size. A short budget
+					// here rejects the turn, and the next request re-enters this branch and
+					// restarts the same wait, livelocking the session instead of recovering it.
+					await pWaitFor(() => resumedTask.taskState.isInitialized === true, {
+						timeout: taskInitializationTimeout(resumedTask.taskId),
+					})
+					session.taskId = resumedTask.taskId
+					await recordTaskForSession(params.sessionId, resumedTask.taskId)
+					await this.bindPromptTask(params.sessionId, resumedTask)
+					subscribeToCurrentTask()
+					await resumedTask.submitCardResponse("", DiracAskResponse.MESSAGE, textContent, imageContent, fileResources)
 				}
 			} else {
 				// Start new task — consume reservedTaskId (sessionId) so the task's taskId
@@ -2036,11 +2043,12 @@ export class DiracAgent implements acp.Agent {
 						const cancelCompleted = await withTimeout(controller.cancelTask(), 10000, "cancelTask")
 
 						// TaskController.cancelTask() recreates persisted tasks and starts their
-						// resume flow. Mark that handoff explicitly so the next ACP prompt can
-						// submit to it without depending on a historical card.
+						// resume flow. Only a cancel that ran to completion leaves that resume flow
+						// parked and answerable; a timed-out cancel is force-aborted below, so the
+						// next prompt must rehydrate persisted history instead of waking it.
 						if (controller.task) {
 							session.taskId = controller.task.taskId
-							session.awaitingCancelledTaskResume = true
+							session.awaitingCancelledTaskResume = cancelCompleted !== OPERATION_TIMED_OUT
 						}
 
 						// A cancelTask() that times out can leave the reinitialized task parked in
@@ -2048,7 +2056,7 @@ export class DiracAgent implements acp.Agent {
 						// the follow-up prompt's status poll never sees COMPLETED/CANCELLED and the
 						// session hangs. Force the parked task to abort so the next prompt's
 						// submitCardResponse wakes it deterministically.
-						if (cancelCompleted === undefined && controller.task) {
+						if (cancelCompleted === OPERATION_TIMED_OUT && controller.task) {
 							Logger.warn("[DiracAgent] cancelTask timed out; forcing abort of reinitialized task")
 							controller.task.taskState.abort = true
 						}
@@ -2571,7 +2579,7 @@ export class DiracAgent implements acp.Agent {
 		// cancelTask() re-initializes the task asynchronously, and we must
 		// wait for it to be ready before accessing its message handler.
 		await pWaitFor(() => controller.task?.taskState.isInitialized === true, {
-			timeout: 3_000,
+			timeout: taskInitializationTimeout(controller.task?.taskId ?? sessionId),
 		}).catch((error) => {
 			Logger.error("[DiracAgent.checkpointRestore] Failed to wait for task initialization:", error)
 			throw error

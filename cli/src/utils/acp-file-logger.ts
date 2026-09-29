@@ -11,8 +11,15 @@ let unsubscribeAcpLogger: (() => void) | undefined
 export function initAcpFileLogger(): void {
 	if (acpFileLogger) return
 
-	acpRotatingFileLogger = createRotatingFileLogger({ logDir: DIRAC_CLI_DIR.log, fileName: "dirac-acp.log" })
-	acpFileLogger = pino({ timestamp: pino.stdTimeFunctions.isoTime }, acpRotatingFileLogger)
+	try {
+		acpRotatingFileLogger = createRotatingFileLogger({ logDir: DIRAC_CLI_DIR.log, fileName: "dirac-acp.log" })
+		acpFileLogger = pino({ timestamp: pino.stdTimeFunctions.isoTime }, acpRotatingFileLogger)
+	} catch (error) {
+		const detail = error instanceof Error ? error.message : String(error)
+		process.stderr.write(`[dirac] ACP file logging disabled: ${detail}\n`)
+		acpFileLogger = pino({ level: "silent" }, { write: () => {} })
+		acpRotatingFileLogger = undefined
+	}
 	unsubscribeAcpLogger = Logger.subscribe((message) => acpFileLogger?.info(message))
 }
 

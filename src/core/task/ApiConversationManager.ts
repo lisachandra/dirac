@@ -14,9 +14,19 @@ import { NATIVE_WEB_SEARCH_SKILL_NAME } from "@shared/skills"
 import { Logger } from "@shared/services/Logger"
 import { getAutoCondenseContextLimit } from "@shared/context-management"
 import { ApiConversationManagerDependencies } from "./types/api-conversation-manager"
+import type { LocalConversationCompactionOutcome } from "./LocalConversationCompaction"
+
+type CondensationStoppedStatus = Exclude<LocalConversationCompactionOutcome["status"], "completed">
+
+/** Turn text for condensation attempts that did not compact the conversation. */
+const CONDENSATION_STOPPED_MESSAGES: Record<CondensationStoppedStatus, string> = {
+	unavailable: "Conversation condensation is unavailable. Configure a Utility model for condensation, then retry.",
+	cancelled: "Conversation condensation cancelled. The conversation was not compacted.",
+	failed: "Conversation condensation failed. The conversation was not compacted.",
+}
 
 export class ApiConversationManager {
-	constructor(private dependencies: ApiConversationManagerDependencies) { }
+	constructor(private dependencies: ApiConversationManagerDependencies) {}
 
 	setApi(api: ApiConversationManagerDependencies["api"]): void {
 		this.dependencies.api = api
@@ -209,9 +219,9 @@ export class ApiConversationManager {
 				const messages = checkpoint
 					? fullHistory.slice(checkpoint.compactedThroughHistoryIndex + 1)
 					: (this.dependencies.contextManager.getTruncatedMessages(
-						fullHistory,
-						pendingCompaction.previousConversationHistoryDeletedRange,
-					) as DiracStorageMessage[])
+							fullHistory,
+							pendingCompaction.previousConversationHistoryDeletedRange,
+						) as DiracStorageMessage[])
 				try {
 					const result = await this.dependencies.api.compactConversation({
 						systemPrompt: params.systemPrompt,
@@ -383,25 +393,24 @@ export class ApiConversationManager {
 		}
 
 		const skillIds = [
-			...new Set(
-				(directActions ?? []).flatMap((action) => (action.type === "activateSkill" ? [action.skillId] : [])),
-			),
+			...new Set((directActions ?? []).flatMap((action) => (action.type === "activateSkill" ? [action.skillId] : []))),
 		]
 		for (const skillId of skillIds) {
 			await this.dependencies.activateSkill(skillId)
 		}
 
 		if (directActions?.some((action) => action.type === "condenseConversation")) {
-			const continuation = await this.dependencies.runLocalConversationCompaction("user")
-			if (!continuation) {
+			const compaction = await this.dependencies.runLocalConversationCompaction("user")
+			if (compaction.status !== "completed") {
 				return {
 					userContent: parsedUserContent,
 					lastApiReqIndex: params.previousApiReqIndex,
 					isDirectResponse: true,
+					directResponseText: CONDENSATION_STOPPED_MESSAGES[compaction.status],
 					didConsumeUserContent: true,
 				}
 			}
-			parsedUserContent.unshift({ type: "text", text: continuation })
+			parsedUserContent.unshift({ type: "text", text: compaction.continuation })
 			const pinnedContext = this.dependencies.getPinnedContext?.()
 			if (pinnedContext) parsedUserContent.splice(1, 0, { type: "text", text: pinnedContext })
 		}

@@ -1,5 +1,6 @@
 import { strict as assert } from "node:assert"
 import { CardStatus } from "@shared/ExtensionMessage"
+import { DiracAskResponse } from "@shared/WebviewMessage"
 import { afterEach, describe, it } from "mocha"
 import sinon from "sinon"
 import { expectLoggerErrors } from "@/test/loggerGuard"
@@ -16,7 +17,7 @@ function createMocks() {
 		update: sinon.stub().resolves(),
 		appendBody: sinon.stub().resolves(),
 		finalize: sinon.stub().resolves(),
-		waitForInteraction: sinon.stub(),
+		waitForInteraction: sinon.stub().resolves({ action: DiracAskResponse.APPROVE, response: DiracAskResponse.APPROVE }),
 	}
 	let providerState: any = {
 		checkpoint: { providerId: "active", modelId: "model", input: [] },
@@ -80,7 +81,9 @@ describe("LocalConversationCompaction", () => {
 		dependencies.stateManager.getGlobalSettingsKey.withArgs("utilityModelEnabled").returns(false)
 
 		assert.equal(compaction.isAvailable(), false)
-		assert.equal(await compaction.run({ source: "automatic" }), undefined)
+		const outcome = await compaction.run({ source: "automatic" })
+
+		assert.equal(outcome.status, "unavailable")
 		assert.equal(dependencies.taskMessenger.createCard.callCount, 0)
 		assert.equal(card.finalize.callCount, 0)
 	})
@@ -91,12 +94,13 @@ describe("LocalConversationCompaction", () => {
 		sinon.stub(compaction as any, "generateSummary").resolves("completed summary")
 		card.update.rejects(new Error("card update failed"))
 
-		const continuation = await compaction.run({
+		const outcome = await compaction.run({
 			source: "automatic",
 			triggerApiRequestIndex: 7,
 		})
 
-		assert.match(continuation ?? "", /completed summary/)
+		if (outcome.status !== "completed") assert.fail(`unexpected status: ${outcome.status}`)
+		assert.match(outcome.continuation, /completed summary/)
 		assert.deepEqual(taskState.conversationHistoryDeletedRange, [0, 1])
 		assert.equal(taskState.lastAutoCondenseTriggerIndex, 7)
 		assert.equal(onContextCompacted.callCount, 1)
@@ -108,9 +112,11 @@ describe("LocalConversationCompaction", () => {
 		sinon.stub(compaction as any, "generateSummary").resolves("completed summary")
 		onContextCompacted.throws(new Error("observer failed"))
 
-		const continuation = await compaction.run({ source: "user" })
+		const outcome = await compaction.run({ source: "user" })
 
-		assert.match(continuation ?? "", /completed summary/)
+		if (outcome.status !== "completed") assert.fail(`unexpected status: ${outcome.status}`)
+		assert.match(outcome.continuation, /completed summary/)
+		assert.equal(card.waitForInteraction.callCount, 1)
 		assert.deepEqual(taskState.conversationHistoryDeletedRange, [0, 1])
 		assert.ok(card.finalize.calledWith(CardStatus.SUCCESS))
 	})
@@ -146,10 +152,37 @@ describe("LocalConversationCompaction", () => {
 			return undefined
 		})
 
-		const continuation = await compaction.run({ source: "automatic" })
+		const outcome = await compaction.run({ source: "automatic" })
 
-		assert.equal(continuation, undefined)
+		assert.equal(outcome.status, "cancelled")
 		assert.equal(messageStateHandler.overwriteApiConversationProviderState.callCount, 0)
 		assert.equal(taskState.conversationHistoryDeletedRange, undefined)
+	})
+	it("asks before a user condensation and leaves the conversation untouched when declined", async () => {
+		const { card, compaction, dependencies, taskState } = createMocks()
+		card.waitForInteraction.resolves({ action: DiracAskResponse.REJECT, response: DiracAskResponse.REJECT })
+		const generateSummary = sinon.stub(compaction as any, "generateSummary").resolves("completed summary")
+
+		const outcome = await compaction.run({ source: "user" })
+
+		assert.equal(outcome.status, "cancelled")
+		const approval = dependencies.taskMessenger.createCard.firstCall.args[0]
+		assert.equal(approval.header, "Condense Conversation")
+		assert.equal(approval.requireApproval, true)
+		assert.equal(generateSummary.callCount, 0)
+		assert.ok(card.finalize.calledWith(CardStatus.CANCELLED))
+		assert.equal(taskState.conversationHistoryDeletedRange, undefined)
+	})
+
+	it("skips the approval prompt for automatic condensation", async () => {
+		const { card, compaction, dependencies } = createMocks()
+		sinon.stub(compaction as any, "generateSummary").resolves("completed summary")
+
+		await compaction.run({ source: "automatic" })
+
+		assert.equal(card.waitForInteraction.callCount, 0)
+		const cardParams = dependencies.taskMessenger.createCard.firstCall.args[0]
+		assert.equal(cardParams.requireApproval, undefined)
+		assert.match(cardParams.header, /^Condensing Conversation/)
 	})
 })

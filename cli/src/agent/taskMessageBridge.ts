@@ -700,7 +700,12 @@ export class TaskMessageBridge {
 
 		try {
 			const response = await this.requestElicitation(request);
-			if (!interactionIsCurrent()) return;
+			if (!interactionIsCurrent()) {
+				// The client invalidated the interaction (turn cancelled or form dismissed).
+				// The parked card must still resolve, otherwise the tool can never finalize it.
+				await task.submitCardResponse(cardId, DiracAskResponse.REJECT);
+				return;
+			}
 
 			switch (response.action) {
 				case "accept": {
@@ -716,7 +721,11 @@ export class TaskMessageBridge {
 						const freeformResponse = await this.requestElicitation(
 							this.freeformElicitationRequest(sessionId, message),
 						);
-						if (!interactionIsCurrent()) return;
+						if (!interactionIsCurrent()) {
+							// The client invalidated the freeform follow-up; resolve the parked card anyway.
+							await task.submitCardResponse(cardId, DiracAskResponse.REJECT);
+							return;
+						}
 						if (freeformResponse.action !== "accept") {
 							await task.submitCardResponse(cardId, DiracAskResponse.REJECT);
 							return;
@@ -751,7 +760,10 @@ export class TaskMessageBridge {
 					throw new Error(`Unsupported elicitation action: ${response.action}`);
 			}
 		} catch (error) {
-			if (!interactionIsCurrent()) return;
+			if (!interactionIsCurrent()) {
+				await task.submitCardResponse(cardId, DiracAskResponse.REJECT);
+				return;
+			}
 			const detail = error instanceof Error ? error.message : String(error);
 			await this.cancelQuestionCard(
 				sessionId,

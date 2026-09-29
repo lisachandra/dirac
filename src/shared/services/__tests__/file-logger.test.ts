@@ -6,8 +6,8 @@ import { afterEach, describe, it } from "mocha"
 import {
 	createRotatingFileLogger,
 	LOG_MAX_AGE_MS,
-	LOG_MAX_FILES,
 	LOG_MAX_FILE_SIZE_BYTES,
+	LOG_MAX_FILES,
 	prepareLogDirectory,
 	resolveLogDirectory,
 	writeLogEntrySync,
@@ -27,6 +27,15 @@ function familyPaths(logDir: string, baseName: string): string[] {
 		path.join(logDir, baseName),
 		...Array.from({ length: LOG_MAX_FILES - 1 }, (_, index) => path.join(logDir, `${parsed.name}.${index + 1}${parsed.ext}`)),
 	].filter((filePath) => fs.existsSync(filePath))
+}
+
+/** Plant a lock directory old enough to be considered stale, with the given owner.json contents. */
+function plantStaleLock(logDir: string, name: string, ownerContent: string): void {
+	const lockPath = path.join(logDir, name)
+	fs.mkdirSync(lockPath)
+	fs.writeFileSync(path.join(lockPath, "owner.json"), ownerContent)
+	const staleAt = new Date(Date.now() - 120_000)
+	fs.utimesSync(lockPath, staleAt, staleAt)
 }
 
 afterEach(() => {
@@ -150,6 +159,29 @@ describe("persistent file logger", () => {
 
 		assert.equal(fs.readFileSync(activePath, "utf8"), "newest\n")
 		assert.ok(!fs.existsSync(archivePath))
+	})
+
+	it("reclaims a fresh lock left by a dead process", () => {
+		const logDir = createTemporaryDirectory()
+		const lockPath = path.join(logDir, ".retention-v1.lock")
+		const deadPid = 2_000_000_000
+		fs.mkdirSync(lockPath)
+		fs.writeFileSync(path.join(lockPath, "owner.json"), JSON.stringify({ pid: deadPid, token: "dead" }))
+
+		prepareLogDirectory(logDir)
+
+		assert.ok(!fs.existsSync(lockPath))
+	})
+
+	it("recovers when a stale lock directory holds a corrupt owner.json", () => {
+		const logDir = createTemporaryDirectory()
+		plantStaleLock(logDir, ".retention-v1.lock", "")
+		plantStaleLock(logDir, ".dirac-cli.log.lock", "{pid:")
+
+		prepareLogDirectory(logDir)
+
+		assert.ok(!fs.existsSync(path.join(logDir, ".retention-v1.lock")))
+		assert.ok(!fs.existsSync(path.join(logDir, ".dirac-cli.log.lock")))
 	})
 
 	it("uses the documented log-directory precedence", () => {

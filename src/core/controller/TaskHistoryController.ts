@@ -9,7 +9,7 @@ import type { Anthropic } from "@anthropic-ai/sdk"
 import { removeLegacySynthetic1mModelEntries } from "@shared/storage/legacy-model-id-migration"
 
 export class TaskHistoryController {
-	constructor(private readonly stateManager: import("@core/storage/StateManager").StateManager) { }
+	constructor(private readonly stateManager: import("@core/storage/StateManager").StateManager) {}
 
 	async readOpenRouterModels(): Promise<Record<string, import("@shared/api").ModelInfo> | undefined> {
 		const openRouterModelsFilePath = path.join(await ensureCacheDirectoryExists(), GlobalFileNames.openRouterModels)

@@ -174,12 +174,15 @@ export class CondenseTool implements IDiracTool {
 			icon: DiracIcon.CHAT,
 			requireApproval: true,
 			collapsed: false,
+			renderType: "markdown",
+			// The summary must be present at creation: ACP clients snapshot the card when
+			// they raise the permission request, and a later update renders blank there.
+			body: stripHashes(context),
 			actions: [
 				{ label: "Condense", value: DiracAskResponse.APPROVE, primary: true },
 				{ label: "Cancel", value: DiracAskResponse.REJECT, style: "secondary" },
 			],
 		})
-		await card.update({ body: stripHashes(context), renderType: "markdown" })
 
 		const interaction = await card.waitForInteraction()
 		if (interaction.action === DiracAskResponse.APPROVE) {

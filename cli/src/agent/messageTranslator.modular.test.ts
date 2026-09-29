@@ -293,6 +293,37 @@ describe("messageTranslator (Modular Architecture)", () => {
 			])
 		})
 
+		it("labels condensation cards as the condense tool", () => {
+			const approval = translateMessage(
+				createCardMessage({
+					id: "condense-approval-1",
+					header: "Condense Conversation",
+					body: "Condense this conversation?",
+					status: CardStatus.WAITING_FOR_INPUT,
+					requireApproval: true,
+					actions: [
+						{ label: "Condense", value: "approve", primary: true },
+						{ label: "Cancel", value: "reject" },
+					],
+				}),
+				sessionState,
+			)
+
+			expect(approval.requiresPermission).toBe(true)
+			expect(approval.permissionRequest?.toolCall.name).toBe("condense")
+			expect(approval.permissionRequest?.toolCall.kind).toBe("think")
+
+			const progress = translateMessage(
+				createCardMessage({
+					id: "condense-progress-1",
+					header: "Condensing Conversation · anthropic/claude-sonnet-4",
+					status: CardStatus.RUNNING,
+				}),
+				sessionState,
+			)
+			expect(progress.updates[0]).toMatchObject({ sessionUpdate: "tool_call", name: "condense", kind: "think" })
+		})
+
 		it("offers only a one-shot declared action for new-task transitions", () => {
 			const result = translateMessage(
 				createCardMessage({
@@ -507,59 +538,86 @@ describe("messageTranslator (Modular Architecture)", () => {
 		})
 	})
 
-		it("emits a single agent_message_chunk for a Task Completed card across add+update", () => {
-			const completionCardId = "completion-card-1"
-			const first = translateMessage(
-				createCardMessage({
-					id: completionCardId,
-					header: "Task Completed",
-					body: "Done! Here is the result.",
-					status: CardStatus.RUNNING,
-				}),
-				sessionState,
-			)
-			expect(first.updates).toHaveLength(1)
-			expect(first.updates[0].sessionUpdate).toBe("agent_message_chunk")
-			expect((first.updates[0] as any).content.text).toBe("Done! Here is the result.")
+	it("emits a single agent_message_chunk for a Task Completed card across add+update", () => {
+		const completionCardId = "completion-card-1"
+		const first = translateMessage(
+			createCardMessage({
+				id: completionCardId,
+				header: "Task Completed",
+				body: "Done! Here is the result.",
+				status: CardStatus.RUNNING,
+			}),
+			sessionState,
+		)
+		expect(first.updates).toHaveLength(1)
+		expect(first.updates[0].sessionUpdate).toBe("agent_message_chunk")
+		expect((first.updates[0] as any).content.text).toBe("Done! Here is the result.")
 
-			// Same card finalized: must not emit the body a second time.
-			const second = translateMessage(
-				createCardMessage({
-					id: completionCardId,
-					header: "Task Completed",
-					body: "Done! Here is the result.",
-					status: CardStatus.SUCCESS,
-				}),
-				sessionState,
-			)
-			expect(second.updates).toHaveLength(0)
-		})
+		// Same card finalized: must not emit the body a second time.
+		const second = translateMessage(
+			createCardMessage({
+				id: completionCardId,
+				header: "Task Completed",
+				body: "Done! Here is the result.",
+				status: CardStatus.SUCCESS,
+			}),
+			sessionState,
+		)
+		expect(second.updates).toHaveLength(0)
+	})
 
-		it("emits Task Completed body again for a fresh completion card id", () => {
-			const first = translateMessage(
-				createCardMessage({
-					id: "completion-1",
-					header: "Task Completed",
-					body: "Result A",
-					status: CardStatus.SUCCESS,
-				}),
-				sessionState,
-			)
-			const second = translateMessage(
-				createCardMessage({
-					id: "completion-2",
-					header: "Task Completed",
-					body: "Result B",
-					status: CardStatus.SUCCESS,
-				}),
-				sessionState,
-			)
-			expect((first.updates[0] as any).content.text).toBe("Result A")
-			expect((second.updates[0] as any).content.text).toBe("Result B")
-		})
+	it("emits Task Completed body again for a fresh completion card id", () => {
+		const first = translateMessage(
+			createCardMessage({
+				id: "completion-1",
+				header: "Task Completed",
+				body: "Result A",
+				status: CardStatus.SUCCESS,
+			}),
+			sessionState,
+		)
+		const second = translateMessage(
+			createCardMessage({
+				id: "completion-2",
+				header: "Task Completed",
+				body: "Result B",
+				status: CardStatus.SUCCESS,
+			}),
+			sessionState,
+		)
+		expect((first.updates[0] as any).content.text).toBe("Result A")
+		expect((second.updates[0] as any).content.text).toBe("Result B")
+	})
 
+	it("stamps completion and plan chunks with a stable messageId", () => {
+		// Paseo accumulates streamed text by messageId; without a stable id the
+		// completion/plan body cannot be reassembled on the client.
+		const completion = translateMessage(
+			createCardMessage({
+				id: "completion-1",
+				header: "Task Completed",
+				body: "Result A",
+				status: CardStatus.SUCCESS,
+			}),
+			sessionState,
+		)
+		expect(completion.updates[0].sessionUpdate).toBe("agent_message_chunk")
+		expect((completion.updates[0] as any).messageId).toBe("msg-id")
 
-
+		const plan = translateMessage(
+			createCardMessage({
+				id: "plan-card-1",
+				header: "Proposed Plan",
+				body: "1. Do the thing",
+				status: CardStatus.WAITING_FOR_INPUT,
+				requireFeedback: true,
+			}),
+			sessionState,
+		)
+		expect(plan.updates).toHaveLength(1)
+		expect(plan.updates[0].sessionUpdate).toBe("agent_message_chunk")
+		expect((plan.updates[0] as any).messageId).toBe("msg-id")
+	})
 
 	describe("translateMessage - API Status", () => {
 		it("should skip API_STATUS messages", () => {

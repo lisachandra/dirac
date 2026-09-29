@@ -132,6 +132,39 @@ describe("ACP session update journal", () => {
 		expect(isWellFormedJournal(journalFilePath(process.env.DIRAC_DATA_DIR!, "session-1"))).toBe(true)
 	})
 
+	it("compacts replay by merging chunks that share a messageId and never merges anonymous chunks", async () => {
+		const { compactSessionUpdatesForReplay } = await import("./acp-session-updates.js")
+		const chunk = (text: string, messageId?: string) => ({
+			kind: "session_update" as const,
+			sequenceNumber: 0,
+			update: {
+				sessionUpdate: "agent_message_chunk",
+				...(messageId === undefined ? {} : { messageId }),
+				content: { type: "text" as const, text },
+			} as any,
+		})
+
+		// Same streamed message: replay collapses into one client write.
+		const merged = compactSessionUpdatesForReplay([chunk("Hello, ", "msg-1"), chunk("world!", "msg-1")])
+		expect(merged).toHaveLength(1)
+		expect((merged[0] as any).update.content.text).toBe("Hello, world!")
+
+		// Chunks without a messageId come from different Dirac messages (legacy
+		// completion/plan bodies predate stable ids): merging null==null would
+		// concatenate unrelated bodies — the "cut off then duplicated" artifact.
+		const anonymous = compactSessionUpdatesForReplay([chunk("A"), chunk("B")])
+		expect(anonymous).toHaveLength(2)
+		expect((anonymous[0] as any).update.content.text).toBe("A")
+		expect((anonymous[1] as any).update.content.text).toBe("B")
+
+		// Distinct messageIds never merge either.
+		const distinct = compactSessionUpdatesForReplay([chunk("A", "msg-1"), chunk("B", "msg-2")])
+		expect(distinct).toHaveLength(2)
+		expect((distinct[0] as any).update.content.text).toBe("A")
+		expect((distinct[1] as any).update.content.text).toBe("B")
+	})
+
+
 	it("keeps committed JSONL valid and retains updates written by separate processes", async () => {
 		const dataDirectory = process.env.DIRAC_DATA_DIR!
 		const sessionId = "concurrent-session"

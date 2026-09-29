@@ -44,6 +44,19 @@ export class DiracSessionEmitter {
 	 * before React components mount and subscribe.
 	 */
 	private readonly lastPayload = new Map<string, unknown[]>()
+	/**
+	 * Only cumulative snapshot updates are replayed to late subscribers.
+	 * Streaming chunks (agent_message_chunk, agent_thought_chunk, tool_call,
+	 * tool_call_update, user_message_chunk) are append-only: replaying only the
+	 * tail would duplicate it on reconnect and can never reconstruct history.
+	 */
+	private static readonly REPLAYABLE_EVENTS: ReadonlySet<string> = new Set([
+		"available_commands_update",
+		"config_option_update",
+		"current_mode_update",
+		"session_info_update",
+		"usage_update",
+	])
 
 	constructor() {
 		this.emitter = new EventEmitter()
@@ -64,7 +77,11 @@ export class DiracSessionEmitter {
 	on<K extends keyof DiracSessionEvents>(event: K, listener: DiracSessionEvents[K]): this {
 		this.emitter.on(event, listener as (...args: unknown[]) => void)
 
-		// Replay last emitted payload so late subscribers get the latest state
+		// Replay only cumulative snapshots. Streaming chunks are append-only and
+		// must not be replayed: the tail alone can never reconstruct history.
+		if (!DiracSessionEmitter.REPLAYABLE_EVENTS.has(event as string)) {
+			return this
+		}
 		const last = this.lastPayload.get(event as string)
 		if (last) {
 			;((listener as (...args: unknown[]) => void).bind(null) as (...args: unknown[]) => void)(...last)
@@ -74,13 +91,15 @@ export class DiracSessionEmitter {
 	}
 
 	once<K extends keyof DiracSessionEvents>(event: K, listener: DiracSessionEvents[K]): this {
-		// For once: if we have a last payload, fire immediately and don't register
-		const last = this.lastPayload.get(event as string)
-		if (last) {
-			;((listener as (...args: unknown[]) => void).bind(null) as (...args: unknown[]) => void)(...last)
-		} else {
-			this.emitter.once(event, listener as (...args: unknown[]) => void)
+		// See on(): only snapshot kinds are replayable.
+		if (DiracSessionEmitter.REPLAYABLE_EVENTS.has(event as string)) {
+			const last = this.lastPayload.get(event as string)
+			if (last) {
+				;((listener as (...args: unknown[]) => void).bind(null) as (...args: unknown[]) => void)(...last)
+				return this
+			}
 		}
+		this.emitter.once(event, listener as (...args: unknown[]) => void)
 		return this
 	}
 
@@ -104,8 +123,11 @@ export class DiracSessionEmitter {
 	 * @returns True if the event had listeners, false otherwise
 	 */
 	emit<K extends keyof DiracSessionEvents>(event: K, ...args: Parameters<DiracSessionEvents[K]>): boolean {
-		// Cache last payload for replay-on-subscribe
-		this.lastPayload.set(event as string, args)
+		// Cache only replayable snapshots for late subscribers. Streaming chunks
+		// bypass the cache so a late subscribe cannot receive a stale tail.
+		if (DiracSessionEmitter.REPLAYABLE_EVENTS.has(event as string)) {
+			this.lastPayload.set(event as string, args)
+		}
 		return this.emitter.emit(event, ...args)
 	}
 

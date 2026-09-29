@@ -1,6 +1,7 @@
 import { CheckpointRestoreRequest } from "@shared/proto/dirac/checkpoints"
 import { Empty } from "@shared/proto/dirac/common"
 import pWaitFor from "p-wait-for"
+import { taskInitializationTimeout } from "@shared/taskInitialization"
 import { HostProvider } from "@/hosts/host-provider"
 import { ShowMessageType } from "@/shared/proto/index.host"
 import { Logger } from "@/shared/services/Logger"
@@ -13,7 +14,7 @@ export async function checkpointRestore(controller: Controller, request: Checkpo
 	if (request.number) {
 		// wait for messages to be loaded
 		await pWaitFor(() => controller.task?.taskState.isInitialized === true, {
-			timeout: 3_000,
+			timeout: taskInitializationTimeout(controller.task?.taskId ?? "restored task"),
 		}).catch((error) => {
 			Logger.log("Failed to init new Dirac instance to restore checkpoint", error)
 			HostProvider.window.showMessage({

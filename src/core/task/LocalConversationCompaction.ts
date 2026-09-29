@@ -17,10 +17,11 @@ import {
 } from "@core/text-condensation/UtilityTextCondensationAvailability"
 import { UtilityModelCancelledError, UtilityModelRunner } from "@core/utility-model/UtilityModelRunner"
 import type { ModelProviderSelection } from "@shared/api"
-import { CardStatus } from "@shared/ExtensionMessage"
+import { CardStatus, ICardHandle } from "@shared/ExtensionMessage"
 import { DiracIcon } from "@shared/icons"
 import { Logger } from "@shared/services/Logger"
 import { stripHashes } from "@shared/utils/line-hashing"
+import { DiracAskResponse } from "@shared/WebviewMessage"
 import { getErrorMessage } from "@/shared/errors"
 import type { MessageStateHandler } from "./message-state"
 import type { TaskMessenger } from "./TaskMessenger"
@@ -28,6 +29,21 @@ import type { TaskState } from "./TaskState"
 import type { HookExecution } from "./types/HookExecution"
 
 export type LocalConversationCompactionSource = "automatic" | "user"
+
+/**
+ * Outcome of a condensation attempt. Only `completed` changes conversation
+ * state; every other status leaves the conversation untouched.
+ */
+export type LocalConversationCompactionOutcome =
+	| { status: "completed"; continuation: string }
+	| { status: "unavailable" }
+	| { status: "cancelled" }
+	| { status: "failed" }
+
+const CONDENSE_APPROVAL_HEADER = "Condense Conversation"
+const CONDENSE_APPROVAL_BODY =
+	"Condense this conversation? The earlier turns are replaced by a summary, which is shown on this card afterwards."
+const CONDENSE_CANCELLED_BODY = "Conversation condensation cancelled. The conversation was not compacted."
 
 interface LocalConversationCompactionDependencies {
 	taskId: string
@@ -60,7 +76,7 @@ interface UtilityModelIdentity {
  * model produces and validates the summary before any conversation state changes.
  */
 export class LocalConversationCompaction {
-	constructor(private readonly dependencies: LocalConversationCompactionDependencies) { }
+	constructor(private readonly dependencies: LocalConversationCompactionDependencies) {}
 
 	isAvailable(): boolean {
 		return isUtilityTextCondensationAvailable(
@@ -75,7 +91,7 @@ export class LocalConversationCompaction {
 		)
 	}
 
-	async run(options: LocalConversationCompactionOptions): Promise<string | undefined> {
+	async run(options: LocalConversationCompactionOptions): Promise<LocalConversationCompactionOutcome> {
 		const templates = createDefaultTextCondensationTemplateRegistry()
 		const settings = {
 			utilityModelEnabled: this.dependencies.stateManager.getGlobalSettingsKey("utilityModelEnabled"),
@@ -86,7 +102,10 @@ export class LocalConversationCompaction {
 		const selection = getConfiguredUtilityModelSelection(settings.utilityModelSelection)
 		const configuredIdentity = this.getConfiguredIdentity(settings.utilityModelSelection)
 
-		if (!selection || !this.isAvailable()) return undefined
+		if (!selection || !this.isAvailable()) return { status: "unavailable" }
+
+		const approval = await this.requestUserApproval(options.source)
+		if (approval.outcome === "declined") return { status: "cancelled" }
 
 		let handler: ApiHandler
 		let identity: UtilityModelIdentity
@@ -99,16 +118,13 @@ export class LocalConversationCompaction {
 				modelId: handler.getModel().id,
 			}
 		} catch (error) {
-			await this.displayFailure(configuredIdentity, error)
-			return undefined
+			await this.displayFailure(configuredIdentity, error, approval.card)
+			return { status: "failed" }
 		}
 
-		const card = await this.dependencies.taskMessenger.createCard({
-			header: `Condensing Conversation · ${this.formatIdentity(identity)}`,
-			status: CardStatus.RUNNING,
-			icon: DiracIcon.SUMMARIZE,
-			collapsed: false,
-		})
+		const card = approval.card
+			? await this.reuseApprovalCard(approval.card, identity)
+			: await this.createCondensingCard(identity)
 
 		let summary: string
 		let continuation: string
@@ -139,14 +155,12 @@ export class LocalConversationCompaction {
 			await card.update({
 				header: `Conversation Condensation ${state} · ${this.formatIdentity(identity)}`,
 				status,
-				body: cancelled
-					? "Conversation condensation was cancelled. The conversation was not compacted."
-					: this.buildFailureBody(error),
+				body: cancelled ? CONDENSE_CANCELLED_BODY : this.buildFailureBody(error),
 				collapsed: false,
 			})
 			await card.finalize(status, true)
 			if (!cancelled) Logger.error("Local Utility conversation condensation failed", error)
-			return undefined
+			return { status: cancelled ? "cancelled" : "failed" }
 		}
 
 		try {
@@ -168,7 +182,57 @@ export class LocalConversationCompaction {
 			Logger.error("Local conversation compaction observer failed", error)
 		}
 
-		return continuation
+		return { status: "completed", continuation }
+	}
+
+	/**
+	 * Asks the user before a user-requested condensation. Automatic condensation and
+	 * fully autonomous sessions skip the prompt and get a progress card instead.
+	 */
+	private async requestUserApproval(
+		source: LocalConversationCompactionSource,
+	): Promise<{ outcome: "approved" | "declined" | "skipped"; card?: ICardHandle }> {
+		if (source !== "user") return { outcome: "skipped" }
+		if (this.dependencies.stateManager.getGlobalSettingsKey("yoloModeToggled")) return { outcome: "skipped" }
+
+		const card = await this.dependencies.taskMessenger.createCard({
+			header: CONDENSE_APPROVAL_HEADER,
+			icon: DiracIcon.CHAT,
+			requireApproval: true,
+			collapsed: false,
+			renderType: "markdown",
+			body: CONDENSE_APPROVAL_BODY,
+			actions: [
+				{ label: "Condense", value: DiracAskResponse.APPROVE, primary: true },
+				{ label: "Cancel", value: DiracAskResponse.REJECT, style: "secondary" },
+			],
+		})
+
+		const interaction = await card.waitForInteraction()
+		if (interaction.action === DiracAskResponse.APPROVE) return { outcome: "approved", card }
+
+		await card.update({ body: CONDENSE_CANCELLED_BODY })
+		await card.finalize(CardStatus.CANCELLED)
+		return { outcome: "declined" }
+	}
+
+	/** Reuses the approval card as the progress and result card. */
+	private async reuseApprovalCard(card: ICardHandle, identity: UtilityModelIdentity): Promise<ICardHandle> {
+		await card.update({
+			header: `Condensing Conversation · ${this.formatIdentity(identity)}`,
+			status: CardStatus.RUNNING,
+			body: "",
+		})
+		return card
+	}
+
+	private async createCondensingCard(identity: UtilityModelIdentity): Promise<ICardHandle> {
+		return await this.dependencies.taskMessenger.createCard({
+			header: `Condensing Conversation · ${this.formatIdentity(identity)}`,
+			status: CardStatus.RUNNING,
+			icon: DiracIcon.SUMMARIZE,
+			collapsed: false,
+		})
 	}
 
 	private throwIfCancelled(): void {
@@ -262,15 +326,23 @@ export class LocalConversationCompaction {
 		}
 	}
 
-
-	private async displayFailure(identity: UtilityModelIdentity | undefined, error: unknown): Promise<void> {
-		const card = await this.dependencies.taskMessenger.createCard({
-			header: `Conversation Condensation Failed · ${identity ? this.formatIdentity(identity) : "Utility model unavailable"}`,
-			status: CardStatus.ERROR,
-			icon: DiracIcon.SUMMARIZE,
-			body: this.buildFailureBody(error),
-			collapsed: false,
-		})
+	private async displayFailure(
+		identity: UtilityModelIdentity | undefined,
+		error: unknown,
+		existingCard?: ICardHandle,
+	): Promise<void> {
+		const header = `Conversation Condensation Failed · ${identity ? this.formatIdentity(identity) : "Utility model unavailable"}`
+		const body = this.buildFailureBody(error)
+		const card =
+			existingCard ??
+			(await this.dependencies.taskMessenger.createCard({
+				header,
+				status: CardStatus.ERROR,
+				icon: DiracIcon.SUMMARIZE,
+				body,
+				collapsed: false,
+			}))
+		if (existingCard) await existingCard.update({ header, status: CardStatus.ERROR, body, collapsed: false })
 		await card.finalize(CardStatus.ERROR, true)
 		Logger.error("Failed to initialize Utility conversation condensation", error)
 	}

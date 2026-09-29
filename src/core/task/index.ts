@@ -1725,10 +1725,7 @@ export class Task {
 			(apiErrorMaxRetries === 0 || this.taskState.apiErrorRetryAttempts < apiErrorMaxRetries)
 		) {
 			this.taskState.apiErrorRetryAttempts++
-			const delay = Math.min(
-				2_000 * 2 ** (this.taskState.apiErrorRetryAttempts - 1),
-				MAX_API_ERROR_RETRY_DELAY_MS,
-			)
+			const delay = Math.min(2_000 * 2 ** (this.taskState.apiErrorRetryAttempts - 1), MAX_API_ERROR_RETRY_DELAY_MS)
 			const attemptLabel =
 				apiErrorMaxRetries === 0
 					? `attempt ${this.taskState.apiErrorRetryAttempts}`
@@ -2128,13 +2125,13 @@ export class Task {
 		const useCompactPrompt = customPrompt === "compact" && isLocalModel(this.getCurrentProviderInfo())
 		let shouldCompact = await this.determineContextCompaction(previousApiReqIndex)
 		if (shouldCompact && this.localConversationCompaction.isAvailable()) {
-			const continuation = await this.localConversationCompaction.run({
+			const compaction = await this.localConversationCompaction.run({
 				source: "automatic",
 				triggerApiRequestIndex: previousApiReqIndex,
 			})
-			if (!continuation) return true
+			if (compaction.status !== "completed") return true
 
-			const compactedContext: DiracContent[] = [{ type: "text", text: continuation }]
+			const compactedContext: DiracContent[] = [{ type: "text", text: compaction.continuation }]
 			if (this.taskState.pinnedContext) {
 				compactedContext.push({ type: "text", text: this.taskState.pinnedContext })
 			}

@@ -56,8 +56,22 @@ export function resolveLogDirectory(dataDir?: string): string {
  */
 export function prepareLogDirectory(logDir: string): void {
 	ensurePrivateDirectory(logDir)
+	const markerPath = path.join(logDir, LOG_RETENTION_MARKER)
+	if (fs.existsSync(markerPath)) {
+		if (retentionFastPathComplies(logDir)) return
+
+		for (const fileName of PERSISTENT_LOG_FILE_NAMES) {
+			withLockSync(familyLockPath(logDir, fileName), () => migrateFamilyLocked(logDir, fileName, false))
+		}
+
+		withLockSync(path.join(logDir, LOG_MIGRATION_LOCK), () => {
+			removeObsoleteLegacyLogs(logDir)
+			if (!fs.existsSync(markerPath)) writePrivateFileAtomically(markerPath, `${LOG_RETENTION_VERSION}\n`)
+		})
+		return
+	}
+
 	withLockSync(path.join(logDir, LOG_MIGRATION_LOCK), () => {
-		const markerPath = path.join(logDir, LOG_RETENTION_MARKER)
 		const forceMigration = !fs.existsSync(markerPath)
 
 		for (const fileName of PERSISTENT_LOG_FILE_NAMES) {
@@ -67,6 +81,24 @@ export function prepareLogDirectory(logDir: string): void {
 		removeObsoleteLegacyLogs(logDir)
 		if (forceMigration) writePrivateFileAtomically(markerPath, `${LOG_RETENTION_VERSION}\n`)
 	})
+}
+
+/** Lock-free steady-state check so parallel startups skip the global migration lock. */
+function retentionFastPathComplies(logDir: string): boolean {
+	try {
+		for (const fileName of PERSISTENT_LOG_FILE_NAMES) {
+			const files = listFamilyFiles(logDir, fileName)
+			if (files.length > 0 && !familyAlreadyComplies(files)) return false
+		}
+
+		const obsoletePattern = /^dirac(?:\.\d+)?\.log$/
+		for (const entry of fs.readdirSync(logDir)) {
+			if (obsoletePattern.test(entry)) return false
+		}
+		return true
+	} catch {
+		return false
+	}
 }
 
 export function createRotatingFileLogger(options: RotatingFileLoggerOptions): RotatingFileLogger {
@@ -371,10 +403,7 @@ function encodeBoundedRecord(message: string): Buffer {
 	const recordBuffer = Buffer.from(record, "utf8")
 	if (recordBuffer.byteLength <= LOG_MAX_FILE_SIZE_BYTES) return recordBuffer
 
-	const marker = Buffer.from(
-		`${timestampPrefix}...[log record truncated from ${recordBuffer.byteLength} bytes]...\n`,
-		"utf8",
-	)
+	const marker = Buffer.from(`${timestampPrefix}...[log record truncated from ${recordBuffer.byteLength} bytes]...\n`, "utf8")
 	const headBudget = LOG_MAX_FILE_SIZE_BYTES - marker.byteLength - 1
 	const head = recordBuffer.subarray(0, safeUtf8End(recordBuffer, headBudget))
 	const separator = head.at(-1) === 0x0a ? Buffer.alloc(0) : Buffer.from("\n")
@@ -431,9 +460,7 @@ function acquireLockSync(lockPath: string): HeldLock {
 		try {
 			fs.mkdirSync(lockPath, { mode: 0o700 })
 			try {
-				fs.writeFileSync(path.join(lockPath, "owner.json"), JSON.stringify({ pid: process.pid, token }), {
-					mode: 0o600,
-				})
+				writePrivateFileAtomically(path.join(lockPath, "owner.json"), JSON.stringify({ pid: process.pid, token }))
 			} catch (error) {
 				fs.rmSync(lockPath, { recursive: true, force: true })
 				throw error
@@ -442,7 +469,7 @@ function acquireLockSync(lockPath: string): HeldLock {
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error
 			removeStaleLock(lockPath)
-			if (Date.now() >= deadline) throw new Error(`Timed out waiting for log lock ${lockPath}`)
+			if (Date.now() >= deadline) throw new Error(describeLockTimeout(lockPath))
 			Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, LOCK_RETRY_MS)
 		}
 	}
@@ -465,11 +492,28 @@ function removeStaleLock(lockPath: string): void {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return
 		throw error
 	}
-	if (Date.now() - stats.mtimeMs < STALE_LOCK_AGE_MS) return
 
 	const owner = readLockOwner(lockPath)
-	if (owner && isProcessAlive(owner.pid)) return
+	if (owner) {
+		if (isProcessAlive(owner.pid)) return
+		fs.rmSync(lockPath, { recursive: true, force: true })
+		return
+	}
+
+	if (Date.now() - stats.mtimeMs < STALE_LOCK_AGE_MS) return
 	fs.rmSync(lockPath, { recursive: true, force: true })
+}
+
+function describeLockTimeout(lockPath: string): string {
+	try {
+		const stats = fs.statSync(lockPath)
+		const owner = readLockOwner(lockPath)
+		const ageMs = Math.max(0, Date.now() - stats.mtimeMs)
+		const holder = owner ? `pid=${owner.pid}` : "pid=unknown"
+		return `Timed out waiting for log lock ${lockPath} (${holder}, age=${Math.round(ageMs)}ms). Another Dirac process may be compacting logs, or a crashed process left a live-holder lock. Set DIRAC_LOG_DIR to isolate parallel runs.`
+	} catch {
+		return `Timed out waiting for log lock ${lockPath}`
+	}
 }
 
 function readLockOwner(lockPath: string): { pid: number; token: string } | undefined {
@@ -480,6 +524,7 @@ function readLockOwner(lockPath: string): { pid: number; token: string } | undef
 		}
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined
+		if (error instanceof SyntaxError) return undefined
 		throw error
 	}
 }

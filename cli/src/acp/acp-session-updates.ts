@@ -695,6 +695,11 @@ function mergeStreamedChunks(
 	const identity = streamedMessageIdentity(entry.update)
 	if (!previousIdentity || !identity) return undefined
 	if (previousIdentity.sessionUpdate !== identity.sessionUpdate) return undefined
+	// Chunks without a messageId come from different Dirac messages (Task
+	// Completed / Proposed Plan bodies carry card ids now, but legacy journals
+	// predate that). Merging null==null would concatenate unrelated bodies
+	// into one client write — the "cut off then duplicated" replay artifact.
+	if (previousIdentity.messageId === null || identity.messageId === null) return undefined
 	if (previousIdentity.messageId !== identity.messageId) return undefined
 
 	const previousText = streamedText(previous.update)

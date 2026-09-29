@@ -80,6 +80,8 @@ export class AcpAgent implements acp.Agent {
 	private readonly sessionEventCleanup = new Map<string, Array<() => void>>()
 	/** A superseded detached transport must not continue serving RPCs. */
 	private disconnected = false
+	/** Per-session FIFO lane serializing outbound session updates to the client. */
+	private readonly sessionForwardLanes = new Map<string, Promise<void>>()
 
 	constructor(
 		connection: acp.AgentSideConnection,
@@ -129,6 +131,34 @@ export class AcpAgent implements acp.Agent {
 		}
 	}
 
+	/**
+	 * Serialize outbound client notifications per session.
+	 *
+	 * `connection.sessionUpdate()` resolves only after the frame is flushed to
+	 * the transport. Without a FIFO lane the `session/prompt` response can
+	 * overtake the final `agent_message_chunk` (Task Completed / Proposed Plan),
+	 * and Paseo closes the turn before the tail arrives — the "cut off" report.
+	 * Every forward is chained so emission order == wire order; `prompt()` drains
+	 * the lane before returning the stop reason.
+	 */
+	private enqueueSessionForward(sessionId: string, eventName: string, send: () => Promise<unknown>): Promise<void> {
+		const previous = this.sessionForwardLanes.get(sessionId) ?? Promise.resolve()
+		const next = previous.then(async () => {
+			try {
+				await send()
+			} catch (error) {
+				Logger.error(`[AcpAgent] Error forwarding ${eventName}:`, error)
+			}
+		})
+		// Never leave a rejected lane behind: it would poison every later forward.
+		this.sessionForwardLanes.set(sessionId, next.catch(() => undefined))
+		return next
+	}
+
+	/** Resolve once every session update enqueued so far has been flushed. */
+	private drainSessionForwards(sessionId: string): Promise<void> {
+		return this.sessionForwardLanes.get(sessionId) ?? Promise.resolve()
+	}
 	private subscribeToSessionEvents(sessionId: string): void {
 		if (this.subscribedSessions.has(sessionId)) {
 			return
@@ -146,9 +176,9 @@ export class AcpAgent implements acp.Agent {
 					sessionUpdate: eventName,
 					...payload,
 				} as acp.SessionUpdate
-				this.connection.sessionUpdate({ sessionId, update }).catch((error) => {
-					Logger.error(`[AcpAgent] Error forwarding ${eventName}:`, error)
-				})
+				void this.enqueueSessionForward(sessionId, eventName, () =>
+					this.connection.sessionUpdate({ sessionId, update }),
+				)
 			})
 		}
 
@@ -166,40 +196,34 @@ export class AcpAgent implements acp.Agent {
 		forwardSessionUpdate("usage_update")
 
 		const clientAnnotationListener = (payload: Record<string, unknown>) => {
-			this.connection
-				.extNotification("dev.dirac/client_annotation", {
+			void this.enqueueSessionForward(sessionId, "client_annotation", () =>
+				this.connection.extNotification("dev.dirac/client_annotation", {
 					sessionId,
 					...payload,
-				})
-				.catch((error) => {
-					Logger.error("[AcpAgent] Error forwarding client annotation:", error)
-				})
+				}),
+			)
 		}
 		emitter.on("client_annotation", clientAnnotationListener)
 		cleanup.push(() => emitter.off("client_annotation", clientAnnotationListener))
 
 		const pinnedMessagesListener = (payload: Record<string, unknown>) => {
-			this.connection
-				.extNotification("dev.dirac/pinned_messages_update", {
+			void this.enqueueSessionForward(sessionId, "pinned_messages_update", () =>
+				this.connection.extNotification("dev.dirac/pinned_messages_update", {
 					sessionId,
 					...payload,
-				})
-				.catch((error) => {
-					Logger.error("[AcpAgent] Error forwarding pinned-message update:", error)
-				})
+				}),
+			)
 		}
 		emitter.on("pinned_messages_update", pinnedMessagesListener)
 		cleanup.push(() => emitter.off("pinned_messages_update", pinnedMessagesListener))
 
 		const steeringStatusListener = (payload: Record<string, unknown>) => {
-			this.connection
-				.extNotification("dev.dirac/steering_status", {
+			void this.enqueueSessionForward(sessionId, "steering_status", () =>
+				this.connection.extNotification("dev.dirac/steering_status", {
 					sessionId,
 					...payload,
-				})
-				.catch((error) => {
-					Logger.error("[AcpAgent] Error forwarding steering-status update:", error)
-				})
+				}),
+			)
 		}
 		emitter.on("steering_status", steeringStatusListener)
 		cleanup.push(() => emitter.off("steering_status", steeringStatusListener))
@@ -217,6 +241,7 @@ export class AcpAgent implements acp.Agent {
 		}
 		this.sessionEventCleanup.delete(sessionId)
 		this.subscribedSessions.delete(sessionId)
+		this.sessionForwardLanes.delete(sessionId)
 	}
 
 	/**
@@ -430,7 +455,13 @@ export class AcpAgent implements acp.Agent {
 		// Ensure we're subscribed to this session's events
 		this.subscribeToSessionEvents(params.sessionId)
 		await this.ensureSessionSetupUpdates(params.sessionId)
-		return this.diracAgent.prompt(params)
+		const response = await this.diracAgent.prompt(params)
+		// Flush every queued session update before the prompt response goes out.
+		// Without this the final agent_message_chunk (Task Completed / Proposed
+		// Plan) can arrive after the end_turn response and Paseo closes the turn
+		// early — the "cut off" report.
+		await this.drainSessionForwards(params.sessionId)
+		return response
 	}
 
 	async cancel(params: acp.CancelNotification): Promise<void> {
@@ -472,6 +503,12 @@ export class AcpAgent implements acp.Agent {
 		this.subscribedSessions.clear()
 		this.initializedSessions.clear()
 		this.sessionInitializationPromises.clear()
+		this.sessionForwardLanes.clear()
+	}
+
+	/** Flush pending session updates for tests and graceful shutdown paths. */
+	async flushSessionForwards(sessionId: string): Promise<void> {
+		await this.drainSessionForwards(sessionId)
 	}
 
 	async shutdown(): Promise<void> {

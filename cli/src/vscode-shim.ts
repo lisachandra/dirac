@@ -109,12 +109,28 @@ interface OutputChannelLogger {
 
 let outputChannelLogger: OutputChannelLogger | undefined
 
+function createDegradedOutputChannelLogger(reason: unknown): Logger {
+	const detail = reason instanceof Error ? reason.message : String(reason)
+	process.stderr.write(`[dirac] CLI file logging disabled: ${detail}\n`)
+	const noopLogger = pino({ level: "silent" }, { write: () => {} })
+	outputChannelLogger = { logger: noopLogger, fileLogger: createNoopFileLogger() }
+	return noopLogger
+}
+
+function createNoopFileLogger(): RotatingFileLogger {
+	return { filePath: ":stderr:", write: () => {}, dispose: async () => {} }
+}
+
 function getOutputChannelLogger(_channelName: string): Logger {
 	if (!outputChannelLogger) {
-		const fileLogger = createRotatingFileLogger({ logDir: DIRAC_CLI_DIR.log, fileName: "dirac-cli.log" })
-		outputChannelLogger = {
-			logger: pino({ timestamp: pino.stdTimeFunctions.isoTime }, fileLogger),
-			fileLogger,
+		try {
+			const fileLogger = createRotatingFileLogger({ logDir: DIRAC_CLI_DIR.log, fileName: "dirac-cli.log" })
+			outputChannelLogger = {
+				logger: pino({ timestamp: pino.stdTimeFunctions.isoTime }, fileLogger),
+				fileLogger,
+			}
+		} catch (error) {
+			return createDegradedOutputChannelLogger(error)
 		}
 	}
 	return outputChannelLogger.logger

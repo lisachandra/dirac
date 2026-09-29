@@ -231,6 +231,39 @@ describe("DiracSessionEmitter", () => {
 		})
 	})
 
+	describe("replay-on-subscribe", () => {
+		it("replays the latest snapshot update to late subscribers", () => {
+			const listener = vi.fn()
+			emitter.emit("config_option_update", { configOptions: [{ id: "mode", value: "act" }] } as any)
+
+			emitter.on("config_option_update", listener)
+
+			expect(listener).toHaveBeenCalledTimes(1)
+			expect(listener).toHaveBeenCalledWith({ configOptions: [{ id: "mode", value: "act" }] })
+		})
+
+		it("does not replay streaming message chunks to late subscribers", () => {
+			const listener = vi.fn()
+			emitter.emit("agent_message_chunk", { content: { type: "text", text: "stale tail" } } as any)
+
+			emitter.on("agent_message_chunk", listener)
+
+			// The tail alone can never reconstruct history; replaying it would
+			// duplicate the final completion on reconnect.
+			expect(listener).not.toHaveBeenCalled()
+		})
+
+		it("does not replay tool calls to late subscribers", () => {
+			const listener = vi.fn()
+			emitter.emit("tool_call", { toolCallId: "t-1", title: "Tool", status: "in_progress" } as any)
+
+			emitter.on("tool_call", listener)
+
+			expect(listener).not.toHaveBeenCalled()
+		})
+	})
+
+
 	describe("listenerCount", () => {
 		it("should return the correct number of listeners", () => {
 			const listener1 = vi.fn()

@@ -300,7 +300,9 @@ describe("DiracAgent ACP conversation continuity", () => {
 			await cancelPromise
 
 			expect(mocks.task.taskState.abort).toBe(true)
-			expect((agent as any).sessions.get(sessionId).awaitingCancelledTaskResume).toBe(true)
+			// A timed-out cancel does not leave a resume flow to wake: the parked task was
+			// force-aborted, so the next prompt must rehydrate persisted history instead.
+			expect((agent as any).sessions.get(sessionId).awaitingCancelledTaskResume).toBe(false)
 		} finally {
 			vi.useRealTimers()
 		}
