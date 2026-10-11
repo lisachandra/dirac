@@ -14,8 +14,6 @@ import { presentToolTimeout } from "../../runtime/ToolTimeoutPresentation"
 
 const SEARCHABLE_NODE_MODULE_SCOPES = ["@nrbx", "@rbxts", "@rbxts-js", "@lisachandra", "@isentinel", "@flamework"]
 
-const SEARCHABLE_NODE_MODULE_SCOPES = ["@nrbx", "@rbxts", "@rbxts-js", "@lisachandra", "@isentinel", "@flamework"]
-
 export interface SearchFilesArgs {
 	paths: string[]
 	regex: string

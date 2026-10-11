@@ -247,7 +247,7 @@ export class LocalConversationCompaction {
 	): Promise<{ outcome: "approved" | "declined" | "skipped"; card?: ICardHandle }> {
 		if (source !== "user") return { outcome: "skipped" }
 		if (skipApproval) return { outcome: "skipped" }
-		if (this.dependencies.stateManager.getGlobalSettingsKey("yoloModeToggled")) return { outcome: "skipped" }
+		if (this.dependencies.getWorkingConfiguration().settings.yoloModeToggled) return { outcome: "skipped" }
 
 		const card = await this.dependencies.taskMessenger.createCard({
 			header: CONDENSE_APPROVAL_HEADER,

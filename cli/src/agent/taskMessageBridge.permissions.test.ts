@@ -97,7 +97,13 @@ describe("TaskMessageBridge immediate permission responses", () => {
 			bridge.subscribeToTaskMessages(
 				controller,
 				"session-1",
-				{ sessionId: "session-1", status: AcpSessionStatus.Processing, pendingToolCalls: new Map() },
+				{
+					sessionId: "session-1",
+					status: AcpSessionStatus.Processing,
+					pendingToolCalls: new Map(),
+					emittedPlanCardIds: new Set(),
+					emittedCompletionCardIds: new Set(),
+				},
 				resolve,
 				reject,
 				{ value: false },

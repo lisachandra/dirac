@@ -70,17 +70,6 @@ export class DiracIgnoreController {
 		}
 	}
 
-	/** True if `filePath` is ignored only by the built-in default patterns (not user .diracignore). */
-	isDefaultIgnoredPath(filePath: string): boolean {
-		try {
-			const absolutePath = path.resolve(this.cwd, filePath)
-			const relativePath = path.relative(this.cwd, absolutePath).toPosix()
-			return this.defaultIgnoreInstance.ignores(relativePath)
-		} catch (_error) {
-			return false
-		}
-	}
-
 	/** Returns the first blocked file argument in a file-reading command, or undefined if allowed. */
 	validateCommand(command: string): string | undefined {
 		if (this.yoloMode) return undefined

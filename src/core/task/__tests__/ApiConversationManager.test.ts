@@ -482,6 +482,8 @@ describe("ApiConversationManager steering delivery", () => {
 				stateManager: {
 					getGlobalSettingsKey: sinon.stub().callsFake((key: string) => (key === "hooksEnabled" ? false : undefined)),
 				},
+				getWorkingConfiguration: () => ({ settings: {} as any }),
+				getRequestRuntime: () => undefined,
 				getCurrentProviderInfo: () => ({ providerId: "openai-codex" }),
 			}
 			return { dependencies, history, compactConversation, getProviderState: () => providerState }

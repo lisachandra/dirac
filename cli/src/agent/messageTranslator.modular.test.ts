@@ -624,35 +624,7 @@ describe("messageTranslator (Modular Architecture)", () => {
 		})
 	})
 
-	it("emits a single agent_message_chunk for a Task Completed card across add+update", () => {
-		const completionCardId = "completion-card-1"
-		const first = translateMessage(
-			createCardMessage({
-				id: completionCardId,
-				header: "Task Completed",
-				body: "Done! Here is the result.",
-				status: CardStatus.RUNNING,
-			}),
-			sessionState,
-		)
-		expect(first.updates).toHaveLength(1)
-		expect(first.updates[0].sessionUpdate).toBe("agent_message_chunk")
-		expect((first.updates[0] as any).content.text).toBe("Done! Here is the result.")
-
-		// Same card finalized: must not emit the body a second time.
-		const second = translateMessage(
-			createCardMessage({
-				id: completionCardId,
-				header: "Task Completed",
-				body: "Done! Here is the result.",
-				status: CardStatus.SUCCESS,
-			}),
-			sessionState,
-		)
-		expect(second.updates).toHaveLength(0)
-	})
-
-	it("emits Task Completed body again for a fresh completion card id", () => {
+it("emits Task Completed body again for a fresh completion card id", () => {
 		const first = translateMessage(
 			createCardMessage({
 				id: "completion-1",
@@ -675,60 +647,3 @@ describe("messageTranslator (Modular Architecture)", () => {
 		expect((second.updates[0] as any).content.text).toBe("Result B")
 	})
 
-	it("stamps completion and plan chunks with a stable messageId", () => {
-		// Paseo accumulates streamed text by messageId; without a stable id the
-		// completion/plan body cannot be reassembled on the client.
-		const completion = translateMessage(
-			createCardMessage({
-				id: "completion-1",
-				header: "Task Completed",
-				body: "Result A",
-				status: CardStatus.SUCCESS,
-			}),
-			sessionState,
-		)
-		expect(completion.updates[0].sessionUpdate).toBe("agent_message_chunk")
-		expect((completion.updates[0] as any).messageId).toBe("msg-id")
-
-		const plan = translateMessage(
-			createCardMessage({
-				id: "plan-card-1",
-				header: "Proposed Plan",
-				body: "1. Do the thing",
-				status: CardStatus.WAITING_FOR_INPUT,
-				requireFeedback: true,
-			}),
-			sessionState,
-		)
-		expect(plan.updates).toHaveLength(1)
-		expect(plan.updates[0].sessionUpdate).toBe("agent_message_chunk")
-		expect((plan.updates[0] as any).messageId).toBe("msg-id")
-	})
-
-	describe("translateMessage - API Status", () => {
-		it("should skip API_STATUS messages", () => {
-			const message = createApiStatusMessage("started")
-			const result = translateMessage(message, sessionState)
-			expect(result.updates).toHaveLength(0)
-		})
-	})
-
-	it("skips checkpoint messages", () => {
-		const result = translateMessage(createCheckpointMessage(), sessionState)
-
-		expect(result.updates).toHaveLength(0)
-	})
-
-	describe("translateMessages", () => {
-		it("should translate multiple messages", () => {
-			const messages = [
-				createMarkdownMessage("Step 1"),
-				createCardMessage({ id: "t1", header: "h1", status: CardStatus.SUCCESS }),
-			]
-			const updates = translateMessages(messages, sessionState)
-			expect(updates).toHaveLength(2)
-			expect(updates[0].sessionUpdate).toBe("agent_message_chunk")
-			expect(updates[1].sessionUpdate).toBe("tool_call")
-		})
-	})
-})

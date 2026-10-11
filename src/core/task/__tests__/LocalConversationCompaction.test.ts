@@ -87,7 +87,10 @@ describe("LocalConversationCompaction", () => {
 
 		for (let index = 0; index < 2; index++) {
 			const continuation = await compaction.run({ source: "automatic" })
-			assert.ok(continuation?.includes(JSON.stringify(["Implement task B", "Use TypeScript"])))
+			assert.ok(
+				continuation.status === "completed" &&
+					continuation.continuation.includes(JSON.stringify(["Implement task B", "Use TypeScript"])),
+			)
 			assert.ok(condense.getCall(index).args[1].additionalSourceText?.includes('"Implement task B"'))
 		}
 	})
@@ -104,7 +107,7 @@ describe("LocalConversationCompaction", () => {
 		})
 
 		assert.ok(condense.firstCall.args[1].additionalSourceText?.includes('"Implement task B"'))
-		assert.ok(continuation?.includes('["Implement task B"]'))
+		assert.ok(continuation.status === "completed" && continuation.continuation.includes('["Implement task B"]'))
 		assert.deepEqual(apiHistory, originalHistory)
 	})
 
@@ -159,7 +162,8 @@ describe("LocalConversationCompaction", () => {
 		const previousProviderState = getProviderState()
 		sinon.stub(compaction as any, "generateSummary").rejects(new Error("final websocket failure"))
 
-		assert.equal(await compaction.run({ source: "automatic" }), undefined)
+		const outcome = await compaction.run({ source: "automatic" })
+		assert.equal(outcome.status, "failed")
 		assert.equal(messageStateHandler.overwriteApiConversationProviderState.callCount, 0)
 		assert.equal(messageStateHandler.saveDiracMessagesAndUpdateHistory.callCount, 0)
 		assert.equal(taskState.conversationHistoryDeletedRange, undefined)

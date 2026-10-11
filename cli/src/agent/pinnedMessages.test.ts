@@ -56,7 +56,6 @@ vi.mock("@/core/controller", () => ({
 		reinitExistingTaskFromId = vi.fn(async (...args: any[]) => {
 			this.task = {
 				taskId: args[0],
-				submitCardResponse: vi.fn(async () => undefined),
 				taskState: { pinnedContext: args[1]?.pinnedContext, status: "completed" },
 				messageStateHandler: {
 					getDiracMessages: vi.fn(() => []),
@@ -177,6 +176,9 @@ describe("pinned ACP messages", () => {
 				getDiracMessages: vi.fn(() => [
 					{ id: "message-1", content: { type: "markdown", content: "Keep this requirement." } },
 				]),
+				getMessageById: vi.fn((id: string) =>
+					({ id: "message-1", content: { type: "markdown", content: "Keep this requirement." } } as any),
+				),
 			},
 			taskState: {} as { pinnedContext?: string },
 			setContextCompactionObserver: vi.fn(),

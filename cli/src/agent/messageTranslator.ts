@@ -12,12 +12,14 @@ import type * as acp from "@agentclientprotocol/sdk"
 import { isSuccessfulTaskCompletionCard } from "@shared/cardIdentity"
 import type { DiracMessage } from "@shared/ExtensionMessage"
 import { CardStatus, DiracMessageType, isFinalStatus } from "@shared/ExtensionMessage"
-import { isPlanResponseCard } from "@shared/responseTool"
-import { CardHeader } from "@shared/cardIdentity"
 import { getBrowserActionKind } from "./browserActionTranslator.js"
-import { isFollowupQuestionCard } from "./questionCard.js"
 import type { AcpSessionState, TranslatedMessage } from "./types.js"
 import { AcpSessionStatus } from "./types.js"
+
+/** Hook execution indicators rendered inside Dirac use these headers; ACP hides them. */
+function isHookHeader(header: string): boolean {
+	return header === "PreToolUse Hook" || header === "PostToolUse Hook"
+}
 
 /**
  * Maps Dirac tool types to ACP ToolKind values.
@@ -80,53 +82,23 @@ export function parseWebSearchMarkerText(text: string | undefined): string | und
 	return query || WEB_SEARCH_FALLBACK_QUERY
 }
 
-/** Headers emitted by Dirac's condensation paths: the condense tool and local Utility compaction. */
-const CONDENSE_CARD_HEADERS = [
-	"Condense Conversation",
-	"Condensing Conversation",
-	"Conversation Condensed",
-	"Conversation Condensation",
-]
-
 function toolNameForCard(card: { header: string; toolName?: string; rawInput?: Record<string, unknown> }): string {
 	if (card.toolName) return card.toolName
 	if (typeof card.rawInput?.tool === "string") return card.rawInput.tool
-	if (CONDENSE_CARD_HEADERS.some((header) => card.header.startsWith(header))) return "condense"
 	return card.header
-}
-
-/** Hook execution indicators rendered inside Dirac use these headers; ACP hides them. */
-function isHookHeader(header: string): boolean {
-	return header === "PreToolUse Hook" || header === "PostToolUse Hook"
 }
 
 function toolKindForCard(card: {
 	header: string
 	toolName?: string
 	rawInput?: Record<string, unknown>
-	kind?: string
 }): acp.ToolKind {
-	// Task completion is rendered as body markdown (see translateCardMessage early return), but
-	// fallback to "other" keeps accidental tool envelope as plain_text/wrench, not collapsed think/brain.
-	if (card.header === CardHeader.TASK_COMPLETED || card.header === CardHeader.LEGACY_TASK_COMPLETION) return "other"
-	if (card.header === "Proposed Plan") return "other"
-	if (card.header.startsWith("New Task")) return "other" // keeps 2-option permission semantics
-	if (card.header === "Run Subagents" || card.header.startsWith("Run Subagents:")) return "other" // expanded below, not per-tool
 	const toolName = toolNameForCard(card)
 	const operation = typeof card.rawInput?.operation === "string" ? card.rawInput.operation : undefined
-	if (toolName === "read_file" || toolName === "readFile") return "read"
 	if (toolName === "inspect_ast" || toolName === "inspectAst") {
 		return operation === "definitions" || operation === "references" || operation === "occurrences" ? "search" : "read"
 	}
 	if (toolName === "edit_ast" || toolName === "editAst") return "edit"
-	if (toolName === "hook_feedback" || toolName === "hook_block") return "other"
-	// Real file/terminal headers bypass the exact-key map:
-	if (card.header.startsWith("Reading from") || card.header.startsWith("Read from")) return "read"
-	if (card.header.startsWith("Listed files in")) return "read"
-	if (card.header.startsWith("Searching ")) return "search"
-	if (card.header.startsWith("Writing ")) return "edit"
-	if (card.header.startsWith("Editing ") || card.header.startsWith("Edited ") || (card.header.startsWith("Apply ") && card.header.includes("edit(s)"))) return "edit"
-	if (card.header.startsWith("Hook:")) return "other"
 	return TOOL_KIND_MAP[toolName] ?? TOOL_KIND_MAP[card.header] ?? getBrowserActionKind(card.header) ?? "other"
 }
 
@@ -216,7 +188,6 @@ function translateMarkdownMessage(
 		if (text) {
 			updates.push({
 				sessionUpdate: "agent_thought_chunk",
-				messageId: message.id,
 				content: { type: "text", text },
 			})
 		}
@@ -228,7 +199,6 @@ function translateMarkdownMessage(
 		if (text) {
 			updates.push({
 				sessionUpdate: "agent_message_chunk",
-				messageId: message.id,
 				content: { type: "text", text: "\n" + text },
 			})
 		}
@@ -305,9 +275,6 @@ function translateWebSearchMarkerMessage(query: string, sessionState: AcpSession
 
 /**
  * Translate a CARD type Dirac message to ACP updates.
- *
- * - Task Completed & Proposed Plan: body markdown (agent_message_chunk), no think/tool chrome, no plan->todo.
- * - Everything else: tool_call with inline content[] where applicable.
  */
 function translateCardMessage(
 	message: DiracMessage,
@@ -318,98 +285,12 @@ function translateCardMessage(
 		return { updates: [], requiresPermission: false }
 	}
 	const card = message.content.card
-	// Task Completed and Proposed Plan outside think: render body as plain markdown.
-	// Task turn boundary (end_turn) still via checkMessageForPromptResolution.
-	const isProposedPlanBody = isPlanResponseCard(card as any)
-	// Follow-up question cards on clients without form elicitation are rendered
-	// as native markdown (like Task Completed / Proposed Plan) so the user sees
-	// the question text and options inline instead of a bare tool block. When
-	// the client negotiates `elicitation.form` the bridge answers through a
-	// first-class form, so this fallback is gated on the capability being absent.
-	const formElicitationNegotiated =
-		options?.clientCapabilities?.elicitation?.form != null
-	if (
-		!formElicitationNegotiated &&
-		isFollowupQuestionCard(message)
-	) {
-		const lines: string[] = []
-		const bodyText = typeof card.body === "string" ? card.body.trim() : ""
-		if (bodyText) lines.push(bodyText)
-		if (card.actions?.length) {
-			lines.push("")
-			lines.push("**Options:**")
-			for (const action of card.actions) {
-				lines.push(`- ${action.label}`)
-			}
-		}
-		lines.push("")
-		lines.push(
-			"*(This client does not support inline forms — provide your answer in the next prompt.)*",
-		)
-		return {
-			updates: [
-				{
-					sessionUpdate: "agent_message_chunk",
-					messageId: message.id,
-					content: { type: "text" as const, text: lines.join("\n") },
-				} as unknown as acp.SessionUpdate,
-			],
-			requiresPermission: false,
-		}
-	}
-	if (
-		card.header === CardHeader.TASK_COMPLETED ||
-		card.header === CardHeader.LEGACY_TASK_COMPLETION ||
-		isProposedPlanBody
-	) {
-		const bodyText = typeof card.body === "string" ? card.body.trim() : ""
-		let taskText = bodyText
-		if (bodyText.startsWith("{")) {
-			try {
-				const parsed = JSON.parse(bodyText) as { response?: unknown }
-				if (typeof parsed.response === "string" && parsed.response.trim()) {
-					taskText = parsed.response.trim()
-				}
-			} catch {}
-		}
-		// Proposed Plan is always body markdown — never a Paseo todo/plan checkbox.
-		// The WAITING_FOR_INPUT state is still carried via TaskState/CARD for Dirac's
-		// submitCardResponse, but Paseo should show the plan inline immediately.
-		if (taskText) {
-			const isCompletionBody =
-				card.header === CardHeader.TASK_COMPLETED ||
-				card.header === CardHeader.LEGACY_TASK_COMPLETION
-			if (isCompletionBody) {
-				if (sessionState.emittedCompletionCardIds.has(card.id)) {
-					return { updates: [], requiresPermission: false }
-				}
-				sessionState.emittedCompletionCardIds.add(card.id)
-			}
-			if (isProposedPlanBody) {
-				if (sessionState.emittedPlanCardIds.has(card.id)) {
-					return { updates: [], requiresPermission: false }
-				}
-				sessionState.emittedPlanCardIds.add(card.id)
-			}
-			return {
-				updates: [
-					{
-						sessionUpdate: "agent_message_chunk",
-						messageId: message.id,
-						content: { type: "text" as const, text: taskText },
-					} as unknown as acp.SessionUpdate,
-				],
-				requiresPermission: false,
-			}
-		}
-		// empty body: suppress any plan->todo/tool chrome
-		return { updates: [], requiresPermission: false }
-	}
 	// Hook execution indicators are for Dirac internal tracking; hide the
 	// noisy running/completed (hasJsonResponse) markers. Block advisories
 	// are surfaced as separate hook_feedback/hook_block cards instead.
 	if (isHookHeader(card.header)) {
-		const isPending = card.status === CardStatus.RUNNING || card.status === CardStatus.BUILDING || card.status === CardStatus.PENDING
+		const isPending =
+			card.status === CardStatus.RUNNING || card.status === CardStatus.BUILDING || card.status === CardStatus.PENDING
 		if (isPending) return { updates: [], requiresPermission: false }
 		// Completed hooks that are just JSON bookkeeping (hasJsonResponse) are hidden;
 		// feedback/blocks are visible via their own cards.
@@ -459,20 +340,9 @@ function translateCardMessage(
 	const isExisting = sessionState.pendingToolCalls.has(toolCallId)
 	const kind = toolKindForCard(card)
 	const name = toolNameForCard(card)
-	// Prefer structured content[] for diffs; fall back to plain-text bodies.
-	// Expose duplicate keys (content + text) so Paseo's extractToolText/readString finds bodies.
-	const bodyText = typeof card.body === "string" ? card.body : undefined
-	const rawInput = card.rawInput ?? (bodyText ? { body: bodyText, content: bodyText, text: bodyText } : undefined)
-	const rawOutput = card.rawOutput ?? (bodyText ? { body: bodyText, content: bodyText, text: bodyText } : undefined)
-	// Inline bodies so Paseo renders without expanding Other. Include edit so approval/batched
-	// cards without diffs[] still reach buildEditToolDetail as unifiedDiff.
-	let content = card.diffs?.map((diff) => ({ type: "diff" as const, ...diff }))
-	if (!content && bodyText && (kind === "read" || kind === "search" || kind === "other" || kind === "think" || kind === "edit")) {
-		// body is e.g. "✓ Successfully read X", plan markdown, or "Task Completed" result
-		if (bodyText.trim()) {
-			content = [{ type: "content" as const, content: { type: "text" as const, text: bodyText } } as any]
-		}
-	}
+	const content = card.diffs?.map((diff) => ({ type: "diff" as const, ...diff }))
+	const rawInput = card.rawInput ?? (card.body ? { body: card.body } : undefined)
+	const rawOutput = card.rawOutput ?? (card.body ? { body: card.body } : undefined)
 	if (isExisting) {
 		const existing = sessionState.pendingToolCalls.get(toolCallId)!
 		existing.status = actualStatus
@@ -535,15 +405,15 @@ function translateCardMessage(
 			toolCall: existingToolCall as acp.ToolCall,
 			options: isNewTaskTransition
 				? [
-						{ kind: "allow_once", optionId: "new_task", name: card.actions?.[0]?.label ?? "Start new task" },
-						{ kind: "reject_once", optionId: "reject_once", name: "Keep current task" },
-					]
+					{ kind: "allow_once", optionId: "new_task", name: card.actions?.[0]?.label ?? "Start new task" },
+					{ kind: "reject_once", optionId: "reject_once", name: "Keep current task" },
+				]
 				: [
-						{ kind: "allow_once", optionId: "allow_once", name: "Approve once" },
-						{ kind: "allow_always", optionId: "allow_always", name: "Always approve" },
-						{ kind: "reject_once", optionId: "reject_once", name: "Reject once" },
-						{ kind: "reject_always", optionId: "reject_always", name: "Always reject" },
-					],
+					{ kind: "allow_once", optionId: "allow_once", name: "Approve once" },
+					{ kind: "allow_always", optionId: "allow_always", name: "Always approve" },
+					{ kind: "reject_once", optionId: "reject_once", name: "Reject once" },
+					{ kind: "reject_always", optionId: "reject_always", name: "Always reject" },
+				]
 		}
 	}
 
@@ -580,7 +450,5 @@ export function createSessionState(sessionId: string): AcpSessionState {
 		sessionId,
 		status: AcpSessionStatus.Idle,
 		pendingToolCalls: new Map(),
-		emittedPlanCardIds: new Set(),
-		emittedCompletionCardIds: new Set(),
 	}
 }

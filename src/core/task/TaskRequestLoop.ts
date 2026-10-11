@@ -91,14 +91,14 @@ export async function recursivelyMakeDiracRequests(
 		customPrompt === "compact" && isLocalModel({ model, providerId, customPrompt, mode, supportsNativeWebSearch: false })
 	let shouldCompact = await ctx.determineContextCompaction(previousApiReqIndex)
 	if (shouldCompact && ctx.localConversationCompaction.isAvailable()) {
-		const continuation = await ctx.localConversationCompaction.run({
+		const compaction = await ctx.localConversationCompaction.run({
 			source: "automatic",
 			triggerApiRequestIndex: previousApiReqIndex,
 			pendingUserContent: userContent,
 		})
-		if (!continuation) return true
+		if (compaction.status !== "completed") return true
 
-		const compactedContext: DiracContent[] = [{ type: "text", text: continuation }]
+		const compactedContext: DiracContent[] = [{ type: "text", text: compaction.continuation }]
 		if (ctx.taskState.pinnedContext) {
 			compactedContext.push({ type: "text", text: ctx.taskState.pinnedContext })
 		}
