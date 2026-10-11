@@ -15,7 +15,6 @@ const LEGACY_MODEL_ID_SETTINGS = [
 const RETIRED_DEEPSEEK_MODEL_IDS = new Set([
 	"deepseek-v4-flash",
 	"deepseek-v4-flash-vision-exp",
-	"deepseek-v4-pro",
 	"deepseek-chat",
 	"deepseek-reasoner",
 ])

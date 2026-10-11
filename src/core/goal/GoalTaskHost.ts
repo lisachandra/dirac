@@ -27,7 +27,6 @@ const DEFAULT_LIST_LIMIT = 20
 const MAX_LIST_LIMIT = 100
 const DEFAULT_TRANSCRIPT_LIMIT = 50
 const MAX_TRANSCRIPT_LIMIT = 200
-const HEARTBEAT_MS = 60_000
 
 function nextGoalChildTaskId(goal: GoalRecord, now: number): string {
 	const timestampIds = [goal.id, ...goal.children.map((child) => child.id)]
@@ -84,7 +83,7 @@ export class GoalTaskHost implements GoalChildSurfaceOwner {
 		readonly goalId: string,
 		private readonly store: GoalStore,
 		private readonly createTask: GoalChildTaskFactory,
-		private readonly heartbeatMs = HEARTBEAT_MS,
+		private readonly interventionDeadlineMs?: number,
 	) { }
 
 	async startTask(input: { taskTitle: string; prompt: string }, role: GoalChildRole = "task"): Promise<GoalChildRecord> {
@@ -444,9 +443,9 @@ ${childSummary || "No contained Tasks have been recorded."}
 			throw new Error("The previous Goal wake is still awaiting coordinator conversation persistence")
 		}
 
-		let reason: "events" | "heartbeat" = "events"
+		let reason: "events" | "intervention" = "events"
 		let record = await this.store.read(this.goalId)
-		if (record.events.length === 0) {
+		while (record.events.length === 0 && reason !== "intervention") {
 			reason = await this.waitForNotification()
 			record = await this.store.read(this.goalId)
 		}
@@ -579,6 +578,10 @@ ${childSummary || "No contained Tasks have been recorded."}
 					child.terminalSummary = outcome.reason
 					break
 			}
+			if (outcome.kind !== "failed") {
+				goal.eventSequence += 1
+				goal.events.push({ kind: "task_finished", sequence: goal.eventSequence, taskId, occurredAt: now })
+			}
 		})
 		this.liveChildren.delete(taskId)
 		this.notifyWaiter()
@@ -658,20 +661,22 @@ ${childSummary || "No contained Tasks have been recorded."}
 		})
 	}
 
-	private async waitForNotification(): Promise<"events" | "heartbeat"> {
+	private async waitForNotification(): Promise<"events" | "intervention"> {
 		return new Promise((resolve, reject) => {
 			let settled = false
-			const finish = (result: "events" | "heartbeat", error?: unknown) => {
+			const finish = (result: "events" | "intervention", error?: unknown) => {
 				if (settled) return
 				settled = true
-				clearTimeout(timer)
+				if (timer) clearTimeout(timer)
 				if (this.waiter === notify) this.waiter = undefined
 				if (error) reject(error)
 				else if (this.closed) reject(new Error("Goal Task host is shut down"))
 				else resolve(result)
 			}
 			const notify = () => finish("events")
-			const timer = setTimeout(() => finish("heartbeat"), this.heartbeatMs)
+			const timer = this.interventionDeadlineMs === undefined
+				? undefined
+				: setTimeout(() => finish("intervention"), this.interventionDeadlineMs)
 			this.waiter = notify
 			void this.store.read(this.goalId).then((record) => {
 				if (record.events.length > 0 || this.closed) notify()
@@ -686,7 +691,7 @@ ${childSummary || "No contained Tasks have been recorded."}
 	private async formatWake(
 		record: GoalRecord,
 		events: GoalEvent[],
-		reason: "events" | "heartbeat",
+		reason: "events" | "intervention",
 		previousWakeAt?: number,
 	): Promise<string> {
 		const now = Date.now()
@@ -698,7 +703,7 @@ ${childSummary || "No contained Tasks have been recorded."}
 		const lines = [
 			`Goal wake #${record.wakeSequence}`,
 			`Goal age: ${formatDuration(now - record.createdAt)}; active time: ${formatDuration(activeDuration)}; since previous wake: ${formatDuration(previousWakeAt ? now - previousWakeAt : now - record.createdAt)}`,
-			`Reason: ${events.some((event) => event.kind === "user_steering") ? "user steering" : reason === "heartbeat" ? "heartbeat" : "task events"}`,
+			`Reason: ${events.some((event) => event.kind === "user_steering") ? "user steering" : reason === "intervention" && events.length === 0 ? "intervention deadline" : "task events"}`,
 		]
 
 		if (events.length > 0) {
@@ -720,8 +725,10 @@ ${childSummary || "No contained Tasks have been recorded."}
 					lines.push(
 						`   Interaction ${event.interactionId} (${pending?.kind ?? "resolved"}): ${pending?.card.header ?? "no longer pending"}\n   ${pending?.card.body ?? ""}`,
 					)
-				} else {
+				} else if (event.kind === "task_failed") {
 					lines.push(`   Failed: ${child.terminalSummary ?? "No failure summary was recorded."}`)
+				} else {
+					lines.push(`   Finished (${child.status}): ${child.terminalSummary ?? "No summary was recorded."}`)
 				}
 			}
 		}
@@ -815,7 +822,7 @@ function eventTieKey(event: GoalEvent): string {
 	if (event.kind === "user_steering") return "user_steering"
 	if (event.kind === "task_response") return `${event.taskId}:response:${event.responseCursor}`
 	if (event.kind === "task_interaction") return `${event.taskId}:interaction:${event.interactionId}`
-	return `${event.taskId}:failed`
+	return `${event.taskId}:${event.kind}`
 }
 
 function cardSnapshot(params: CardParams, handle: ICardHandle, now: number): Card {

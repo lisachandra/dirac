@@ -7,6 +7,7 @@ import { executePreCompactHookWithCleanup, HookCancellationError } from "@core/h
 import { continuationPrompt } from "@core/prompts/contextManagement"
 import type { TaskWorkingConfiguration } from "./runtime/TaskWorkingConfiguration"
 import { ConversationCondensationService } from "@core/text-condensation/ConversationCondensationService"
+import { formatCurrentTurnUserRequests, getCurrentTurnUserRequests } from "@core/text-condensation/CurrentTurnUserRequests"
 import {
 	CONVERSATION_CONTINUATION_TEMPLATE_ID,
 	createDefaultTextCondensationTemplateRegistry,
@@ -16,9 +17,15 @@ import {
 	getConfiguredUtilityModelSelection,
 	isUtilityTextCondensationAvailable,
 } from "@core/text-condensation/UtilityTextCondensationAvailability"
-import { UtilityModelCancelledError, UtilityModelRunner } from "@core/utility-model/UtilityModelRunner"
+import {
+	UtilityModelCancelledError,
+	UtilityModelRunner,
+	type UtilityModelHandlerFactory,
+	type UtilityModelRunnerOptions,
+} from "@core/utility-model/UtilityModelRunner"
 import type { ApiConfiguration, ModelProviderSelection } from "@shared/api"
 import { CardStatus, ICardHandle } from "@shared/ExtensionMessage"
+import type { DiracContent } from "@shared/messages/content"
 import { DiracIcon } from "@shared/icons"
 import { Logger } from "@shared/services/Logger"
 import { stripHashes } from "@shared/utils/line-hashing"
@@ -71,6 +78,7 @@ export interface LocalConversationCompactionOptions {
 	triggerApiRequestIndex?: number
 	/** Explicit /smol already expresses intent; skip the redundant approval card. */
 	skipApproval?: boolean
+	pendingUserContent?: readonly DiracContent[]
 }
 
 interface CondensationModelIdentity {
@@ -119,24 +127,24 @@ export class LocalConversationCompaction {
 		const approval = await this.requestUserApproval(options.source, options.skipApproval)
 		if (approval.outcome === "declined") return { status: "cancelled" }
 
-		let handler: ApiHandler
+		const configuration = structuredClone(this.dependencies.getWorkingConfiguration().apiConfiguration) as ApiConfiguration
+		const createUtilityHandler = () => buildApiHandlerForSelection(configuration, selection!, { ulid: this.dependencies.ulid })
+		let createHandler: UtilityModelHandlerFactory
+		let disposableHandler: ApiHandler | undefined
 		let identity: CondensationModelIdentity
 		try {
 			if (useFallback) {
-				handler = this.dependencies.createActiveModelHandler?.() ?? this.dependencies.getApi()
+				const handler = this.dependencies.createActiveModelHandler?.() ?? this.dependencies.getApi()
+				disposableHandler = handler
+				createHandler = () => handler
 				identity = {
 					providerId: this.dependencies.getCurrentProviderId?.() ?? "active-model",
 					modelId: handler.getModel().id,
 					fallback: true,
 				}
 			} else {
-				handler = buildApiHandlerForSelection(
-					structuredClone(this.dependencies.getWorkingConfiguration().apiConfiguration) as ApiConfiguration,
-					selection!,
-					{
-						ulid: this.dependencies.ulid,
-					},
-				)
+				const handler = createUtilityHandler()
+				createHandler = createUtilityHandler
 				identity = {
 					providerId: selection!.provider,
 					modelId: handler.getModel().id,
@@ -155,7 +163,24 @@ export class LocalConversationCompaction {
 		let summary: string
 		let continuation: string
 		try {
-			summary = await this.generateSummary(selection, handler, templates, useFallback, this.linkedCondensationSignal(useFallback ? handler : undefined))
+			const currentTurnUserRequests = getCurrentTurnUserRequests(
+				this.dependencies.messageStateHandler.getDiracMessages(),
+				options.pendingUserContent,
+			)
+			summary = await this.generateSummary(
+				selection,
+				createHandler,
+				templates,
+				useFallback,
+				async ({ retryAttempt, maxRetries, delayMs, error }) => {
+					await card.update({
+						header: `Condensing Conversation (retry ${retryAttempt}/${maxRetries}) · ${this.formatIdentity(identity)}`,
+						body: `Utility request failed. Retrying in ${delayMs / 1000}s...\n\n${getErrorMessage(error)}`,
+					})
+				},
+				currentTurnUserRequests,
+				disposableHandler,
+			)
 			this.throwIfCancelled()
 			const range = this.dependencies.contextManager.getNextTruncationRange(
 				this.dependencies.messageStateHandler.getApiConversationHistory(),
@@ -165,7 +190,7 @@ export class LocalConversationCompaction {
 			const contextModification = await this.runPreCompactHook(options.source, range)
 			this.throwIfCancelled()
 
-			continuation = continuationPrompt(summary)
+			continuation = continuationPrompt(summary, currentTurnUserRequests)
 			if (contextModification) {
 				continuation += `\n\n[Context Modification from PreCompact Hook]\n${contextModification}`
 			}
@@ -283,15 +308,18 @@ export class LocalConversationCompaction {
 
 	private async generateSummary(
 		selection: ModelProviderSelection | undefined,
-		handler: ApiHandler,
+		createHandler: UtilityModelHandlerFactory,
 		templates: ReturnType<typeof createDefaultTextCondensationTemplateRegistry>,
 		useFallback: boolean,
-		signal?: AbortSignal,
+		onRetry: UtilityModelRunnerOptions["onRetry"],
+		currentTurnUserRequests: readonly string[],
+		disposableHandler?: ApiHandler,
 	): Promise<string> {
 		const textCondenser = useFallback
-			? new ActiveModelTextCondenser(handler, templates)
+			? new ActiveModelTextCondenser(createHandler(), templates)
 			: new UtilityModelTextCondenser(
-					new UtilityModelRunner(selection!, () => handler, {
+					new UtilityModelRunner(selection!, createHandler, {
+						onRetry,
 						onUsage: (event) => recordUtilityModelUsage(this.dependencies.taskState, this.dependencies.ulid, event),
 					}),
 					templates,
@@ -304,7 +332,8 @@ export class LocalConversationCompaction {
 		})
 		return await service.condenseConversation(CONVERSATION_CONTINUATION_TEMPLATE_ID, {
 			historyScope: "effective",
-			signal: signal,
+			signal: this.linkedCondensationSignal(disposableHandler),
+			additionalSourceText: formatCurrentTurnUserRequests(currentTurnUserRequests),
 		})
 	}
 

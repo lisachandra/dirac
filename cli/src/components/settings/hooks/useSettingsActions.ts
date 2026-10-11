@@ -2,7 +2,6 @@ import type { AutoApprovalSettings } from "@shared/AutoApprovalSettings"
 import {
 	type ApiProvider,
 	createModelProviderSelection,
-	type ModelInfo,
 	type ModelProviderPreset,
 	type ModelProviderSelection,
 } from "@shared/api"
@@ -21,6 +20,7 @@ import { openAiCodexUsageService } from "@/integrations/openai-codex/OpenAiCodex
 import { openAiCodexOAuthManager } from "@/integrations/openai-codex/oauth"
 import { Logger } from "@/shared/services/Logger"
 import { openExternal } from "@/utils/env"
+import { createModelSelectionPatch } from "../../../utils/model-selection"
 import { applyBedrockConfig, applyProviderConfig } from "../../../utils/provider-config"
 import type { BedrockConfig } from "../../BedrockSetup"
 import type { ObjectEditorState } from "../../ConfigViewComponents"
@@ -453,8 +453,8 @@ export function useSettingsActions({
 				const planProvider = effectiveApi.planModeApiProvider || actProvider
 				if (actProvider && planProvider) {
 					const actKey = getProviderModelIdKey(actProvider, "act")
-					const planKey = getProviderModelIdKey(planProvider, "plan")
-					taskSettingsPatch[planKey] = effectiveSettings?.[actKey] ?? stateManager.getGlobalSettingsKey(actKey as any)
+					const actModelId = (effectiveSettings?.[actKey] ?? stateManager.getGlobalSettingsKey(actKey as any)) as string | undefined
+					Object.assign(taskSettingsPatch, await createModelSelectionPatch(effectiveApi, "plan", actModelId, true, controller))
 				}
 				taskSettingsPatch.planModeThinkingBudgetTokens =
 					effectiveSettings?.actModeThinkingBudgetTokens ??
@@ -578,17 +578,11 @@ export function useSettingsActions({
 			if (["actModelId", "planModelId", "actCustomModelId", "planCustomModelId"].includes(item.key)) {
 				const taskConfig =
 					controller?.task?.getWorkingConfiguration().apiConfiguration ?? stateManager.getApiConfiguration()
-				const actProvider = taskConfig.actModeApiProvider
-				const planProvider = taskConfig.planModeApiProvider || actProvider
-				const actKey = actProvider ? getProviderModelIdKey(actProvider, "act") : null
-				const planKey = planProvider ? getProviderModelIdKey(planProvider, "plan") : null
-				if (separateModels) {
-					const stateKey = item.key === "actModelId" || item.key === "actCustomModelId" ? actKey : planKey
-					if (stateKey) settingsPatch[stateKey] = editValue || undefined
-				} else {
-					if (actKey) settingsPatch[actKey] = editValue || undefined
-					if (planKey) settingsPatch[planKey] = editValue || undefined
-				}
+				const selectedMode = item.key.startsWith("act") ? "act" : "plan"
+				Object.assign(
+					settingsPatch,
+					await createModelSelectionPatch(taskConfig, selectedMode, editValue || undefined, separateModels, controller),
+				)
 			} else if (item.key === "autoCondenseContextLimit") {
 				const limit = Number(editValue)
 				if (!isValidAutoCondenseContextLimit(limit))
@@ -755,34 +749,9 @@ export function useSettingsActions({
 				return
 			}
 			const taskConfig = controller?.task?.getWorkingConfiguration().apiConfiguration ?? stateManager.getApiConfiguration()
-			const actProvider = taskConfig.actModeApiProvider
-			const planProvider = taskConfig.planModeApiProvider || actProvider
-			const providerForSelection = separateModels
-				? pickingModelKey === "actModelId"
-					? actProvider
-					: planProvider
-				: actProvider || planProvider
-			if (!providerForSelection) return
-			const actKey = actProvider ? getProviderModelIdKey(actProvider, "act") : null
-			const planKey = planProvider ? getProviderModelIdKey(planProvider, "plan") : null
-			let modelInfo: ModelInfo | undefined
-			if (providerForSelection === "openrouter") modelInfo = (await controller?.readOpenRouterModels())?.[modelId]
-			const settingsPatch: Record<string, unknown> = {}
-			if (separateModels) {
-				const stateKey = pickingModelKey === "actModelId" ? actKey : planKey
-				if (stateKey) settingsPatch[stateKey] = modelId
-				if (modelInfo)
-					settingsPatch[
-						pickingModelKey === "actModelId" ? "actModeOpenRouterModelInfo" : "planModeOpenRouterModelInfo"
-					] = modelInfo
-			} else {
-				if (actKey) settingsPatch[actKey] = modelId
-				if (planKey) settingsPatch[planKey] = modelId
-				if (modelInfo) {
-					settingsPatch.actModeOpenRouterModelInfo = modelInfo
-					settingsPatch.planModeOpenRouterModelInfo = modelInfo
-				}
-			}
+			const selectedMode = pickingModelKey === "actModelId" ? "act" : "plan"
+			const settingsPatch = await createModelSelectionPatch(taskConfig, selectedMode, modelId, separateModels, controller)
+			if (!Object.keys(settingsPatch).length) return
 			await commitSettings(settingsPatch, true)
 			refreshModelIds()
 			setIsPickingModel(false)

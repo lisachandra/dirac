@@ -1,6 +1,7 @@
 import "should"
 import sinon from "sinon"
 import { deepSeekModels } from "@/shared/api"
+import { mockFetchForTesting } from "@/shared/net"
 import { DeepSeekHandler } from "../deepseek"
 
 const createAsyncIterable = (data: any[] = []) => ({
@@ -12,8 +13,8 @@ const createAsyncIterable = (data: any[] = []) => ({
 describe("DeepSeekHandler", () => {
 	afterEach(() => sinon.restore())
 
-	it("registers only DeepSeek V4.1 Flash with multimodal support and current pricing", () => {
-		Object.keys(deepSeekModels).should.deepEqual(["deepseek-flash"])
+	it("registers Flash and Pro while retaining Flash capabilities and pricing", () => {
+		Object.keys(deepSeekModels).should.deepEqual(["deepseek-flash", "deepseek-v4-pro"])
 		deepSeekModels["deepseek-flash"].should.deepEqual({
 			maxTokens: 384_000,
 			contextWindow: 1_048_576,
@@ -55,7 +56,6 @@ describe("DeepSeekHandler", () => {
 		for (const apiModelId of [
 			"deepseek-v4-flash",
 			"deepseek-v4-flash-vision-exp",
-			"deepseek-v4-pro",
 			"deepseek-chat",
 			"deepseek-reasoner",
 		]) {
@@ -85,7 +85,7 @@ describe("DeepSeekHandler", () => {
 
 		const request = create.firstCall.args[0]
 		request.model.should.equal("deepseek-flash")
-		request.max_tokens.should.equal(384_000)
+		request.should.not.have.property("max_tokens")
 		request.messages.should.deepEqual([
 			{ role: "system", content: "system" },
 			{
@@ -192,8 +192,53 @@ describe("DeepSeekHandler", () => {
 			reasoning_content: "prior reasoning",
 		})
 		request.tools[0].function.strict.should.equal(true)
-		request.extra_body.should.deepEqual({ thinking: { type: "enabled" } })
+		request.thinking.should.deepEqual({ type: "enabled" })
+		request.should.not.have.property("extra_body")
 		request.should.not.have.property("budget_tokens")
 	})
+
+	it("preserves Pro selection with text-only capabilities and unchanged peak/off-peak pricing", () => {
+		const model = new DeepSeekHandler({ apiModelId: "deepseek-v4-pro" }).getModel()
+		model.id.should.equal("deepseek-v4-pro")
+		model.info.supportsImages!.should.equal(false)
+		model.info.maxTokens!.should.equal(384_000)
+		model.info.contextWindow!.should.equal(1_048_576)
+		model.info.outputPrice!.should.equal(1.98)
+		model.info.cacheWritesPrice!.should.equal(0.66)
+		model.info.cacheReadsPrice!.should.equal(0.022)
+		model.info.pricingSchedule!.periods[0].prices.should.deepEqual({
+			inputPrice: 0, outputPrice: 3.96, cacheWritesPrice: 1.32, cacheReadsPrice: 0.044,
+		})
+	})
+
+	for (const apiModelId of ["deepseek-flash", "deepseek-v4-pro"]) {
+		for (const reasoningEffort of ["none", "high"]) {
+			it(`serializes ${reasoningEffort} thinking at the body root for ${apiModelId}`, async () => {
+				let request: Record<string, any> | undefined
+				await mockFetchForTesting(async (_input, init) => {
+					request = JSON.parse(init!.body as string)
+					return new Response([
+						": keep-alive\n\n",
+						'data: {"choices":[{"delta":{"role":"assistant","content":""}}]}\n\n',
+						'data: {"choices":[{"delta":{"content":"pong"}}]}\n\n',
+						"data: [DONE]\n\n",
+					].join(""), { headers: { "Content-Type": "text/event-stream" } })
+				}, async () => {
+					const handler = new DeepSeekHandler({ apiModelId, reasoningEffort, deepSeekApiKey: "test-key" })
+					const chunks = []
+					for await (const chunk of handler.createMessage("system", [{ role: "user", content: "ping" }])) {
+						chunks.push(chunk)
+					}
+					chunks.should.deepEqual([{ type: "text", text: "pong" }])
+				})
+				request!.model.should.equal(apiModelId)
+				request!.thinking.should.deepEqual({ type: reasoningEffort === "none" ? "disabled" : "enabled" })
+				request!.should.not.have.property("extra_body")
+				request!.should.not.have.property("max_tokens")
+				if (reasoningEffort === "none") request!.should.not.have.property("reasoning_effort")
+				else request!.reasoning_effort.should.equal("high")
+			})
+		}
+	}
 
 })

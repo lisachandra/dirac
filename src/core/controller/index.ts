@@ -21,6 +21,7 @@ import { SkillMetadata } from "@/shared/skills"
 import { StateManager } from "../storage/StateManager"
 import { Task } from "../task"
 import type { PresentationSnapshot } from "../task/message-state"
+import type { ITaskHost } from "../task/types/task-host"
 import { AuthController } from "./auth/AuthController"
 import { Initializer, type InitializerConfig } from "./index-initializer"
 import { checkCliInstallation } from "./state/checkCliInstallation"
@@ -51,7 +52,7 @@ interface SelectedPresentation extends PresentationSnapshot {
 	source?: Task["messageStateHandler"]
 }
 
-export class Controller {
+export class Controller implements ITaskHost {
 	public discoveredSkillsCache?: SkillMetadata[]
 	readonly stateManager: StateManager
 	private availableToolsFingerprint?: string
@@ -232,6 +233,10 @@ export class Controller {
 		return this.taskController.reinitExistingTaskFromId(taskId, this.resolveTaskInitializationOptions(initializationOptions))
 	}
 
+	async prepareTaskForFollowUp(initializationOptions?: TaskInitializationOptions): Promise<Task> {
+		return this.taskController.prepareTaskForFollowUp(this.resolveTaskInitializationOptions(initializationOptions))
+	}
+
 	async cancelTask(): Promise<void> {
 		if (this.goalController.hasRunningCoordinator) {
 			await this.goalController.cancelCurrentExecution("Cancelled by user")
@@ -390,11 +395,11 @@ export class Controller {
 		const state: Partial<ExtensionState> = controlState ?? {
 			presentationSurfaceId: surfaceId,
 			presentationOffset: task?.messageStateHandler.getPresentationOffset(),
-			activeVoiceStreamId: task?.taskState.activeVoiceStreamId,
-			isApiRequestActive: task?.taskState.isApiRequestActive ?? false,
-			taskStatus: task?.taskState.status ?? TaskStatus.IDLE,
+			activeVoiceStreamId: task?.stateView.activeVoiceStreamId,
+			isApiRequestActive: task?.stateView.isApiRequestActive ?? false,
+			taskStatus: task?.stateView.status ?? TaskStatus.IDLE,
 			uiActionState: projectUIActionState(
-				task?.taskState,
+				task?.stateView,
 				(id) => task?.messageStateHandler.getMessageById(id),
 				maxConsecutiveMistakes,
 			),

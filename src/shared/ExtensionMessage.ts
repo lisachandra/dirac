@@ -70,6 +70,8 @@ export interface ToolMetadata {
 	description: string
 	source: "builtin" | "global" | "workspace" | "task"
 	modulePath: string
+	/** False when workspace code is not approved for execution. */
+	executable?: boolean
 }
 
 export interface ExtensionState {
@@ -166,6 +168,8 @@ export interface ExtensionState {
 	availableTools: ToolMetadata[]
 	toolToggles: Record<string, boolean>
 	welcomeBanners?: BannerCardData[]
+	/** Explicit null clears identity from an earlier Unbiased login. */
+	unbiasedWorkloadName?: string | null
 	openAiCodexIsAuthenticated?: boolean
 	openAiCodexEmail?: string
 	openAiCodexUsage?: OpenAiCodexUsageSnapshot

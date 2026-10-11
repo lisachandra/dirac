@@ -162,15 +162,29 @@ describe("SessionConfigManager task runtime behavior", () => {
 	it("normalizes a retired DeepSeek model to the provider default", async () => {
 		const manager = new SessionConfigManager()
 		const runtime = linkedDeepSeekRuntime()
-		runtime.actModeApiModelId = "deepseek-v4-pro"
+		runtime.actModeApiModelId = "deepseek-v4-flash"
 
 		const options = await manager.getSessionConfigOptions(session(), runtime)
 		const model = selectOption(options, "model")
 		expect(model.currentValue).toBe("deepseek-flash")
-		expect(optionValues(model)).not.toContain("deepseek-v4-pro")
+		expect(optionValues(model)).not.toContain("deepseek-v4-flash")
 		expect(runtime.actModeApiModelId).toBe("deepseek-flash")
 		await expect(manager.assertTaskRuntimeAvailable(session(), runtime)).resolves.toBeUndefined()
 	})
+
+	it("preserves a supported DeepSeek Pro selection", async () => {
+		const manager = new SessionConfigManager()
+		const runtime = linkedDeepSeekRuntime()
+		runtime.planModeApiModelId = "deepseek-v4-pro"
+		runtime.actModeApiModelId = "deepseek-v4-pro"
+
+		const model = selectOption(await manager.getSessionConfigOptions(session(), runtime), "model")
+		expect(model.currentValue).toBe("deepseek-v4-pro")
+		expect(optionValues(model)).toContain("deepseek-v4-pro")
+		expect(runtime.actModeApiModelId).toBe("deepseek-v4-pro")
+		await expect(manager.assertTaskRuntimeAvailable(session(), runtime)).resolves.toBeUndefined()
+	})
+
 
 	it("never advertises an OpenAI model while DeepSeek is active", async () => {
 		const manager = new SessionConfigManager()

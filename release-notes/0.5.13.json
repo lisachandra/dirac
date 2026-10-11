@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "version": "0.5.13",
+  "kind": "patch",
+  "announce": true,
+  "sourceTag": "v0.5.12",
+  "analyzedCommit": "c3b1840bb0891b533ba5ee5b0b425b5a64eae079",
+  "headline": "Updates and improvements",
+  "highlights": [
+    {
+      "id": "fix-c3b1840b",
+      "title": "bring back v4 pro, print clearer status message while awaiting first chunk",
+      "category": "fix",
+      "evidence": [
+        "c3b1840bb0891b533ba5ee5b0b425b5a64eae079"
+      ]
+    },
+    {
+      "id": "fix-11611ee0",
+      "title": "show the current mode in the active goal footer",
+      "category": "fix",
+      "evidence": [
+        "11611ee07f2aa2c58fad8ad8b1fec8e02f2cac73"
+      ]
+    }
+  ]
+}

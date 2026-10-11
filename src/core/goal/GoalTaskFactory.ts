@@ -3,6 +3,7 @@ import type { StateManager } from "@core/storage/StateManager"
 import { Task, type TaskParams } from "@core/task"
 import { releaseTaskLock, tryAcquireTaskLockWithRetry } from "@core/task/TaskLockUtils"
 import type { TaskExecutionProfile } from "@core/task/TaskExecutionProfile"
+import type { GoalChildRole } from "@shared/goal"
 import type { ToolEnvironmentFactory } from "@core/task/tools/interfaces/ToolEnvironmentFactory"
 import {
 	createTaskWorkingConfiguration,
@@ -13,18 +14,21 @@ import type { Settings } from "@shared/storage/state-keys"
 import type { WorkspaceRootManager } from "@core/workspace/WorkspaceRootManager"
 import type { HistoryItem } from "@shared/HistoryItem"
 
-export interface GoalTaskConstruction {
+interface GoalTaskBaseConstruction {
 	id: string
 	conversationUlid: string
 	prompt?: string
 	historyItem?: HistoryItem
-	executionProfile: Extract<TaskExecutionProfile, "goal_coordinator" | "goal_followup" | "goal_child">
 	environmentFactory: ToolEnvironmentFactory
 	getPinnedContext?: () => Promise<string | undefined>
 	onHistorySnapshot: (item: HistoryItem, task: Task) => Promise<void>
 	conversationPersistenceHooks?: TaskParams["conversationPersistenceHooks"]
-
 }
+
+export type GoalTaskConstruction = GoalTaskBaseConstruction & (
+	| { executionProfile: "goal_child"; childRole: GoalChildRole }
+	| { executionProfile: Extract<TaskExecutionProfile, "goal_coordinator" | "goal_followup">; childRole?: never }
+)
 
 export interface GoalTaskFactoryDependencies {
 	controller: Controller
@@ -50,7 +54,7 @@ export class GoalTaskFactory {
 
 		let task!: Task
 		try {
-			const workingConfiguration = this.workingConfiguration(input.executionProfile)
+			const workingConfiguration = this.workingConfiguration(input.executionProfile, input.childRole)
 			const params: TaskParams = {
 				controller: this.dependencies.controller,
 				updateTaskHistory: async (item) => {
@@ -99,12 +103,22 @@ export class GoalTaskFactory {
 		}
 	}
 
-	private workingConfiguration(executionProfile: GoalTaskConstruction["executionProfile"]): TaskWorkingConfiguration {
+	private workingConfiguration(
+		executionProfile: GoalTaskConstruction["executionProfile"],
+		childRole?: GoalChildRole,
+	): TaskWorkingConfiguration {
 		const source = this.dependencies.workingConfiguration
-		if (executionProfile !== "goal_child" || !source.settings.hooksEnabled) return source
+		if (executionProfile !== "goal_child") return source
+		if (!source.settings.hooksEnabled && (childRole !== "verification" || !source.settings.doubleCheckCompletionEnabled)) {
+			return source
+		}
 		return createTaskWorkingConfiguration({
 			revision: source.revision,
-			settings: { ...(structuredClone(source.settings) as Settings), hooksEnabled: false },
+			settings: {
+				...(structuredClone(source.settings) as Settings),
+				hooksEnabled: false,
+				...(childRole === "verification" ? { doubleCheckCompletionEnabled: false } : {}),
+			},
 			apiConfiguration: structuredClone(
 				source.apiConfiguration,
 			) as TaskWorkingConfigurationInput["apiConfiguration"],

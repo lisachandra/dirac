@@ -8,7 +8,7 @@ vi.mock("../hooks/useTerminalSize", () => ({
 	useTerminalSize: () => ({ columns: 120, rows: 40, resizeKey: 0 }),
 }))
 
-function renderFooter(quietMode: boolean, fastModeEnabled = false, isGoalActive = false) {
+function renderFooter(quietMode: boolean, fastModeEnabled = false, isGoalActive = false, mode: "act" | "plan" = "act") {
 	return render(
 		<ChatFooter
 			autoApproveAll={false}
@@ -17,7 +17,7 @@ function renderFooter(quietMode: boolean, fastModeEnabled = false, isGoalActive 
 			gitBranch={null}
 			gitDiffStats={null}
 			lastApiReqTotalTokens={0}
-			mode="act"
+			mode={mode}
 			modelId="test-model"
 			fastModeEnabled={fastModeEnabled}
 			isGoalActive={isGoalActive}
@@ -46,9 +46,10 @@ describe("ChatFooter modes", () => {
 		expect(frame).toContain("test-provider: test-model fast")
 	})
 
-	it("uses a compact Goal marker without mode-lock or accounting duplication", () => {
-		const frame = renderFooter(false, false, true).lastFrame() || ""
-		expect(frame).toContain("Act (Goal)")
+	it.each(["act", "plan"] as const)("uses a compact Goal marker matching %s mode without duplication", (mode) => {
+		const frame = renderFooter(false, false, true, mode).lastFrame() || ""
+		expect(frame).toContain(mode === "plan" ? "Plan (Goal)" : "Act (Goal)")
+		expect(frame).not.toContain(mode === "plan" ? "Act (Goal)" : "Plan (Goal)")
 		expect(frame).toContain("Ctrl+G details")
 		expect(frame).toContain("test-provider: test-model · project · Auto off · YOLO off · Quiet off")
 		expect(frame).not.toContain("locked")

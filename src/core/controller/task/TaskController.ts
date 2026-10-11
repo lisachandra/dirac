@@ -1,20 +1,21 @@
 import { cleanupLegacyCheckpoints } from "@integrations/checkpoints/CheckpointMigration"
 import type { HistoryItem } from "@shared/HistoryItem"
+import { TaskStatus } from "@shared/ExtensionMessage"
 import { type Settings } from "@shared/storage/state-keys"
-import {
-	createTaskWorkingConfiguration,
-	type TaskWorkingConfiguration,
-	type TaskWorkingConfigurationInput,
-} from "../../task/runtime/TaskWorkingConfiguration"
-import pWaitFor from "p-wait-for"
 import pTimeout from "p-timeout"
+import pWaitFor from "p-wait-for"
 import type { FolderLockWithRetryResult } from "@/core/locks/types"
 import { Logger } from "@/shared/services/Logger"
 import { getCwd, getDesktopDir } from "@/utils/path"
 import type { StateManager } from "../../storage/StateManager"
 import { Task } from "../../task"
-import { deserializeTaskError, type TaskRunOutcome } from "../../task/TaskRunOutcome"
+import {
+	createTaskWorkingConfiguration,
+	type TaskWorkingConfiguration,
+	type TaskWorkingConfigurationInput,
+} from "../../task/runtime/TaskWorkingConfiguration"
 import { releaseTaskLock, tryAcquireTaskLockWithRetry } from "../../task/TaskLockUtils"
+import { deserializeTaskError, type TaskRunOutcome } from "../../task/TaskRunOutcome"
 import { detectWorkspaceRoots } from "../../workspace/detection"
 import { setupWorkspaceManager } from "../../workspace/setup"
 import type { WorkspaceRootManager } from "../../workspace/WorkspaceRootManager"
@@ -119,6 +120,35 @@ export class TaskController {
 		return () => this.taskReplacementListeners.delete(listener)
 	}
 
+	/** Return a live task ready for follow-up input, restoring ended runs without losing their conversation. */
+	async prepareTaskForFollowUp(initializationOptions?: TaskInitializationOptions): Promise<Task> {
+		const task = this._task
+		if (!task) throw new Error("No task available for follow-up")
+
+		// Completion output can reach the client before the loop clears its previous response.
+		if (task.stateView.didAttemptCompletion && !task.stateView.runOutcome) {
+			await pWaitFor(
+				() =>
+					this._task !== task ||
+					task.stateView.runOutcome !== undefined ||
+					task.stateView.status === TaskStatus.COMPLETED ||
+					task.stateView.status === TaskStatus.AWAITING_USER_INPUT,
+				{ interval: 10 },
+			)
+		}
+		if (this._task !== task) throw new Error(`Task ${task.taskId} changed while preparing a follow-up`)
+
+		const waitingForInput =
+			task.stateView.status === TaskStatus.COMPLETED ||
+			task.stateView.status === TaskStatus.CANCELLED ||
+			task.stateView.status === TaskStatus.AWAITING_USER_INPUT
+		if (!task.stateView.runOutcome && waitingForInput) return task
+
+		await this.reinitExistingTaskFromId(task.taskId, initializationOptions)
+		if (!this._task) throw new Error(`Task ${task.taskId} was not restored for follow-up`)
+		return this._task
+	}
+
 	private reconstructionInitializationOptions(task: Task): TaskInitializationOptions {
 		const {
 			runtimeConfigurationOverrides: _runtimeOverrides,
@@ -139,7 +169,7 @@ export class TaskController {
 			runFailure = { error }
 		}
 
-		const replacement = task.taskState.pendingTaskReplacement
+		const replacement = task.stateView.pendingTaskReplacement
 		if (this._task !== task || !replacement) {
 			if (runFailure) throw runFailure.error
 			return
@@ -345,6 +375,8 @@ export class TaskController {
 			throw error
 		}
 
+		this.currentConversationUlid = this._task.ulid
+
 		if (historyItem) {
 			await this.startHistoricalTaskAndWaitForRestore(this._task)
 		} else if (task || images || files) {
@@ -400,9 +432,9 @@ export class TaskController {
 
 			await pWaitFor(
 				() =>
-					task.taskState.isApiRequestActive === false ||
-					task.taskState.didFinishAbortingStream ||
-					task.taskState.isWaitingForFirstChunk,
+					task.stateView.isApiRequestActive === false ||
+					task.stateView.didFinishAbortingStream ||
+					task.stateView.isWaitingForFirstChunk,
 				{
 					timeout: 3_000,
 				},

@@ -220,7 +220,7 @@ export class ToolRegistry {
 
 	isEnabled(toolId: string): boolean {
 		const tool = this.getTool(toolId)
-		if (!tool || tool.exposure.kind === "skill_only") return false
+		if (!tool || tool.executable === false || tool.exposure.kind === "skill_only") return false
 
 		const override = this.enabledOverrides.get(toolId)
 		if (override !== undefined) {
@@ -569,6 +569,7 @@ export class ToolRegistry {
 
 	private isEnabledTool(tool: DiscoveredTool): boolean {
 		if (tool.exposure.kind === "skill_only") return false
+		if (tool.executable === false) return false
 		if (tool.exposure.kind === "profile_only") return tool.source === "builtin"
 		if (tool.source === "task") return true
 		const override = this.enabledOverrides.get(tool.id)
@@ -621,7 +622,8 @@ export class ToolRegistry {
 			current.name !== next.name ||
 			current.source !== next.source ||
 			current.modulePath !== next.modulePath ||
-			JSON.stringify(current.exposure) !== JSON.stringify(next.exposure)
+			JSON.stringify(current.exposure) !== JSON.stringify(next.exposure) ||
+			current.executable !== next.executable
 		) {
 			return false
 		}

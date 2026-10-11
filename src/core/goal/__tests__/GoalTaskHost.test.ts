@@ -113,7 +113,7 @@ function goalRecord(): GoalRecord {
 	}
 }
 
-function createHarness(heartbeatMs = 5, clockStepMs = 1) {
+function createHarness(interventionDeadlineMs?: number, clockStepMs = 1) {
 	const store = new MemoryGoalStore(goalRecord(), clockStepMs)
 	const tasks = new Map<string, ControlledTask>()
 	const taskInputs = new Map<string, GoalChildTaskFactoryInput>()
@@ -123,7 +123,7 @@ function createHarness(heartbeatMs = 5, clockStepMs = 1) {
 		taskInputs.set(input.id, input)
 		return task as unknown as Task
 	}
-	const host = new GoalTaskHost("goal", store as unknown as GoalStore, createTask, heartbeatMs)
+	const host = new GoalTaskHost("goal", store as unknown as GoalStore, createTask, interventionDeadlineMs)
 	return { host, store, tasks, taskInputs }
 }
 
@@ -177,7 +177,7 @@ function interactionCard(params: CardParams): ICardHandle {
 
 describe("GoalTaskHost", () => {
 	it("runs children concurrently with unique same-millisecond timestamp IDs and distinct conversation ULIDs", async () => {
-		const { host, taskInputs } = createHarness(5, 0)
+		const { host, taskInputs } = createHarness(undefined, 0)
 		const [first, second] = await Promise.all([
 			host.startTask({ taskTitle: "First", prompt: "Do first" }),
 			host.startTask({ taskTitle: "Second", prompt: "Do second" }),
@@ -231,7 +231,7 @@ describe("GoalTaskHost", () => {
 	})
 
 	it("delivers complete response payloads and acknowledges them only after coordinator persistence", async () => {
-		const { host, store, tasks } = createHarness(1)
+		const { host, store, tasks } = createHarness()
 		const first = await host.startTask({ taskTitle: "First", prompt: "Do first" })
 		const second = await host.startTask({ taskTitle: "Second", prompt: "Do second" })
 		const question = "Which release path?"
@@ -258,9 +258,48 @@ describe("GoalTaskHost", () => {
 		assert.equal(persisted.children.find((child) => child.id === first.id)?.deliveredResponseCursor, 1)
 		assert.equal(persisted.children.find((child) => child.id === second.id)?.deliveredResponseCursor, 1)
 
-		const heartbeat = await host.waitForEvents()
-		assert.match(heartbeat, /Reason: heartbeat/)
+		let woke = false
+		const nextWake = host.waitForEvents().then((value) => {
+			woke = true
+			return value
+		})
+		await new Promise((resolve) => setTimeout(resolve, 20))
+		assert.equal(woke, false)
+		assert.equal((await store.read("goal")).wakeSequence, 1)
+		await host.recordUserSteering()
+		assert.match(await nextWake, /Reason: user steering/)
+		await host.acknowledgePersistedWake()
 		await Promise.all([host.cancelTask(first.id), host.cancelTask(second.id)])
+	})
+
+	it("wakes on a configured intervention deadline even without child events", async () => {
+		const { host, store } = createHarness(5)
+		assert.match(await host.waitForEvents(), /Reason: intervention deadline/)
+		assert.equal((await store.read("goal")).wakeSequence, 1)
+		await host.shutdown("interrupted", "Done")
+	})
+
+	it("rejects a pending wait when the host shuts down", async () => {
+		const { host } = createHarness()
+		const rejected = assert.rejects(host.waitForEvents(), /shut down/)
+		await host.shutdown("interrupted", "Done")
+		await rejected
+	})
+
+	it("wakes for completed and cancelled children without relying on heartbeats", async () => {
+		const { host, store, tasks } = createHarness()
+		const completed = await host.startTask({ taskTitle: "Complete", prompt: "Finish" })
+		const completedWake = host.waitForEvents()
+		tasks.get(completed.id)!.complete("Done")
+		assert.match(await completedWake, /Finished \(completed\): Done/)
+		await host.acknowledgePersistedWake()
+
+		const cancelled = await host.startTask({ taskTitle: "Cancelled", prompt: "Wait" })
+		const cancelledWake = host.waitForEvents()
+		await host.cancelTask(cancelled.id, "Cancelled by coordinator")
+		assert.match(await cancelledWake, /Finished \(cancelled\): Cancelled by coordinator/)
+		await host.acknowledgePersistedWake()
+		assert.deepEqual((await store.read("goal")).events, [])
 	})
 
 	it("replays a claimed wake when coordinator conversation persistence rolls back", async () => {

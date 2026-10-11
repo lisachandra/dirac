@@ -113,7 +113,6 @@ describe("retired DeepSeek model migration", () => {
 		for (const modelId of [
 			"deepseek-v4-flash",
 			"deepseek-v4-flash-vision-exp",
-			"deepseek-v4-pro",
 			"deepseek-chat",
 			"deepseek-reasoner",
 		]) {
@@ -126,7 +125,7 @@ describe("retired DeepSeek model migration", () => {
 		expect(
 			buildRetiredDeepSeekModelStateUpdates({
 				planModeApiProvider: "deepseek",
-				planModeApiModelId: "deepseek-v4-pro",
+				planModeApiModelId: "deepseek-v4-flash",
 				actModeApiProvider: "openai-native",
 				actModeApiModelId: "deepseek-chat",
 			}),
@@ -154,9 +153,9 @@ describe("retired DeepSeek model migration", () => {
 		const [preset] = buildLegacySynthetic1mStateUpdates({
 			modelProviderPresets: [
 				{
-					id: "deepseek::deepseek-v4-pro",
+					id: "deepseek::deepseek-v4-flash",
 					provider: "deepseek",
-					modelId: "deepseek-v4-pro",
+					modelId: "deepseek-v4-flash",
 					modelInfo: { supportsPromptCache: true },
 					lastUsedAt: 1,
 				},
@@ -166,4 +165,26 @@ describe("retired DeepSeek model migration", () => {
 		expect(preset.id).to.equal("deepseek::deepseek-flash")
 		expect(preset.modelInfo).to.equal(undefined)
 	})
+	it("preserves Pro in both modes, utility selection, and saved presets", () => {
+		expect(normalizeRetiredDeepSeekModelId("deepseek-v4-pro")).to.equal("deepseek-v4-pro")
+		expect(buildLegacyModelIdStateUpdates({
+			planModeApiProvider: "deepseek",
+			planModeApiModelId: "deepseek-v4-pro",
+			actModeApiProvider: "deepseek",
+			actModeApiModelId: "deepseek-v4-pro",
+			utilityModelSelection: {
+				provider: "deepseek",
+				modelId: "deepseek-v4-pro",
+				modelInfo: { supportsPromptCache: true },
+			},
+			modelProviderPresets: [{
+				id: "deepseek::deepseek-v4-pro",
+				provider: "deepseek",
+				modelId: "deepseek-v4-pro",
+				modelInfo: { supportsPromptCache: true },
+				lastUsedAt: 1,
+			}],
+		})).to.deep.equal({})
+	})
+
 })

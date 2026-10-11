@@ -380,9 +380,19 @@ export class TaskMessageBridge {
 			);
 		};
 
+		const onCardInteractionReady = (message: DiracMessage) => {
+			onDiracMessagesChanged({
+				type: "update",
+				message,
+				messages: task.messageStateHandler.getDiracMessages(),
+			});
+		};
+
+		task.messageStateHandler.on("cardInteractionReady", onCardInteractionReady);
 		task.messageStateHandler.on("diracMessagesChanged", onDiracMessagesChanged);
 		cleanupFunctions.push(() => {
 			active = false;
+			task.messageStateHandler.off("cardInteractionReady", onCardInteractionReady);
 			task.messageStateHandler.off(
 				"diracMessagesChanged",
 				onDiracMessagesChanged,
@@ -710,6 +720,20 @@ export class TaskMessageBridge {
 		);
 	}
 
+	private isActiveInteraction(sessionId: string, message: DiracMessage): boolean {
+		if (message.content.type !== DiracMessageType.CARD) return false;
+		const session = this.getSession(sessionId);
+		const task = session && this.getController(session)?.task;
+		const currentMessage = task?.messageStateHandler.getMessageById(message.id);
+		return !!(
+			task &&
+			!task.taskState.abort &&
+			task.taskState.lastWaitingCardId === message.content.card.id &&
+			currentMessage?.content.type === DiracMessageType.CARD &&
+			currentMessage.content.card.status === CardStatus.WAITING_FOR_INPUT
+		);
+	}
+
 	private async handleElicitationRequest(
 		sessionId: string,
 		message: DiracMessage,
@@ -723,6 +747,8 @@ export class TaskMessageBridge {
 		const interactionGeneration = this.interactionGeneration;
 		const interactionIsCurrent = () =>
 			this.interactionGeneration === interactionGeneration;
+
+		if (!this.isActiveInteraction(sessionId, message)) return;
 
 		try {
 			const response = await this.requestElicitation(request);
@@ -826,6 +852,12 @@ export class TaskMessageBridge {
 				? message.content.card.id
 				: "";
 
+		const task = controller.task;
+		const interactionGeneration = this.interactionGeneration;
+		const interactionIsCurrent = () =>
+			this.interactionGeneration === interactionGeneration;
+		if (!this.isActiveInteraction(sessionId, message)) return;
+
 		// Derive interaction type from card properties: requireApproval → "tool", requireFeedback → "followup"
 		const interactionType: "tool" | "followup" =
 			message.content.type === DiracMessageType.CARD &&
@@ -839,6 +871,7 @@ export class TaskMessageBridge {
 				permissionRequest.toolCall,
 				permissionRequest.options,
 			);
+			if (!interactionIsCurrent()) return;
 
 			Logger.debug(
 				"[TaskMessageBridge] Permission response received:",
@@ -879,14 +912,14 @@ export class TaskMessageBridge {
 			}
 
 			if (result.cancelled) {
-				await controller.task.submitCardResponse(
+				await task.submitCardResponse(
 					cardId,
 					DiracAskResponse.REJECT,
 				);
 			} else {
 				const isNewTaskTransition =
 					message.content.type === DiracMessageType.CARD && message.content.card.rawInput?.tool === "new_task";
-				await controller.task.submitCardResponse(
+				await task.submitCardResponse(
 					cardId,
 					isNewTaskTransition && result.response === "new_task" ? DiracAskResponse.APPROVE : result.response,
 					result.text,
@@ -896,6 +929,7 @@ export class TaskMessageBridge {
 				);
 			}
 		} catch (error) {
+			if (!interactionIsCurrent()) return;
 			Logger.debug(
 				"[TaskMessageBridge] Error handling permission request:",
 				error,
@@ -910,7 +944,7 @@ export class TaskMessageBridge {
 				});
 			}
 
-			await controller.task.submitCardResponse(cardId, DiracAskResponse.REJECT);
+			await task.submitCardResponse(cardId, DiracAskResponse.REJECT);
 		}
 	}
 
@@ -1131,6 +1165,7 @@ export class TaskMessageBridge {
 				const interactionCardKey = this.getInteractionCardKey(sessionId, message);
 				if (
 					interactionCardKey &&
+					(!this.formElicitationIsNegotiated() || this.isActiveInteraction(sessionId, message)) &&
 					!this.processedInteractionCardKeys.has(interactionCardKey)
 				) {
 					this.processedInteractionCardKeys.add(interactionCardKey);
@@ -1162,7 +1197,7 @@ export class TaskMessageBridge {
 						}
 					}
 				}
-			} else if (result.requiresPermission && result.permissionRequest) {
+			} else if (result.requiresPermission && result.permissionRequest && this.isActiveInteraction(sessionId, message)) {
 				const interactionCardKey = this.getInteractionCardKey(
 					sessionId,
 					message,

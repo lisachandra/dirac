@@ -30,23 +30,14 @@ import { BrowserSession } from "@services/browser/BrowserSession"
 import { UrlContentFetcher } from "@services/browser/UrlContentFetcher"
 import { telemetryService } from "@services/telemetry"
 import { type ApiConfiguration } from "@shared/api"
-import type { DiracToolSpec } from "@shared/tools"
-
 import { getExtensionSourceDir } from "@shared/dirac/constants"
 import { TaskStatus } from "@shared/ExtensionMessage"
 import { HistoryItem } from "@shared/HistoryItem"
-
-import {
-	DiracContent,
-	DiracStorageMessage,
-	DiracTextContentBlock,
-	DiracToolResponseContent,
-} from "@shared/messages/content"
-
+import { DiracContent, DiracStorageMessage, DiracTextContentBlock, DiracToolResponseContent } from "@shared/messages/content"
 import { ShowMessageType } from "@shared/proto/index.host"
 import { Logger } from "@shared/services/Logger"
-
 import { type Mode } from "@shared/storage/types"
+import type { DiracToolSpec } from "@shared/tools"
 
 import { DiracAskResponse } from "@shared/WebviewMessage"
 import Mutex from "p-mutex"
@@ -54,8 +45,8 @@ import { ulid } from "ulid"
 import { getErrorMessage } from "@/shared/errors"
 import { type SkillMetadata } from "@/shared/skills"
 
-import { Controller } from "../controller"
 import { StateManager } from "../storage/StateManager"
+import type { ITaskHost } from "./types/task-host"
 import { ApiConversationManager } from "./ApiConversationManager"
 import { AssistantStreamManager } from "./AssistantStreamManager"
 import { activateTaskSkill } from "./activateTaskSkill"
@@ -66,23 +57,31 @@ import { LifecycleManager, type ResumeTaskOptions } from "./LifecycleManager"
 import { LocalConversationCompaction } from "./LocalConversationCompaction"
 import { MessageStateHandler } from "./message-state"
 import { ResponseProcessor } from "./ResponseProcessor"
-
+import {
+	assertTaskMutationAuthorized,
+	createTaskRequestRuntime,
+	TaskMutationGate,
+	type TaskRequestRuntime,
+} from "./runtime/TaskRequestRuntime"
+import {
+	buildTaskWorkingConfigurationUpdate,
+	type TaskWorkingConfiguration,
+	type TaskWorkingConfigurationPatch,
+} from "./runtime/TaskWorkingConfiguration"
 import { StreamingMetricsManager } from "./StreamingMetricsManager"
 import { StreamResponseHandler } from "./StreamResponseHandler"
 import { type SteeringClaim } from "./steering"
+import { attemptApiRequest } from "./TaskApiRequestAttempt"
+import type { TaskConversationPersistenceHooks } from "./TaskConversationPersistence"
+import type { TaskExecutionProfile } from "./TaskExecutionProfile"
 import { TaskMessenger } from "./TaskMessenger"
 import { handleMistakeLimitReached } from "./TaskMistakeLimit"
 import { type TaskPromptArtifactsContext, writePromptMetadataArtifacts } from "./TaskPromptArtifacts"
 import { type TaskRequestBuilderContext } from "./TaskRequestBuilder"
-import {
-	handleApiRequestError,
-	persistApiStopReason,
-	type TaskRequestOutcomeContext,
-} from "./TaskRequestOutcome"
-import { attemptApiRequest } from "./TaskApiRequestAttempt"
 import { recursivelyMakeDiracRequests, type TaskRequestLoopContext } from "./TaskRequestLoop"
-import type { TaskConversationPersistenceHooks } from "./TaskConversationPersistence"
-import { TaskState } from "./TaskState"
+import { handleApiRequestError, persistApiStopReason, type TaskRequestOutcomeContext } from "./TaskRequestOutcome"
+import { serializeTaskError, type TaskCancellationIntent, type TaskRunOutcome } from "./TaskRunOutcome"
+import { type ReadonlyTaskState, TaskState } from "./TaskState"
 import {
 	appendQueuedSteeringToNextApiRequest,
 	appendQueuedSteeringToUserContent,
@@ -96,35 +95,18 @@ import {
 	settleConsumedSteeringClaim,
 	type TaskSteeringContext,
 } from "./TaskSteering"
-import { ToolExecutor } from "./ToolExecutor"
-import { DiracContext } from "./tools/context/DiracContext"
-import type { ToolSnapshotDirtyReason } from "./tools/runtime/ToolSnapshot"
-import {
-	assertTaskMutationAuthorized,
-	createTaskRequestRuntime,
-	TaskMutationGate,
-	type TaskRequestRuntime,
-} from "./runtime/TaskRequestRuntime"
-import {
-	buildTaskWorkingConfigurationUpdate,
-	type TaskWorkingConfiguration,
-	type TaskWorkingConfigurationPatch,
-} from "./runtime/TaskWorkingConfiguration"
-import { extractProviderDomainFromUrl } from "./utils"
 import { submitCardResponse, waitForFollowUp } from "./TaskUserInput"
-import type { TaskExecutionProfile } from "./TaskExecutionProfile"
-import type { ToolEnvironmentFactory } from "./tools/interfaces/ToolEnvironmentFactory"
+import { ToolExecutor } from "./ToolExecutor"
 import { SurfaceToolEnvironmentFactory } from "./tools/adapters/SurfaceAdapter"
-import {
-	serializeTaskError,
-	type TaskCancellationIntent,
-	type TaskRunOutcome,
-} from "./TaskRunOutcome"
+import { DiracContext } from "./tools/context/DiracContext"
+import type { ToolEnvironmentFactory } from "./tools/interfaces/ToolEnvironmentFactory"
+import type { ToolSnapshotDirtyReason } from "./tools/runtime/ToolSnapshot"
+import { extractProviderDomainFromUrl } from "./utils"
 
 export type ToolResponse = DiracToolResponseContent
 
 export type TaskParams = {
-	controller: Controller
+	controller: ITaskHost
 	updateTaskHistory: (historyItem: HistoryItem) => Promise<HistoryItem[]>
 	postStateToWebview: () => Promise<void>
 	postPresentationToWebview?: () => Promise<void>
@@ -156,7 +138,6 @@ export type TaskParams = {
 	enqueuePreRequestSteeringMessages?: () => Promise<void>
 	updateBackgroundCommandState?: (running: boolean, taskId: string) => void
 	conversationPersistenceHooks?: TaskConversationPersistenceHooks
-
 }
 
 const DEFAULT_API_ERROR_MAX_RETRIES = 3
@@ -166,6 +147,9 @@ const MAX_API_ERROR_RETRY_DELAY_MS = 60_000
 export class Task {
 	// Core task variables
 	readonly taskId: string
+	// Sequence number for prompt-metadata debug artifacts — see promptArtifactsContext.
+	// Each API request within a task gets its own file instead of overwriting the last.
+	private promptArtifactSeq = 0
 	private diracContext: DiracContext
 	readonly ulid: string
 	private taskIsFavorited?: boolean
@@ -175,6 +159,11 @@ export class Task {
 	taskState: TaskState
 	private workingConfiguration: TaskWorkingConfiguration
 	private activeRequestRuntime?: TaskRequestRuntime
+
+	/** Read-only view of task state for consumers outside the task layer. */
+	get stateView(): ReadonlyTaskState {
+		return this.taskState
+	}
 
 	private readonly conversationPersistenceHooks?: TaskConversationPersistenceHooks
 
@@ -205,6 +194,10 @@ export class Task {
 	private get promptArtifactsContext(): TaskPromptArtifactsContext {
 		return {
 			taskId: this.taskId,
+			// Each call gets its own sequence number so a multi-call turn (e.g. the
+			// noToolsUsed retry loop) leaves one debug artifact per API request
+			// instead of the last request overwriting all earlier ones.
+			requestSeq: ++this.promptArtifactSeq,
 			cwd: this.cwd,
 			writePromptMetadataEnabled: this.workingConfiguration.settings.writePromptMetadataEnabled,
 			writePromptMetadataDirectory: this.workingConfiguration.settings.writePromptMetadataDirectory,
@@ -231,6 +224,7 @@ export class Task {
 				writePromptMetadataArtifacts(
 					{
 						taskId: this.taskId,
+						requestSeq: ++this.promptArtifactSeq,
 						cwd: this.cwd,
 						writePromptMetadataEnabled: requestRuntime.workingConfiguration.settings.writePromptMetadataEnabled,
 						writePromptMetadataDirectory: requestRuntime.workingConfiguration.settings.writePromptMetadataDirectory,
@@ -247,6 +241,7 @@ export class Task {
 			taskMessenger: this.taskMessenger,
 			api: requestRuntime.api,
 			taskId: this.taskId,
+			mode: requestRuntime.workingConfiguration.settings.mode,
 			executionProfile: this.executionProfile,
 			maxApiErrorRetries: this.getApiErrorMaxRetries(),
 			checkpointManager: this.checkpointManager,
@@ -280,7 +275,6 @@ export class Task {
 			diffViewProvider: this.diffViewProvider,
 			ulid: this.ulid,
 			conversationPersistenceHooks: this.conversationPersistenceHooks,
-
 		}
 	}
 
@@ -316,9 +310,9 @@ export class Task {
 		return appendQueuedSteeringToNextApiRequest(this.steeringContext, outboundHistory)
 	}
 
-	private async commitAttemptCompletion(response: string): Promise<
-		import("./tools/interfaces/IToolEnvironment").CompletionCommitResult
-	> {
+	private async commitAttemptCompletion(
+		response: string,
+	): Promise<import("./tools/interfaces/IToolEnvironment").CompletionCommitResult> {
 		return commitAttemptCompletion(this.steeringContext, response)
 	}
 
@@ -348,7 +342,7 @@ export class Task {
 	}
 
 	// Core dependencies
-	private controller: Controller
+	private host: ITaskHost
 
 	// Service handlers
 	api: ApiHandler
@@ -451,7 +445,7 @@ export class Task {
 			throw new Error(`${this.executionProfile} Tasks require an Act-mode working configuration`)
 		}
 		this.contextCompactionObserver = params.onContextCompacted
-		this.controller = controller
+		this.host = controller
 		this.updateTaskHistory = updateTaskHistory
 		this.postStateToWebview = postStateToWebview
 		this.postPresentationToWebview = postPresentationToWebview ?? postStateToWebview
@@ -464,7 +458,7 @@ export class Task {
 		this.taskId = taskId
 		this.taskState.taskLockAcquired = taskLockAcquired
 		this.terminalExecutionMode = vscodeTerminalExecutionMode || "vscodeTerminal"
-		this.switchToActMode = params.switchToActMode ?? (() => this.controller.toggleActModeForYoloMode())
+		this.switchToActMode = params.switchToActMode ?? (() => this.host.toggleActModeForYoloMode())
 		this.enqueuePreRequestSteeringMessages = params.enqueuePreRequestSteeringMessages ?? (async () => undefined)
 		this.conversationPersistenceHooks = params.conversationPersistenceHooks
 
@@ -560,7 +554,7 @@ export class Task {
 		this.diracContext = new DiracContext(this.taskId, this.stateManager, this.ulid)
 
 		// Initialize context trackers
-		this.fileContextTracker = new FileContextTracker(controller, this.taskId)
+		this.fileContextTracker = new FileContextTracker(stateManager, this.taskId)
 		this.modelContextTracker = new ModelContextTracker(this.taskId)
 		this.environmentContextTracker = new EnvironmentContextTracker(this.taskId)
 
@@ -677,7 +671,7 @@ export class Task {
 		const commandExecutorCallbacks: CommandExecutorCallbacks = {
 			taskMessenger: this.taskMessenger,
 			updateBackgroundCommandState: (isRunning: boolean) =>
-				(updateBackgroundCommandState ?? this.controller.updateBackgroundCommandState.bind(this.controller))(
+				(updateBackgroundCommandState ?? this.host.updateBackgroundCommandState.bind(this.host))(
 					isRunning,
 					this.taskId,
 				),
@@ -753,6 +747,7 @@ export class Task {
 			getWorkingConfiguration: () => this.workingConfiguration,
 			workspaceManager: this.workspaceManager,
 			getRequestRuntime: () => this.activeRequestRuntime,
+			diracIgnoreController: this.diracIgnoreController,
 		})
 
 		this.contextLoader = new ContextLoader({
@@ -898,15 +893,13 @@ export class Task {
 	}
 
 	/**
- * Atomically validate and install one explicit update derived from the current
- * task configuration. No StateManager defaults are recaptured. When supplied,
- * `beforeCommit` runs only after the candidate configuration and API handler
- * have been built successfully, while the task-local transition lock is held.
- */
+	 * Atomically validate and install one explicit update derived from the current
+	 * task configuration. No StateManager defaults are recaptured. When supplied,
+	 * `beforeCommit` runs only after the candidate configuration and API handler
+	 * have been built successfully, while the task-local transition lock is held.
+	 */
 	public async applyWorkingConfigurationUpdate(
-		patch:
-			| TaskWorkingConfigurationPatch
-			| ((current: TaskWorkingConfiguration) => TaskWorkingConfigurationPatch),
+		patch: TaskWorkingConfigurationPatch | ((current: TaskWorkingConfiguration) => TaskWorkingConfigurationPatch),
 		beforeCommit?: (candidate: TaskWorkingConfiguration) => void | Promise<void>,
 	): Promise<TaskWorkingConfiguration> {
 		return this.mutationGate.withTransition(() =>
@@ -1009,9 +1002,6 @@ export class Task {
 		}
 	}
 
-
-
-
 	async getEnvironmentDetails(includeFileDetails = false): Promise<string> {
 		return this.environmentManager.getEnvironmentDetails(includeFileDetails)
 	}
@@ -1025,7 +1015,12 @@ export class Task {
 		userContent: DiracContent[],
 	): Promise<{ didEndLoop: boolean; userContent: DiracContent[] }> {
 		return handleMistakeLimitReached(
-			{ taskState: this.taskState, settings: this.workingConfiguration.settings, taskMessenger: this.taskMessenger },
+			{
+				taskState: this.taskState,
+				settings: this.workingConfiguration.settings,
+				taskMessenger: this.taskMessenger,
+				postStateToWebview: () => this.postStateToWebview(),
+			},
 			userContent,
 		)
 	}
@@ -1046,7 +1041,7 @@ export class Task {
 		await this.diracContext.resetTaskContext()
 		this.taskState.consecutiveMistakeCount = 0
 		this.taskState.didAttemptCompletion = false
-		this.taskState.activeVoiceStreamId = undefined
+		this.taskState.detachVoiceStream()
 		await this.postStateToWebview()
 	}
 
@@ -1089,7 +1084,6 @@ export class Task {
 		return this.checkpointManager?.saveCheckpoint(isAttemptCompletionMessage, completionMessageId) ?? Promise.resolve()
 	}
 
-
 	private async switchToActModeCallback(): Promise<boolean> {
 		return await this.switchToActMode()
 	}
@@ -1112,10 +1106,7 @@ export class Task {
 		restoreQueuedSteeringFromTranscript(this.steeringContext)
 	}
 
-	public async resumeTaskFromHistory(
-		onRestored?: () => void,
-		options: ResumeTaskOptions = {},
-	): Promise<TaskRunOutcome> {
+	public async resumeTaskFromHistory(onRestored?: () => void, options: ResumeTaskOptions = {}): Promise<TaskRunOutcome> {
 		return this.runTaskLifecycle(async () => {
 			await this.toolExecutor.refreshToolsForTask()
 			return this.lifecycleManager.resumeTaskFromHistory(onRestored, options)
@@ -1151,7 +1142,7 @@ export class Task {
 						)
 						nextUserContent = [...this.taskState.userMessageContent, ...followUp]
 						this.taskState.didAttemptCompletion = false
-						this.taskState.completionResponse = undefined
+						this.taskState.clearCompletionResponse()
 						continue
 					}
 				}
@@ -1174,9 +1165,7 @@ export class Task {
 		return outcome
 	}
 
-	private async runTaskLifecycle(
-		run: () => Promise<TaskRunOutcome | undefined>,
-	): Promise<TaskRunOutcome> {
+	private async runTaskLifecycle(run: () => Promise<TaskRunOutcome | undefined>): Promise<TaskRunOutcome> {
 		let outcome: TaskRunOutcome
 		try {
 			outcome = (await run()) ?? this.taskRunOutcomeFromState()
@@ -1230,16 +1219,9 @@ export class Task {
 		}
 
 		return this.withStateLock(() => {
+			// settleTaskRun is idempotent: an already-settled outcome wins over the candidate.
 			if (this.taskState.runOutcome) return this.taskState.runOutcome
-			this.taskState.runOutcome = outcome
-			if (outcome.kind === "failed") this.taskState.terminalError = outcome.error
-			if (outcome.kind === "cancelled") {
-				this.taskState.cancellationIntent ??= { kind: "cancelled", reason: outcome.reason }
-			}
-			if (outcome.kind === "interrupted") {
-				this.taskState.cancellationIntent ??= { kind: "interrupted", reason: outcome.reason }
-			}
-			return outcome
+			return this.taskState.settleRunOutcome(outcome)
 		})
 	}
 
@@ -1248,9 +1230,7 @@ export class Task {
 	}
 
 	async abortTask(intent: TaskCancellationIntent = { kind: "cancelled" }): Promise<void> {
-		await this.withStateLock(() => {
-			if (!this.taskState.runOutcome) this.taskState.cancellationIntent ??= intent
-		})
+		await this.withStateLock(() => this.taskState.captureCancellationIntent(intent))
 		if (this.taskState.status !== TaskStatus.CANCELLED) {
 			this.taskState.status = TaskStatus.CANCELLING
 		}
@@ -1345,7 +1325,7 @@ export class Task {
 	private async resetStreamingState(): Promise<void> {
 		this.responseProcessor.resetStreamState()
 		this.taskState.assistantMessageContent = []
-		this.taskState.didCompleteReadingStream = false
+		this.taskState.resetStreamRead()
 		this.taskState.userMessageContent = []
 		this.taskState.userMessageContentReady = false
 		this.taskState.didRejectTool = false
@@ -1353,7 +1333,7 @@ export class Task {
 		await this.diffViewProvider.reset()
 		this.streamHandler.reset()
 		this.taskState.toolUseIdMap.clear()
-		this.taskState.activeVoiceStreamId = undefined
+		this.taskState.detachVoiceStream()
 	}
 
 	async *attemptApiRequest(previousApiReqIndex: number, lastApiReqIndex: number, shouldCompact?: boolean): ApiStream {
@@ -1382,5 +1362,4 @@ export class Task {
 	private async determineContextCompaction(previousApiReqIndex: number): Promise<boolean> {
 		return this.apiConversationManager.determineContextCompaction(previousApiReqIndex)
 	}
-
 }

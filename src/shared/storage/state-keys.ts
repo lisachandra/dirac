@@ -16,7 +16,7 @@ import { WorkspaceRoot } from "@shared/multi-root/types"
 import { InferenceSpeed, Mode, normalizeInferenceSpeed } from "@shared/storage/types"
 import { TelemetrySetting } from "@shared/TelemetrySetting"
 import { normalizeUserApprovedCommands, type UserApprovedCommand } from "@shared/UserApprovedCommand"
-import { LanguageModelChatSelector } from "vscode"
+import { LanguageModelChatSelector } from "@shared/vsCodeSelectorUtils"
 
 // ============================================================================
 // SINGLE SOURCE OF TRUTH FOR STORAGE KEYS
@@ -80,6 +80,8 @@ const GLOBAL_STATE_FIELDS = {
 	// Path to worktree that should auto-open Dirac sidebar when launched
 	worktreeAutoOpenPath: { default: undefined as string | undefined },
 	uiActionState: { default: undefined as UIActionState | undefined },
+	unbiasedOAuthApiKeyHash: { default: undefined as string | undefined },
+	unbiasedOAuthWorkloadName: { default: undefined as string | undefined },
 } satisfies FieldDefinitions
 
 // Fields that map directly to ApiHandlerOptions in @shared/api.ts
@@ -324,6 +326,7 @@ const SECRETS_KEYS = [
 	"geminiApiKey",
 	"openAiNativeApiKey",
 	"deepSeekApiKey",
+	"unbiasedApiKey",
 	"requestyApiKey",
 	"togetherApiKey",
 	"fireworksApiKey",

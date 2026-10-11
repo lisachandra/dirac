@@ -5,6 +5,7 @@ import type { ChatCompletionTool as OpenAITool } from "openai/resources/chat/com
 import { buildExternalBasicHeaders } from "@/services/EnvUtils"
 import { DiracStorageMessage } from "@/shared/messages/content"
 import { fetch } from "@/shared/net"
+import { Logger } from "@/shared/services/Logger"
 import { ApiHandler, CommonApiHandlerOptions } from "../"
 import { withRetry } from "../retry"
 import { convertToOpenAiMessages } from "../transform/openai-format"
@@ -116,19 +117,19 @@ export class DeepSeekHandler implements ApiHandler {
 			return tool
 		})
 
+		const requestStartedAt = performance.now()
+		Logger.debug(`[DeepSeek ${model.id}] Dispatching request (${deepSeekMessages.length} messages, ${tools?.length ?? 0} tools)`)
+		// Omit max_tokens so DeepSeek applies its effort-specific default instead of its 384K maximum.
 		const stream = await client.chat.completions.create(
 			{
 				model: model.id,
-				max_tokens: model.info.maxTokens,
 				messages: deepSeekMessages as any,
 				stream: true,
 				stream_options: { include_usage: true },
 				...(supportsReasoning
 					? {
-						extra_body: {
-							thinking: {
-								type: isThinkingEnabled ? "enabled" : "disabled",
-							},
+						thinking: {
+							type: isThinkingEnabled ? "enabled" : "disabled",
 						},
 						...(isThinkingEnabled ? { reasoning_effort: requestedEffort } : {}),
 					}
@@ -139,9 +140,15 @@ export class DeepSeekHandler implements ApiHandler {
 			{ signal },
 		)
 
+		Logger.debug(`[DeepSeek ${model.id}] Response stream opened after ${Math.round(performance.now() - requestStartedAt)}ms`)
+		let receivedFirstChunk = false
 		const toolCallProcessor = new ToolCallProcessor()
 
 		for await (const chunk of stream) {
+			if (!receivedFirstChunk) {
+				receivedFirstChunk = true
+				Logger.debug(`[DeepSeek ${model.id}] First data chunk after ${Math.round(performance.now() - requestStartedAt)}ms`)
+			}
 			const delta = chunk.choices?.[0]?.delta
 			if (delta?.content) {
 				yield {
