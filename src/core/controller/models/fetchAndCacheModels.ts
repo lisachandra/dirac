@@ -80,6 +80,7 @@ async function doFetchAndCacheModels(config: FetchAndCacheModelsConfig): Promise
 	const cacheFilePath = path.join(await ensureCacheDirectoryExists(), cacheFileName)
 	const label = providerLabel || provider
 	let models: Record<string, ModelInfo> = {}
+	let shouldCacheResult = true
 
 	try {
 		if (requiresAuth && !apiKey) {
@@ -119,14 +120,16 @@ async function doFetchAndCacheModels(config: FetchAndCacheModelsConfig): Promise
 			models = cachedModels
 		} else if (staticModels) {
 			models = staticModels()
+		} else {
+			shouldCacheResult = false
 		}
 	}
 
 	// Post-process (e.g. append stealth models)
 	if (postProcess) models = postProcess(models)
 
-	// Store in StateManager's in-memory cache
-	StateManager.get().setModelsCache(provider, models)
+	// Cache successful responses and resolved fallbacks, but leave unresolved failures retryable.
+	if (shouldCacheResult) StateManager.get().setModelsCache(provider, models)
 	return models
 }
 

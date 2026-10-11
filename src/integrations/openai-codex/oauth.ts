@@ -1,3 +1,4 @@
+import type { OpenAiCodexAuthInstructions, OpenAiCodexAuthMethod } from "@shared/openai-codex-auth"
 import { OAuthFlowHandler } from "./OAuthFlowHandler"
 import { OAuthTokenManager } from "./OAuthTokenManager"
 import type { OpenAiCodexCredentials, OpenAiCodexDeviceAuthorization } from "./oauth-shared"
@@ -16,11 +17,8 @@ export {
 	refreshAccessToken,
 } from "./oauth-shared"
 
-/**
- * OpenAiCodexOAuthManager - Public facade combining token management and the
- * authorization code flow. Delegates to OAuthTokenManager (storage/refresh) and
- * OAuthFlowHandler (device + browser flows) without adding behavior.
- */
+/** Token storage plus isolated interactive sign-in attempts and the legacy browser-flow API. */
+
 export class OpenAiCodexOAuthManager {
 	private readonly tokenManager: OAuthTokenManager
 	private readonly flowHandler: OAuthFlowHandler
@@ -28,6 +26,33 @@ export class OpenAiCodexOAuthManager {
 	constructor() {
 		this.tokenManager = new OAuthTokenManager()
 		this.flowHandler = new OAuthFlowHandler(this.tokenManager)
+	}
+
+	/** An isolated, cancellable attempt shared by the CLI and extension. Never opens a browser. */
+	async authenticate(
+		method: OpenAiCodexAuthMethod,
+		onReady: (instructions: OpenAiCodexAuthInstructions) => void | Promise<void>,
+		signal: AbortSignal,
+	): Promise<void> {
+		signal.throwIfAborted()
+		const flow = new OAuthFlowHandler(this.tokenManager)
+		const cancel = () => flow.cancelAuthorizationFlow()
+		signal.addEventListener("abort", cancel, { once: true })
+		try {
+			if (method === "device") {
+				const data = await flow.initiateDeviceFlow(signal)
+				signal.throwIfAborted()
+				await onReady({ url: data.verification_uri, userCode: data.user_code })
+				await flow.pollForDeviceToken(data.device_code, data.user_code, data.interval ?? 5, signal)
+				return
+			}
+			const url = flow.startAuthorizationFlow()
+			// Attach both branches immediately so listener failures cannot become unhandled rejections.
+			await Promise.all([flow.waitForCallback(), Promise.resolve().then(() => onReady({ url }))])
+		} finally {
+			signal.removeEventListener("abort", cancel)
+			cancel()
+		}
 	}
 
 	async forceRefreshAccessToken(): Promise<string | null> {
@@ -62,8 +87,8 @@ export class OpenAiCodexOAuthManager {
 		return this.tokenManager.isAuthenticated()
 	}
 
-	async initiateDeviceFlow(): Promise<OpenAiCodexDeviceAuthorization> {
-		return this.flowHandler.initiateDeviceFlow()
+	async initiateDeviceFlow(signal?: AbortSignal): Promise<OpenAiCodexDeviceAuthorization> {
+		return this.flowHandler.initiateDeviceFlow(signal)
 	}
 
 	async pollForDeviceToken(

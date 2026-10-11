@@ -1,4 +1,4 @@
-import { bedrockDefaultModelId, moonshotDefaultModelId } from "@shared/api"
+import { bedrockDefaultModelId, moonshotDefaultModelId, openAiNativeDefaultModelId } from "@shared/api"
 import { expect } from "chai"
 import { describe, it } from "mocha"
 import { getProviderDefaultModelId, getProviderModelIdKey } from "../provider-keys"
@@ -6,6 +6,10 @@ import { getProviderDefaultModelId, getProviderModelIdKey } from "../provider-ke
 describe("Provider key mapping", () => {
 	it("returns Moonshot default model ID", () => {
 		expect(getProviderDefaultModelId("moonshot")).to.equal(moonshotDefaultModelId)
+	})
+
+	it("uses the OpenAI Native default for the OpenAI-compatible provider", () => {
+		expect(getProviderDefaultModelId("openai")).to.equal(openAiNativeDefaultModelId)
 	})
 
 	it("uses generic model key for Moonshot", () => {

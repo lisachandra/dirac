@@ -145,6 +145,35 @@ describe("TaskCheckpointManager", () => {
 		})
 	})
 
+	describe("runtime enablement", () => {
+		it("enables a manager that was constructed disabled", async () => {
+			const { manager } = makeManager(sandbox, { enableCheckpoints: false })
+			const commitStub = sandbox.stub().resolves("commit-after-enable")
+			manager.setCheckpointTracker({ commit: commitStub } as any)
+
+			manager.setEnabled(true)
+
+			expect(manager.isEnabled()).to.equal(true)
+			expect(await manager.commit()).to.equal("commit-after-enable")
+			expect(commitStub.calledOnce).to.equal(true)
+		})
+
+		it("revokes checkpoint operations after a manager is disabled", async () => {
+			const { manager, taskMessenger } = makeManager(sandbox)
+			const commitStub = sandbox.stub().resolves("should-not-commit")
+			manager.setCheckpointTracker({ commit: commitStub } as any)
+
+			manager.setEnabled(false)
+			await manager.saveCheckpoint()
+
+			expect(manager.isEnabled()).to.equal(false)
+			expect(await manager.commit()).to.equal(undefined)
+			expect(commitStub.called).to.equal(false)
+			expect((taskMessenger.createCheckpoint as sinon.SinonStub).called).to.equal(false)
+		})
+	})
+
+
 	describe("doesLatestTaskCompletionHaveNewChanges", () => {
 		it("returns false when checkpoints are disabled", async () => {
 			const { manager } = makeManager(sandbox, { enableCheckpoints: false })

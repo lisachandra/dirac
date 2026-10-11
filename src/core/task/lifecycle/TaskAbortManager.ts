@@ -1,5 +1,5 @@
 import { executeHook } from "@core/hooks/hook-executor"
-import { getHookModelContext } from "@core/hooks/hook-model-context"
+import { getTaskHookModelContext } from "../runtime/TaskRuntimeModelContext"
 import { getHooksEnabledSafe } from "@core/hooks/hooks-utils"
 import { Logger } from "@shared/services/Logger"
 import { AnchorStateManager } from "@utils/AnchorStateManager"
@@ -18,7 +18,7 @@ export class TaskAbortManager {
 			await this.cancelBackgroundCommand()
 			await this.runTaskCancelHook(shouldRunCancelHook)
 			await this.saveStateAndPost()
-			this.disposeResources()
+			await this.disposeResources()
 		} finally {
 			await this.releaseLockIfNeeded()
 			await this.postFinalState()
@@ -47,7 +47,7 @@ export class TaskAbortManager {
 	}
 
 	private async runTaskCancelHook(shouldRun: boolean) {
-		const hooksEnabled = getHooksEnabledSafe(this.deps.stateManager.getGlobalSettingsKey("hooksEnabled"))
+		const hooksEnabled = getHooksEnabledSafe(this.deps.getWorkingConfiguration().settings.hooksEnabled)
 		if (!hooksEnabled || !shouldRun) return
 		try {
 			await executeHook({
@@ -66,7 +66,7 @@ export class TaskAbortManager {
 				messageStateHandler: this.deps.messageStateHandler,
 				taskId: this.deps.taskId,
 				hooksEnabled,
-				model: getHookModelContext(this.deps.api, this.deps.stateManager),
+				model: getTaskHookModelContext(this.deps.api, this.deps.getWorkingConfiguration()),
 			})
 		} catch (error) {
 			Logger.error("[TaskCancel Hook] Failed (non-fatal):", error)
@@ -82,13 +82,13 @@ export class TaskAbortManager {
 		}
 	}
 
-	private disposeResources() {
+	private async disposeResources(): Promise<void> {
 		this.deps.terminalManager.disposeAll()
 		this.deps.urlContentFetcher.closeBrowser()
 		this.deps.browserSession.dispose()
 		this.deps.diracIgnoreController.dispose()
 		this.deps.fileContextTracker.dispose()
-		this.deps.diffViewProvider.revertChanges()
+		await this.deps.diffViewProvider.revertChanges()
 		AnchorStateManager.reset(this.deps.ulid)
 	}
 

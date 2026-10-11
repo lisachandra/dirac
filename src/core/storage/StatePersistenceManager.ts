@@ -9,15 +9,22 @@ import type {
 	SettingsKey,
 } from "@shared/storage/state-keys"
 import type { StorageContext } from "@shared/storage/storage-context"
+import type { RunHistoryItem } from "@shared/HistoryItem"
 import chokidar, { type FSWatcher } from "chokidar"
 import { Logger } from "@/shared/services/Logger"
+import { ChokidarWatcherCloser } from "@/shared/utils/ChokidarWatcherCloser"
 import {
 	getTaskHistoryStateFilePath,
 	readTaskHistoryFromState,
 	readTaskSettingsFromStorage,
-	writeTaskHistoryToState,
+	taskHistoryStateFileExists,
 	writeTaskSettingsToStorage,
 } from "./disk"
+import {
+	applyTaskHistoryMutations,
+	commitTaskHistoryMutations,
+	type TaskHistoryMutation,
+} from "./taskHistory"
 import { readGlobalStateFromStorage, readSecretsFromStorage, readWorkspaceStateFromStorage } from "./utils/state-helpers"
 
 export interface PersistenceErrorEvent {
@@ -30,7 +37,8 @@ interface CacheAccessors {
 	getTaskStateValue: (key: SettingsKey) => any
 	getSecretValue: (key: SecretKey) => any
 	getWorkspaceStateValue: (key: LocalStateKey) => any
-	setTaskHistoryInCache: (value: any) => void
+	setTaskHistoryInCache: (value: RunHistoryItem[]) => void
+	onTaskHistoryCommitMerged: () => void
 }
 
 /**
@@ -47,9 +55,13 @@ export class StatePersistenceManager {
 	private pendingTaskState = new Map<string, Set<SettingsKey>>()
 	private pendingSecrets = new Set<SecretKey>()
 	private pendingWorkspaceState = new Set<LocalStateKey>()
+	private pendingTaskHistoryMutations: TaskHistoryMutation[] = []
+	private inFlightTaskHistoryMutations: TaskHistoryMutation[] = []
 	private persistenceTimeout: NodeJS.Timeout | null = null
+	private persistenceTail: Promise<void> = Promise.resolve()
 	private readonly PERSISTENCE_DELAY_MS = 500
 	private taskHistoryWatcher: FSWatcher | null = null
+	private readonly taskHistoryWatcherCloser = new ChokidarWatcherCloser()
 
 	onPersistenceError?: (event: PersistenceErrorEvent) => void
 
@@ -61,11 +73,13 @@ export class StatePersistenceManager {
 	// ── Pending-state tracking ──────────────────────────────────────────
 
 	addPendingGlobalState(key: GlobalStateAndSettingsKey): void {
+		if (key === "taskHistory") throw new Error("Task history requires an ID-scoped mutation")
 		this.pendingGlobalState.add(key)
 		this.scheduleDebouncedPersistence()
 	}
 
 	addPendingGlobalStateBatch(keys: GlobalStateAndSettingsKey[]): void {
+		if (keys.includes("taskHistory")) throw new Error("Task history requires an ID-scoped mutation")
 		keys.forEach((key) => this.pendingGlobalState.add(key))
 		this.scheduleDebouncedPersistence()
 	}
@@ -106,6 +120,11 @@ export class StatePersistenceManager {
 		this.scheduleDebouncedPersistence()
 	}
 
+	addPendingTaskHistoryMutation(mutation: TaskHistoryMutation): void {
+		this.pendingTaskHistoryMutations.push(structuredClone(mutation))
+		this.scheduleDebouncedPersistence()
+	}
+
 	// ── Task-state queries ──────────────────────────────────────────────
 
 	hasPendingTaskState(): boolean {
@@ -127,17 +146,20 @@ export class StatePersistenceManager {
 
 	// ── Flush / persist ─────────────────────────────────────────────────
 
-	hasPendingTimeout(): boolean {
-		return this.persistenceTimeout !== null
+	async persistPendingState(): Promise<void> {
+		const operation = this.persistenceTail.then(() => this.persistNextBatch())
+		this.persistenceTail = operation.catch(() => undefined)
+		return operation
 	}
 
-	async persistPendingState(): Promise<void> {
+	private async persistNextBatch(): Promise<void> {
 		// Early return if nothing to persist
 		if (
 			this.pendingGlobalState.size === 0 &&
 			this.pendingSecrets.size === 0 &&
 			this.pendingWorkspaceState.size === 0 &&
-			this.pendingTaskState.size === 0
+			this.pendingTaskState.size === 0 &&
+			this.pendingTaskHistoryMutations.length === 0
 		) {
 			return
 		}
@@ -146,28 +168,44 @@ export class StatePersistenceManager {
 		const pendingSecrets = this.pendingSecrets
 		const pendingWorkspaceState = this.pendingWorkspaceState
 		const pendingTaskState = this.pendingTaskState
+		const pendingTaskHistoryMutations = this.pendingTaskHistoryMutations
 		this.pendingGlobalState = new Set()
 		this.pendingSecrets = new Set()
 		this.pendingWorkspaceState = new Set()
 		this.pendingTaskState = new Map()
+		this.pendingTaskHistoryMutations = []
+		this.inFlightTaskHistoryMutations = pendingTaskHistoryMutations
 
 		try {
-			await Promise.all([
-				this.persistGlobalStateBatch(pendingGlobalState),
-				this.persistSecretsBatch(pendingSecrets),
-				this.persistWorkspaceStateBatch(pendingWorkspaceState),
-				this.persistTaskStateBatch(pendingTaskState),
+			const [regularResult, taskHistoryResult] = await Promise.allSettled([
+				Promise.all([
+					this.persistGlobalStateBatch(pendingGlobalState),
+					this.persistSecretsBatch(pendingSecrets),
+					this.persistWorkspaceStateBatch(pendingWorkspaceState),
+					this.persistTaskStateBatch(pendingTaskState),
+				]),
+				this.persistTaskHistoryBatch(pendingTaskHistoryMutations),
 			])
-		} catch (error) {
-			for (const key of pendingGlobalState) this.pendingGlobalState.add(key)
-			for (const key of pendingSecrets) this.pendingSecrets.add(key)
-			for (const key of pendingWorkspaceState) this.pendingWorkspaceState.add(key)
-			for (const [taskId, keys] of pendingTaskState) {
-				const queuedKeys = this.pendingTaskState.get(taskId) ?? new Set<SettingsKey>()
-				for (const key of keys) queuedKeys.add(key)
-				this.pendingTaskState.set(taskId, queuedKeys)
+			if (regularResult.status === "rejected") {
+				for (const key of pendingGlobalState) this.pendingGlobalState.add(key)
+				for (const key of pendingSecrets) this.pendingSecrets.add(key)
+				for (const key of pendingWorkspaceState) this.pendingWorkspaceState.add(key)
+				for (const [taskId, keys] of pendingTaskState) {
+					const queuedKeys = this.pendingTaskState.get(taskId) ?? new Set<SettingsKey>()
+					for (const key of keys) queuedKeys.add(key)
+					this.pendingTaskState.set(taskId, queuedKeys)
+				}
 			}
-			throw error
+			if (taskHistoryResult.status === "rejected") {
+				this.pendingTaskHistoryMutations = [
+					...pendingTaskHistoryMutations,
+					...this.pendingTaskHistoryMutations,
+				]
+			}
+			if (regularResult.status === "rejected") throw regularResult.reason
+			if (taskHistoryResult.status === "rejected") throw taskHistoryResult.reason
+		} finally {
+			this.inFlightTaskHistoryMutations = []
 		}
 	}
 
@@ -185,10 +223,9 @@ export class StatePersistenceManager {
 			clearTimeout(this.persistenceTimeout)
 			this.persistenceTimeout = null
 		}
-		if (this.taskHistoryWatcher) {
-			await this.taskHistoryWatcher.close()
-			this.taskHistoryWatcher = null
-		}
+		const watcher = this.taskHistoryWatcher
+		this.taskHistoryWatcher = null
+		await this.taskHistoryWatcherCloser.closeAll(watcher ? [watcher] : [])
 	}
 
 	// ── Debounced scheduling ────────────────────────────────────────────
@@ -198,12 +235,11 @@ export class StatePersistenceManager {
 			clearTimeout(this.persistenceTimeout)
 		}
 		this.persistenceTimeout = setTimeout(async () => {
+			this.persistenceTimeout = null
 			try {
 				await this.persistPendingState()
-				this.persistenceTimeout = null
 			} catch (error) {
 				Logger.error("[StatePersistenceManager] Failed to persist pending changes:", error)
-				this.persistenceTimeout = null
 				this.onPersistenceError?.({ error: error })
 			}
 		}, this.PERSISTENCE_DELAY_MS)
@@ -214,16 +250,20 @@ export class StatePersistenceManager {
 	private async persistGlobalStateBatch(keys: Set<GlobalStateAndSettingsKey>): Promise<void> {
 		const regularEntries: Record<string, any> = {}
 		for (const key of keys) {
-			if (key === "taskHistory") {
-				// Route task history persistence to its own file
-				await writeTaskHistoryToState(this.accessors.getGlobalStateValue(key))
-			} else {
-				regularEntries[key] = this.accessors.getGlobalStateValue(key)
-			}
+			regularEntries[key] = this.accessors.getGlobalStateValue(key)
 		}
 		if (Object.keys(regularEntries).length > 0) {
 			this.storage.globalStateBackingStore.setBatch(regularEntries)
 		}
+	}
+
+	private async persistTaskHistoryBatch(mutations: TaskHistoryMutation[]): Promise<void> {
+		if (mutations.length === 0) return
+		const committed = await commitTaskHistoryMutations(mutations)
+		const visible = applyTaskHistoryMutations(committed, this.pendingTaskHistoryMutations)
+		const cached = this.accessors.getGlobalStateValue("taskHistory")
+		this.accessors.setTaskHistoryInCache(visible)
+		if (JSON.stringify(visible) !== JSON.stringify(cached)) this.accessors.onTaskHistoryCommitMerged()
 	}
 
 	private async persistTaskStateBatch(pendingTaskStates: Map<string, Set<SettingsKey>>): Promise<void> {
@@ -286,31 +326,37 @@ export class StatePersistenceManager {
 		}
 	}
 
-	// ── Task-history file watcher ───────────────────────────────────────
-
 	async setupTaskHistoryWatcher(isInitialized: () => boolean, onSyncExternalChange: () => void | Promise<void>): Promise<void> {
 		try {
+			await this.taskHistoryWatcherCloser.closeAll()
 			const historyFile = await getTaskHistoryStateFilePath()
 
 			if (this.taskHistoryWatcher) {
-				await this.taskHistoryWatcher.close()
+				const previousWatcher = this.taskHistoryWatcher
 				this.taskHistoryWatcher = null
+				await this.taskHistoryWatcherCloser.close(previousWatcher)
 			}
 
-			this.taskHistoryWatcher = chokidar.watch(historyFile, {
+			const watcher = chokidar.watch(historyFile, {
 				persistent: true,
 				ignoreInitial: true,
 				atomic: true,
 				awaitWriteFinish: { stabilityThreshold: 300, pollInterval: 100 },
 			})
+			this.taskHistoryWatcher = watcher
 
 			const syncTaskHistoryFromDisk = async () => {
 				try {
 					if (!isInitialized()) return
+					if (!(await taskHistoryStateFileExists())) return
 					const onDisk = await readTaskHistoryFromState()
+					const visible = applyTaskHistoryMutations(onDisk, [
+						...this.inFlightTaskHistoryMutations,
+						...this.pendingTaskHistoryMutations,
+					])
 					const cached = this.accessors.getGlobalStateValue("taskHistory")
-					if (JSON.stringify(onDisk) !== JSON.stringify(cached)) {
-						this.accessors.setTaskHistoryInCache(onDisk)
+					if (JSON.stringify(visible) !== JSON.stringify(cached)) {
+						this.accessors.setTaskHistoryInCache(visible)
 						await onSyncExternalChange()
 					}
 				} catch (err) {
@@ -318,20 +364,41 @@ export class StatePersistenceManager {
 				}
 			}
 
-			this.taskHistoryWatcher
+			watcher
+				.on("error", (error) => {
+					if (this.taskHistoryWatcher !== watcher) return
+					this.taskHistoryWatcher = null
+					Logger.error("[StatePersistenceManager] Task history live reload is disabled after watcher failure:", error)
+					void this.taskHistoryWatcherCloser
+						.close(watcher)
+						.catch((closeError) =>
+							Logger.error("[StatePersistenceManager] Failed to close disabled task history watcher:", closeError),
+						)
+				})
 				.on("add", () => {
-					syncTaskHistoryFromDisk()
+					if (this.taskHistoryWatcher !== watcher) return
+					void syncTaskHistoryFromDisk()
 				})
 				.on("change", () => {
-					syncTaskHistoryFromDisk()
+					if (this.taskHistoryWatcher !== watcher) return
+					void syncTaskHistoryFromDisk()
 				})
-				.on("unlink", async () => {
-					this.accessors.setTaskHistoryInCache([])
-					await onSyncExternalChange()
+				.on("unlink", () => {
+					if (this.taskHistoryWatcher !== watcher) return
+					Logger.warn("[StatePersistenceManager] Task history file was removed; retaining the last valid cache")
+					setTimeout(() => void syncTaskHistoryFromDisk(), 250)
 				})
-				.on("error", (error) => Logger.error("[StatePersistenceManager] TaskHistory watcher error:", error))
 		} catch (err) {
-			Logger.error("[StatePersistenceManager] Failed to set up taskHistory watcher:", err)
+			const watcher = this.taskHistoryWatcher
+			this.taskHistoryWatcher = null
+			if (watcher) {
+				await this.taskHistoryWatcherCloser
+					.close(watcher)
+					.catch((closeError) =>
+						Logger.error("[StatePersistenceManager] Failed to close incomplete task history watcher:", closeError),
+					)
+			}
+			Logger.error("[StatePersistenceManager] Task history live reload could not start and is disabled:", err)
 		}
 	}
 }

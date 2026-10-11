@@ -26,17 +26,22 @@ scripts/publish.sh patch
 # or: minor / major
 ```
 
+Patch releases keep the existing automatic Git-derived notes. The publisher also freezes a compact `feat` → `perf` → `fix` summary into `release-notes/<version>.json` for the in-product upgrade view.
+
+Minor and major releases require curated notes. If the target document is missing, the same `scripts/publish.sh minor` or `major` command invokes the installed Dirac CLI with the repository's `release-notes` skill, writes a draft, and stops before changing versions, building, tagging, or publishing. Review and commit that document, then rerun the identical publish command. The publisher rejects malformed or stale notes if product files changed after the analyzed commit.
+
 The script calculates one target version and persists it in `.scratch-release/vX.Y.Z/`. It then:
 
-1. updates extension, CLI, lockfile, and Homebrew formula versions;
-2. builds one local VSIX and one local npm tarball;
-3. commits the release metadata and creates annotated stable/CLI tags;
-4. atomically pushes the exact release source and tags;
-5. creates a draft GitHub Release with generated notes;
-6. publishes the same retained VSIX to VS Marketplace and Open VSX;
-7. publishes the same retained CLI tarball to npm;
-8. verifies all registries; and
-9. publishes the GitHub Release last, which sends subscriber notifications.
+1. verifies or generates the bundled release-note document;
+2. updates extension, CLI, lockfile, and Homebrew formula versions;
+3. builds one local VSIX and one local npm tarball;
+4. commits the release metadata and creates annotated stable/CLI tags;
+5. atomically pushes the exact release source and tags;
+6. creates a draft GitHub Release from the same curated notes;
+7. publishes the same retained VSIX to VS Marketplace and Open VSX;
+8. publishes the same retained CLI tarball to npm;
+9. verifies all registries; and
+10. publishes the GitHub Release last, which sends subscriber notifications.
 
 GitHub provides source archives automatically. Stable Releases do not attach a second CI-built copy of the binaries.
 

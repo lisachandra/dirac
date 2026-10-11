@@ -1,23 +1,25 @@
 import { ToolUse } from "@core/assistant-message"
 import { formatResponse } from "@core/formatResponse"
 import type { ToolRequestSnapshot } from "@core/task/tools/runtime/ToolSnapshot"
-import { DiracContent } from "@shared/messages/content"
-import { DiracDefaultTool } from "@shared/tools"
-import {
-    canonicalizeResponseToolCall,
-    responseOperationFromToolCall,
-    ResponseOperation,
-    ResponseParameter,
-    ResponseShapeError,
-    validateResponseShape,
-} from "@shared/responseTool"
-import type { ResponseArguments } from "@shared/responseTool"
-import type { TaskState } from "../../TaskState"
-import type { TaskConfig } from "../types/TaskConfig"
-import type { SubagentToolCall } from "./SubagentRunner"
 import { SubagentExecutionStatus } from "@shared/ExtensionMessage"
+import { DiracContent } from "@shared/messages/content"
+import type { ResponseArguments } from "@shared/responseTool"
+import {
+	canonicalizeResponseToolCall,
+	ResponseOperation,
+	ResponseParameter,
+	ResponseShapeError,
+	responseOperationFromToolCall,
+	validateResponseShape,
+} from "@shared/responseTool"
 import { createSubagentTrajectoryEvent, SubagentTrajectoryEventType } from "@shared/subagents"
-import { formatToolCallPreview, pushSubagentToolResultBlock, serializeToolResult, toToolUseParams } from "./SubagentRunner"
+import { DiracDefaultTool } from "@shared/tools"
+import type { TaskState } from "../../TaskState"
+import { ToolExecutorCoordinator } from "../ToolExecutorCoordinator"
+import type { TaskConfig } from "../types/TaskConfig"
+import type { ToolResponse } from "../types/ToolResponse"
+import { formatToolCallPreview, pushSubagentToolResultBlock, serializeToolResult, toToolUseParams } from "./SubagentRunHelpers"
+import { type SubagentProgressUpdate, type SubagentRunStats, type SubagentToolCall } from "./SubagentRunTypes"
 
 export interface SubagentToolExecutionObserver {
 	recordToolCall(call: SubagentToolCall): void
@@ -30,20 +32,20 @@ export interface SubagentToolExecutionObserver {
 // Extracted from SubagentRunner.run() to reduce the 400-line method.
 export class SubagentToolExecutor {
 	constructor(
-		private createSubagentTaskConfig: (state: TaskState, coordinator: any) => TaskConfig,
+		private createSubagentTaskConfig: (state: TaskState, coordinator: ToolExecutorCoordinator) => TaskConfig,
 		private isAllowedTool: (toolName: string, requestSnapshot: ToolRequestSnapshot) => boolean,
 		private readonly observer?: SubagentToolExecutionObserver,
-	) {}
+	) { }
 
 	// Processes all tool calls for a turn. Returns a completed result for the complete response operation.
 	async executeToolCalls(
 		finalizedToolCalls: SubagentToolCall[],
 		state: TaskState,
 		requestSnapshot: ToolRequestSnapshot,
-		stats: any,
-		onProgress: (update: any) => void,
+		stats: SubagentRunStats,
+		onProgress: (update: SubagentProgressUpdate) => void,
 		isWrappingUp = false,
-	): Promise<{ completed?: { result: string; stats: any }; toolResultBlocks: DiracContent[] }> {
+	): Promise<{ completed?: { result: string; stats: SubagentRunStats }; toolResultBlocks: DiracContent[] }> {
 		const toolResultBlocks: DiracContent[] = []
 		for (const call of finalizedToolCalls) {
 			this.observer?.recordToolCall(call)
@@ -82,8 +84,8 @@ export class SubagentToolExecutor {
 				pushSubagentToolResultBlock(toolResultBlocks, call, toolName, result)
 				continue
 			}
-			let responseArguments: ResponseArguments | undefined
 			if (responseOperation) {
+				let responseArguments: ResponseArguments
 				try {
 					responseArguments = validateResponseShape(toolCallParams)
 				} catch (error) {
@@ -93,24 +95,24 @@ export class SubagentToolExecutor {
 					pushSubagentToolResultBlock(toolResultBlocks, call, toolName, result)
 					continue
 				}
-			}
-			if (responseOperation === ResponseOperation.PROGRESS) {
-				this.observer?.recordProgress(responseArguments!.text)
-				onProgress({
-					trajectoryEvent: createSubagentTrajectoryEvent(
-						SubagentTrajectoryEventType.MESSAGE,
-						responseArguments!.text,
-					),
-				})
-			}
+				if (responseOperation === ResponseOperation.PROGRESS) {
+					this.observer?.recordProgress(responseArguments.text)
+					onProgress({
+						trajectoryEvent: createSubagentTrajectoryEvent(
+							SubagentTrajectoryEventType.MESSAGE,
+							responseArguments.text,
+						),
+					})
+				}
 
-			if (responseOperation === ResponseOperation.COMPLETE) {
-				const completionResult = responseArguments!.text.trim()
-				recordToolResult({ operation: ResponseOperation.COMPLETE, result: completionResult })
-				stats.toolCalls += 1
-				onProgress({ stats: { ...stats } })
-				onProgress({ status: SubagentExecutionStatus.COMPLETED, result: completionResult, stats: { ...stats } })
-				return { completed: { result: completionResult, stats: { ...stats } }, toolResultBlocks }
+				if (responseOperation === ResponseOperation.COMPLETE) {
+					const completionResult = responseArguments.text.trim()
+					recordToolResult({ operation: ResponseOperation.COMPLETE, result: completionResult })
+					stats.toolCalls += 1
+					onProgress({ stats: { ...stats } })
+					onProgress({ status: SubagentExecutionStatus.COMPLETED, result: completionResult, stats: { ...stats } })
+					return { completed: { result: completionResult, stats: { ...stats } }, toolResultBlocks }
+				}
 			}
 
 			if (isWrappingUp) {
@@ -134,7 +136,7 @@ export class SubagentToolExecutor {
 
 			if (call.call_id) state.toolUseIdMap.set(call.call_id, call.toolUseId)
 			const subagentConfig = this.createSubagentTaskConfig(state, requestSnapshot.coordinator)
-			let toolResult: unknown
+			let toolResult: ToolResponse
 			if (!subagentConfig.coordinator.has(toolName)) {
 				toolResult = formatResponse.toolError(`No handler registered for tool '${toolName}'.`)
 			} else {
@@ -146,14 +148,14 @@ export class SubagentToolExecutor {
 			}
 
 			this.observer?.markActivity(`completed tool call '${toolName}'`)
-			recordToolResult(toolResult)
+			const serializedToolResult = serializeToolResult(toolResult)
+			recordToolResult(serializedToolResult)
 			stats.toolCalls += 1
 			onProgress({ stats: { ...stats } })
-			const serializedToolResult = serializeToolResult(toolResult)
 			onProgress({
 				trajectoryEvent: createSubagentTrajectoryEvent(SubagentTrajectoryEventType.TOOL_RESULT, serializedToolResult),
 			})
-			pushSubagentToolResultBlock(toolResultBlocks, call, `[${toolName}]`, serializedToolResult)
+			pushSubagentToolResultBlock(toolResultBlocks, call, `[${toolName}]`, toolResult)
 		}
 		return { toolResultBlocks }
 	}

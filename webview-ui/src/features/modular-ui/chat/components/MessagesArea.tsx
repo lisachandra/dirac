@@ -8,7 +8,7 @@ import { MessageRenderer } from "./VirtuosoItemRenderer"
 
 interface MessagesAreaProps {
 	task: DiracMessage
-	renderedMessages: DiracMessage[]
+	renderedMessageIds: string[]
 	scrollBehavior: ScrollBehavior
 	chatState: ChatState
 	messageHandlers: MessageHandlers
@@ -20,7 +20,7 @@ interface MessagesAreaProps {
  */
 export const MessagesArea: React.FC<MessagesAreaProps> = ({
 	task,
-	renderedMessages,
+	renderedMessageIds,
 	scrollBehavior,
 	chatState,
 	messageHandlers,
@@ -56,13 +56,13 @@ export const MessagesArea: React.FC<MessagesAreaProps> = ({
 	)
 
 	const itemContent = useCallback(
-		(index: number, message: DiracMessage) => (
+		(index: number, messageId: string) => (
 			<MessageRenderer
 				activeCardId={activeCardId}
 				activeVoiceStreamId={activeVoiceStreamId}
 				expandedRows={expandedRows}
-				isLastMessage={index === renderedMessages.length - 1}
-				message={message}
+				isLastMessage={index === renderedMessageIds.length - 1}
+				messageId={messageId}
 				messageHandlers={stableMessageHandlers}
 				onSetQuote={setActiveQuote}
 				onToggleExpand={toggleRowExpansion}
@@ -72,7 +72,7 @@ export const MessagesArea: React.FC<MessagesAreaProps> = ({
 			activeCardId,
 			activeVoiceStreamId,
 			expandedRows,
-			renderedMessages.length,
+			renderedMessageIds.length,
 			setActiveQuote,
 			stableMessageHandlers,
 			toggleRowExpansion,
@@ -86,8 +86,8 @@ export const MessagesArea: React.FC<MessagesAreaProps> = ({
 				atBottomStateChange={handleAtBottomStateChange}
 				atBottomThreshold={CHAT_CONSTANTS.AT_BOTTOM_THRESHOLD}
 				className="grow custom-scrollbar focus:outline-none"
-				computeItemKey={(_index, message) => message.id}
-				data={renderedMessages}
+				computeItemKey={(_index, messageId) => messageId}
+				data={renderedMessageIds}
 				followOutput={followOutput}
 				increaseViewportBy={{ top: 800, bottom: 200 }}
 				initialTopMostItemIndex={{ index: "LAST", align: "end" }}

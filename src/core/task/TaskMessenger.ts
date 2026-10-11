@@ -1,12 +1,11 @@
 import { ApiHandler } from "@core/api"
 
 import { executeHook } from "@core/hooks/hook-executor"
-
-import { getHookModelContext } from "@core/hooks/hook-model-context"
 import { getHooksEnabledSafe } from "@core/hooks/hooks-utils"
 import {
 	Card,
 	CardKind,
+	CardParams,
 	CardStatus,
 	DiracApiReqInfo,
 	DiracMessage,
@@ -17,18 +16,29 @@ import {
 	isFinalStatus,
 	TaskStatus,
 } from "@shared/ExtensionMessage"
-
 import { Logger } from "@shared/services/Logger"
 import { DiracAskResponse } from "@shared/WebviewMessage"
 import pWaitFor from "p-wait-for"
-import { CardParams } from "./tools/interfaces/IToolEnvironment"
+import { getTaskHookModelContext } from "./runtime/TaskRuntimeModelContext"
 import { TaskMessengerDependencies } from "./types/task-messenger"
+
+interface TaskCardParams extends CardParams {
+	isAutoApproved?: () => boolean
+}
+
+export interface TaskCardHandle extends ICardHandle {
+	getCard(): Readonly<Card>
+}
 
 export class TaskMessenger implements ITaskMessenger {
 	private activeVoiceStream?: ITextStreamHandle
 	private lastMessageId = 0
 
-	constructor(private dependencies: TaskMessengerDependencies) { }
+	constructor(private dependencies: TaskMessengerDependencies) {}
+
+	private postPresentationToWebview(): Promise<void> {
+		return (this.dependencies.postPresentationToWebview ?? this.dependencies.postStateToWebview)()
+	}
 
 	public setApi(api: ApiHandler) {
 		this.dependencies.api = api
@@ -51,68 +61,45 @@ export class TaskMessenger implements ITaskMessenger {
 		const message: DiracMessage = {
 			id,
 			ts,
-			content: { type: DiracMessageType.MARKDOWN, content: "", isReasoning, role: "assistant" },
+			content: {
+				type: DiracMessageType.MARKDOWN,
+				content: "",
+				isReasoning,
+				role: "assistant",
+			},
 		}
 		this.dependencies.taskState.activeVoiceStreamId = id
 		await this.dependencies.messageStateHandler.addToDiracMessages(message)
-		await this.dependencies.postStateToWebview()
+		await this.postPresentationToWebview()
 
 		const handle: ITextStreamHandle = {
 			id,
 			append: async (chunk: string) => {
-				const index = this.dependencies.messageStateHandler.findMessageIndexById(id)
-				if (index === -1) {
-					throw new Error(`Message with id ${id} not found for append`)
-				}
-				const msg = this.dependencies.messageStateHandler.getDiracMessages()[index]
-				if (msg.content.type === DiracMessageType.MARKDOWN) {
-					msg.content.content += chunk
-					await this.dependencies.messageStateHandler.updateDiracMessage(index, msg)
-					await this.dependencies.postStateToWebview()
-				} else {
-					throw new Error(`Message with id ${id} is not a markdown message`)
-				}
+				await this.dependencies.messageStateHandler.appendMarkdownById(id, chunk)
+				await this.postPresentationToWebview()
 			},
 			setImages: async (images: string[]) => {
-				const index = this.dependencies.messageStateHandler.findMessageIndexById(id)
-				if (index === -1) {
-					throw new Error(`Message with id ${id} not found for setImages`)
-				}
-				const msg = this.dependencies.messageStateHandler.getDiracMessages()[index]
-				if (msg.content.type === DiracMessageType.MARKDOWN) {
-					msg.content.images = images
-					await this.dependencies.messageStateHandler.updateDiracMessage(index, msg)
-					await this.dependencies.postStateToWebview()
-				} else {
-					throw new Error(`Message with id ${id} is not a markdown message`)
-				}
+				await this.dependencies.messageStateHandler.patchMarkdownById(id, {
+					images,
+				})
+				await this.postPresentationToWebview()
 			},
 			setFiles: async (files: string[]) => {
-				const index = this.dependencies.messageStateHandler.findMessageIndexById(id)
-				if (index === -1) {
-					throw new Error(`Message with id ${id} not found for setFiles`)
-				}
-				const msg = this.dependencies.messageStateHandler.getDiracMessages()[index]
-				if (msg.content.type === DiracMessageType.MARKDOWN) {
-					msg.content.files = files
-					await this.dependencies.messageStateHandler.updateDiracMessage(index, msg)
-					await this.dependencies.postStateToWebview()
-				} else {
-					throw new Error(`Message with id ${id} is not a markdown message`)
-				}
+				await this.dependencies.messageStateHandler.patchMarkdownById(id, {
+					files,
+				})
+				await this.postPresentationToWebview()
 			},
 			close: async () => {
-				const index = this.dependencies.messageStateHandler.findMessageIndexById(id)
-				if (index === -1) {
-					throw new Error(`Message with id ${id} not found for close`)
-				}
-				const msg = this.dependencies.messageStateHandler.getDiracMessages()[index]
-				await this.dependencies.messageStateHandler.updateDiracMessage(index, msg)
-				await this.dependencies.postStateToWebview()
-
 				if (this.dependencies.taskState.activeVoiceStreamId === id) {
+					const current = this.dependencies.messageStateHandler.getMessageById(id)
+					if (current?.content.type === DiracMessageType.MARKDOWN) {
+						await this.dependencies.messageStateHandler.patchMessageById(id, {
+							content: { ...current.content },
+						})
+					}
 					this.dependencies.taskState.activeVoiceStreamId = undefined
-					await this.dependencies.postStateToWebview()
+					await this.postPresentationToWebview()
 				}
 
 				if (this.activeVoiceStream === handle) {
@@ -125,27 +112,30 @@ export class TaskMessenger implements ITaskMessenger {
 		return handle
 	}
 
-	async createCard(params: CardParams): Promise<ICardHandle> {
+	private scheduleStatePublication(): void {
+		void this.postPresentationToWebview().catch((error) => {
+			Logger.error("Failed to publish card state:", error)
+		})
+	}
+
+	async createCard(params: TaskCardParams): Promise<TaskCardHandle> {
 		if (this.activeVoiceStream) {
 			await this.activeVoiceStream.close()
 		}
 
 		const id = this.generateId()
 		const ts = Date.now()
-
-		if (params.requireApproval || params.requireFeedback) {
-			this.dependencies.taskState.waitingCardIds.push(id)
-		}
-
 		const creationTime = Date.now()
+		const status =
+			params.status ||
+			(params.requireApproval || params.requireFeedback ? CardStatus.WAITING_FOR_INPUT : CardStatus.RUNNING)
 		const card: Card = {
 			id,
 			kind: params.kind ?? CardKind.GENERIC,
 			header: params.header,
+			toolName: params.toolName,
 			icon: params.icon,
-			status:
-				params.status ||
-				(params.requireApproval || params.requireFeedback ? CardStatus.WAITING_FOR_INPUT : CardStatus.RUNNING),
+			status,
 			renderType: params.renderType || "text",
 			body: params.body || "",
 			rawInput: params.rawInput,
@@ -162,8 +152,10 @@ export class TaskMessenger implements ITaskMessenger {
 			cleanupStrategy: params.cleanupStrategy,
 			do_not_auto_collapse: params.do_not_auto_collapse,
 			startTime: creationTime,
+			...(isFinalStatus(status) ? { endTime: creationTime } : {}),
 			outcome: params.outcome,
 		}
+		if (isFinalStatus(status) && card.requireApproval) card.collapsed = true
 		const message: DiracMessage = {
 			id,
 			ts,
@@ -171,87 +163,102 @@ export class TaskMessenger implements ITaskMessenger {
 		}
 
 		await this.dependencies.messageStateHandler.addToDiracMessages(message)
-		await this.dependencies.postStateToWebview()
+		this.scheduleStatePublication()
+		if (isFinalStatus(status)) await this.dependencies.messageStateHandler.flushPendingWrites()
 
-		const handle: ICardHandle = {
+		const getCard = (): Readonly<Card> => {
+			const index = this.dependencies.messageStateHandler.findMessageIndexByCardId(id)
+			if (index === -1) throw new Error(`Card with id ${id} not found`)
+			const current = this.dependencies.messageStateHandler.getDiracMessages()[index]
+			if (current.content.type !== DiracMessageType.CARD) throw new Error(`Message with id ${id} is not a card`)
+			return current.content.card
+		}
+		const getCardMessageTimestamp = (): number => {
+			const index = this.dependencies.messageStateHandler.findMessageIndexByCardId(id)
+			if (index === -1) throw new Error(`Card with id ${id} not found`)
+			return this.dependencies.messageStateHandler.getDiracMessages()[index].ts
+		}
+		const autoApprovedInteraction = () => ({
+			response: DiracAskResponse.APPROVE,
+			action: DiracAskResponse.APPROVE,
+			value: DiracAskResponse.APPROVE,
+			askTs: getCardMessageTimestamp(),
+		})
+		const removeWaitingCard = () => {
+			this.dependencies.taskState.waitingCardIds = this.dependencies.taskState.waitingCardIds.filter(
+				(cardId) => cardId !== id,
+			)
+		}
+		const updateCard = async (patch: Partial<Card>, doNotAutoCollapse?: boolean): Promise<Readonly<Card>> => {
+			const current = getCard()
+			const requestedStatus = patch.status
+			if (isFinalStatus(current.status) && requestedStatus !== undefined && requestedStatus !== current.status) {
+				throw new Error(`Card ${id} is already terminal with status ${current.status}`)
+			}
+			const recordedPatch: Partial<Omit<Card, "id">> = { ...patch }
+			const nextStatus = recordedPatch.status ?? current.status
+			if (isFinalStatus(nextStatus)) {
+				recordedPatch.endTime ??= current.endTime ?? Date.now()
+				if (recordedPatch.requireApproval ?? current.requireApproval) recordedPatch.collapsed = true
+			}
+			if (doNotAutoCollapse) recordedPatch.do_not_auto_collapse = true
+			const updated = await this.dependencies.messageStateHandler.patchCardById(id, recordedPatch)
+			if (isFinalStatus(updated.status)) removeWaitingCard()
+			this.scheduleStatePublication()
+			return updated
+		}
+
+		const handle: TaskCardHandle = {
 			id,
+			getCard,
 			update: async (patch: Partial<Card>) => {
-				const index = this.dependencies.messageStateHandler.findMessageIndexById(id)
-				if (index === -1) {
-					throw new Error(`Message with id ${id} not found for update`)
-				}
-				const msg = this.dependencies.messageStateHandler.getDiracMessages()[index]
-				if (msg.content.type === DiracMessageType.CARD) {
-					msg.content.card = { ...msg.content.card, ...patch }
-					// Cards are never partial in the new architecture
-					await this.dependencies.messageStateHandler.updateDiracMessage(index, msg)
-					await this.dependencies.postStateToWebview()
-				} else {
-					throw new Error(`Message with id ${id} is not a card message`)
-				}
+				const updated = await updateCard(patch)
+				if (isFinalStatus(updated.status)) await this.dependencies.messageStateHandler.flushPendingWrites()
 			},
 			appendBody: async (chunk: string) => {
-				const index = this.dependencies.messageStateHandler.findMessageIndexById(id)
-				if (index === -1) {
-					throw new Error(`Message with id ${id} not found for appendBody`)
-				}
-				const msg = this.dependencies.messageStateHandler.getDiracMessages()[index]
-				if (msg.content.type === DiracMessageType.CARD) {
-					msg.content.card.body = (msg.content.card.body || "") + chunk
-					await this.dependencies.messageStateHandler.updateDiracMessage(index, msg)
-					await this.dependencies.postStateToWebview()
-				} else {
-					throw new Error(`Message with id ${id} is not a card message`)
-				}
+				await this.dependencies.messageStateHandler.appendCardBodyById(id, chunk)
+				this.scheduleStatePublication()
 			},
 			finalize: async (status: CardStatus, doNotAutoCollapse?: boolean) => {
-				const index = this.dependencies.messageStateHandler.findMessageIndexById(id)
-				if (index === -1) {
-					throw new Error(`Message with id ${id} not found for finalize`)
-				}
-				const msg = this.dependencies.messageStateHandler.getDiracMessages()[index]
-				if (msg.content.type === DiracMessageType.CARD) {
-					msg.content.card.status = status
-					msg.content.card.endTime = Date.now()
-					if (msg.content.card.requireApproval && isFinalStatus(status)) {
-						msg.content.card.collapsed = true
-					}
-					if (doNotAutoCollapse) {
-						msg.content.card.do_not_auto_collapse = true
-					}
-					await this.dependencies.messageStateHandler.updateDiracMessage(index, msg)
-					await this.dependencies.messageStateHandler.flushPendingWrites()
-					await this.dependencies.postStateToWebview()
-				} else {
-					throw new Error(`Message with id ${id} is not a card message`)
-				}
+				if (!isFinalStatus(status)) throw new Error(`Card ${id} cannot finalize with nonterminal status ${status}`)
+				await updateCard({ status }, doNotAutoCollapse)
+				await this.dependencies.messageStateHandler.flushPendingWrites()
 			},
 			waitForInteraction: async () => {
-				const index = this.dependencies.messageStateHandler.findMessageIndexById(id)
-				if (index === -1) {
-					throw new Error(`Card with id ${id} not found`)
-				}
-				const msg = this.dependencies.messageStateHandler.getDiracMessages()[index]
-				if (msg.content.type !== DiracMessageType.CARD) {
-					throw new Error(`Message with id ${id} is not a card`)
-				}
-
-				const card = msg.content.card
+				if (params.isAutoApproved?.() === true) return autoApprovedInteraction()
+				const card = getCard()
 				const isAsk = !!(card.requireApproval || card.requireFeedback)
 				const isFinal = isFinalStatus(card.status)
 
 				if (isAsk && !isFinal) {
-					const previousStatus = this.dependencies.taskState.status
+					let previousStatus: TaskStatus | undefined
 
 					try {
-						// Ensure it's in the queue if not already
 						if (!this.dependencies.taskState.waitingCardIds.includes(id)) {
 							this.dependencies.taskState.waitingCardIds.push(id)
 						}
 						await this.dependencies.messageStateHandler.flushPendingWrites()
-						await this.dependencies.postStateToWebview()
+						await this.postPresentationToWebview()
+						await pWaitFor(
+							() =>
+								this.dependencies.taskState.lastWaitingCardId === id ||
+								this.dependencies.taskState.abort ||
+								isFinalStatus(getCard().status) ||
+								params.isAutoApproved?.() === true,
+							{ interval: 100 },
+						)
+						if (this.dependencies.taskState.abort) {
+							throw new Error("Task aborted while waiting for card interaction")
+						}
+						if (isFinalStatus(getCard().status)) {
+							throw new Error(`Card ${id} became terminal while waiting for interaction`)
+						}
+						if (params.isAutoApproved?.() === true) return autoApprovedInteraction()
 
-						const messageTs = msg.ts
+						const index = this.dependencies.messageStateHandler.findMessageIndexByCardId(id)
+						if (index === -1) throw new Error(`Card with id ${id} not found`)
+						const activeMessage = this.dependencies.messageStateHandler.getDiracMessages()[index]
+						const messageTs = activeMessage.ts
 						this.dependencies.taskState.askResponse = undefined
 						this.dependencies.taskState.askResponseText = undefined
 						this.dependencies.taskState.askResponseImages = undefined
@@ -259,6 +266,7 @@ export class TaskMessenger implements ITaskMessenger {
 						this.dependencies.taskState.askResponseUserEdits = undefined
 						this.dependencies.taskState.lastMessageTs = messageTs
 
+						previousStatus = this.dependencies.taskState.status
 						await this.runNotificationHook({
 							event: "user_attention",
 							source: "card_interaction",
@@ -274,7 +282,9 @@ export class TaskMessenger implements ITaskMessenger {
 								return !!(
 									response !== undefined ||
 									this.dependencies.taskState.lastMessageTs !== messageTs ||
-									this.dependencies.taskState.abort
+									this.dependencies.taskState.abort ||
+									isFinalStatus(getCard().status) ||
+									params.isAutoApproved?.()
 								)
 							},
 							{ interval: 100 },
@@ -283,15 +293,23 @@ export class TaskMessenger implements ITaskMessenger {
 						if (this.dependencies.taskState.abort) {
 							throw new Error("Task aborted while waiting for card interaction")
 						}
+						if (isFinalStatus(getCard().status)) {
+							throw new Error(`Card ${id} became terminal while waiting for interaction`)
+						}
 
 						if (this.dependencies.taskState.lastMessageTs !== messageTs) {
 							throw new Error("Current card interaction promise was ignored")
 						}
 
+						const autoApproved =
+							this.dependencies.taskState.askResponse === undefined && params.isAutoApproved?.() === true
+						const response = autoApproved ? DiracAskResponse.APPROVE : this.dependencies.taskState.askResponse!
 						const result = {
-							response: this.dependencies.taskState.askResponse!,
-							action: this.dependencies.taskState.askResponseAction || this.dependencies.taskState.askResponse!,
-							value: this.dependencies.taskState.askResponseValue,
+							response,
+							action: autoApproved
+								? DiracAskResponse.APPROVE
+								: this.dependencies.taskState.askResponseAction || response,
+							value: autoApproved ? DiracAskResponse.APPROVE : this.dependencies.taskState.askResponseValue,
 
 							text: this.dependencies.taskState.askResponseText,
 							images: this.dependencies.taskState.askResponseImages,
@@ -325,11 +343,11 @@ export class TaskMessenger implements ITaskMessenger {
 
 						return result
 					} finally {
-						if (!this.dependencies.taskState.abort) this.dependencies.taskState.status = previousStatus
-						this.dependencies.taskState.waitingCardIds = this.dependencies.taskState.waitingCardIds.filter(
-							(cid) => cid !== id,
-						)
-						await this.dependencies.postStateToWebview()
+						if (!this.dependencies.taskState.abort && previousStatus !== undefined) {
+							this.dependencies.taskState.status = previousStatus
+						}
+						removeWaitingCard()
+						await this.postPresentationToWebview()
 					}
 				}
 
@@ -355,7 +373,7 @@ export class TaskMessenger implements ITaskMessenger {
 		}
 
 		await this.dependencies.messageStateHandler.addToDiracMessages(message)
-		await this.dependencies.postStateToWebview()
+		await this.postPresentationToWebview()
 
 		const handle: ICardHandle = {
 			id,
@@ -381,17 +399,8 @@ export class TaskMessenger implements ITaskMessenger {
 		const index = this.dependencies.messageStateHandler.findMessageIndexById(id)
 
 		if (index !== -1) {
-			const msg = this.dependencies.messageStateHandler.getDiracMessages()[index]
-			if (msg.content.type === DiracMessageType.API_STATUS) {
-				msg.content.status = {
-					...msg.content.status,
-					...status,
-				}
-				await this.dependencies.messageStateHandler.updateDiracMessage(index, msg)
-				await this.dependencies.postStateToWebview()
-			} else {
-				throw new Error(`Message with id ${id} is not an api_status message`)
-			}
+			await this.dependencies.messageStateHandler.patchApiStatusById(id, status)
+			await this.postPresentationToWebview()
 		} else {
 			const message: DiracMessage = {
 				id,
@@ -399,7 +408,7 @@ export class TaskMessenger implements ITaskMessenger {
 				content: { type: DiracMessageType.API_STATUS, status },
 			}
 			await this.dependencies.messageStateHandler.addToDiracMessages(message)
-			await this.dependencies.postStateToWebview()
+			await this.postPresentationToWebview()
 		}
 	}
 
@@ -418,17 +427,19 @@ export class TaskMessenger implements ITaskMessenger {
 		// If this is a reasoning block and we already have an active stream, update it instead of creating a new message
 		const activeVoiceStreamId = this.dependencies.taskState.activeVoiceStreamId
 		if (isReasoning && activeVoiceStreamId) {
-			const index = this.dependencies.messageStateHandler.findMessageIndexById(activeVoiceStreamId)
-			if (index !== -1) {
-				const msg = this.dependencies.messageStateHandler.getDiracMessages()[index]
-				if (msg.content.type === DiracMessageType.MARKDOWN && msg.content.isReasoning) {
-					msg.content.content = text
+			const message = this.dependencies.messageStateHandler.getMessageById(activeVoiceStreamId)
+			if (message?.content.type === DiracMessageType.MARKDOWN && message.content.isReasoning) {
+				if (text.startsWith(message.content.content)) {
+					const suffix = text.slice(message.content.content.length)
+					if (suffix) await this.dependencies.messageStateHandler.appendMarkdownById(activeVoiceStreamId, suffix)
+				} else if (text !== message.content.content) {
+					const index = this.dependencies.messageStateHandler.findMessageIndexById(activeVoiceStreamId)
 					await this.dependencies.messageStateHandler.updateDiracMessage(index, {
-						content: msg.content,
+						content: { ...message.content, content: text },
 					})
-					await this.dependencies.postStateToWebview()
-					return
 				}
+				await this.postPresentationToWebview()
+				return
 			}
 		}
 
@@ -453,7 +464,7 @@ export class TaskMessenger implements ITaskMessenger {
 		}
 
 		await this.dependencies.messageStateHandler.addToDiracMessages(message)
-		await this.dependencies.postStateToWebview()
+		await this.postPresentationToWebview()
 	}
 
 	async runNotificationHook(notification: {
@@ -462,7 +473,7 @@ export class TaskMessenger implements ITaskMessenger {
 		message: string
 		waitingForUserInput: boolean
 	}): Promise<void> {
-		const hooksEnabled = getHooksEnabledSafe(this.dependencies.stateManager.getGlobalSettingsKey("hooksEnabled"))
+		const hooksEnabled = getHooksEnabledSafe(this.dependencies.getWorkingConfiguration().settings.hooksEnabled)
 		if (!hooksEnabled) {
 			return
 		}
@@ -479,7 +490,10 @@ export class TaskMessenger implements ITaskMessenger {
 				messageStateHandler: this.dependencies.messageStateHandler,
 				taskId: this.dependencies.taskId,
 				hooksEnabled,
-				model: getHookModelContext(this.dependencies.api!, this.dependencies.stateManager),
+				model: getTaskHookModelContext(
+					this.dependencies.getRequestRuntime?.()?.api ?? this.dependencies.api!,
+					this.dependencies.getWorkingConfiguration(),
+				),
 			})
 		} catch (error) {
 			Logger.error("[Notification Hook] Failed (non-fatal):", error)

@@ -6,6 +6,7 @@ import { DiracDefaultTool, DiracToolSpec } from "@shared/tools"
 import { DiracAskResponse } from "@shared/WebviewMessage"
 import { IDiracTool } from "../../interfaces/IDiracTool"
 import { IToolEnvironment } from "../../interfaces/IToolEnvironment"
+import type { ToolPermissionDisposition } from "../../autoApprove"
 import { SurfaceType } from "../../interfaces/SurfaceType"
 
 export const browser_action_spec: DiracToolSpec = {
@@ -56,6 +57,7 @@ export class BrowserActionTool implements IDiracTool {
 		const { action, url, coordinate, text } = args
 		const isSubagent = env.config.isSubagentExecution
 		const example = '{"action": "launch", "url": "https://google.com"}'
+		const utilityPermissionHandlingEnabled = env.config.permissionDecisionBinding !== undefined
 
 		if (!action) {
 			return this.reportMissingActionParameter(env, example)
@@ -63,10 +65,10 @@ export class BrowserActionTool implements IDiracTool {
 
 		const card = !isSubagent
 			? await env.ui.createCard({
-					icon: DiracIcon.BROWSER,
-					header: `Browser: ${action}${action === "launch" && url ? ` ${url}` : action === "click" && coordinate ? ` at ${coordinate}` : action === "type" && text ? ` "${text.substring(0, 30)}"` : ""}`,
-					collapsed: true,
-				})
+				icon: DiracIcon.BROWSER,
+				header: `Browser: ${action}${action === "launch" && url ? ` ${url}` : action === "click" && coordinate ? ` at ${coordinate}` : action === "type" && text ? ` "${text.substring(0, 30)}"` : ""}`,
+				collapsed: true,
+			})
 			: undefined
 		try {
 			let result: BrowserActionResult
@@ -74,38 +76,38 @@ export class BrowserActionTool implements IDiracTool {
 			switch (action) {
 				case "launch":
 					if (!url) return this.reportMissingUrlParameter(env, card, example)
-					const permission_card = await env.ui.createCard({
-						header: `Launch browser: ${url}`,
-						icon: DiracIcon.BROWSER,
-						status: CardStatus.WAITING_FOR_INPUT,
-						requireApproval: true,
-						collapsed: false,
-						body: `Dirac wants to launch a browser at ${url}`,
-					})
-					const permission_interaction = await permission_card.waitForInteraction()
-					const permission_result = {
-						approved: permission_interaction.action === DiracAskResponse.APPROVE,
-						action: permission_interaction.action,
-						value: permission_interaction.value,
-						text: permission_interaction.text,
-						card: permission_card,
-					}
-					const permission = permission_result
-					if (permission.action === DiracAskResponse.MESSAGE) {
-						if (permission.text) {
-							await env.ui.upsertText(permission.text, false, "user")
+					const permissionDisposition = utilityPermissionHandlingEnabled
+						? this.resolveLaunchPermission(env, url)
+						: undefined
+					if (permissionDisposition !== "auto_approve") {
+						const permissionCard = await env.ui.createCard({
+							header: `Launch browser: ${url}`,
+							icon: DiracIcon.BROWSER,
+							status: CardStatus.WAITING_FOR_INPUT,
+							requireApproval: true,
+							permissionRequestKind:
+								utilityPermissionHandlingEnabled && permissionDisposition === "manual_only"
+									? "manual_tool"
+									: "tool",
+							collapsed: false,
+							body: `Dirac wants to launch a browser at ${url}`,
+						})
+						const interaction = await permissionCard.waitForInteraction()
+						const approved = interaction.action === DiracAskResponse.APPROVE
+						if (interaction.action === DiracAskResponse.MESSAGE) {
+							if (interaction.text) await env.ui.upsertText(interaction.text, false, "user")
+							await permissionCard.finalize(CardStatus.SKIPPED)
+							if (card) {
+								await card.update({ body: `↩ Skipped — user sent a message instead` })
+								await card.finalize(CardStatus.SKIPPED)
+							}
+							return interaction.text
+								? formatResponse.toolDeniedWithFeedback(interaction.text)
+								: formatResponse.toolDenied()
 						}
-						await permission_result.card.finalize(CardStatus.SKIPPED)
-						if (card) {
-							await card.update({ body: `↩ Skipped — user sent a message instead` })
-							await card.finalize(CardStatus.SKIPPED)
-						}
-						return permission.text
-							? formatResponse.toolDeniedWithFeedback(permission.text)
-							: formatResponse.toolDenied()
+						await permissionCard.finalize(approved ? CardStatus.SUCCESS : CardStatus.CANCELLED)
+						if (!approved) return this.formatLaunchDenialResponse(interaction.value, card)
 					}
-					await permission_result.card.finalize(permission.approved ? CardStatus.SUCCESS : CardStatus.CANCELLED)
-					if (!permission.approved) return this.formatUserDenialResponse(permission.value, card)
 					if (card) await card.update({ body: `Launching ${url}...` })
 					result = await env.browser.launch(url)
 					break
@@ -144,6 +146,15 @@ export class BrowserActionTool implements IDiracTool {
 		} catch (error: any) {
 			return this.abortBrowserWithError(error, card, env)
 		}
+	}
+
+	private resolveLaunchPermission(env: IToolEnvironment, url: string): ToolPermissionDisposition {
+		const ruleResult = env.config.services.commandPermissionController.validateTool(DiracDefaultTool.BROWSER, url)
+		if (!ruleResult.allowed) return "manual_only"
+		if (env.config.autoApprover.isUnrestrictedAutoApprove()) return "auto_approve"
+		if (ruleResult.reason === "allowed" && ruleResult.matchedPattern) return "auto_approve"
+		if (env.config.autoApprover.shouldAutoApproveTool(DiracDefaultTool.BROWSER) === true) return "auto_approve"
+		return "utility_eligible"
 	}
 
 	private async reportMissingActionParameter(env: IToolEnvironment, example: string): Promise<string> {
@@ -186,7 +197,7 @@ export class BrowserActionTool implements IDiracTool {
 		return `Missing value for required parameter 'text'. Please retry with complete response.\n\nExample of correct usage (arguments JSON):\n${example}\n`
 	}
 
-	private async formatUserDenialResponse(reason: string | undefined, card: any): Promise<string> {
+	private async formatLaunchDenialResponse(reason: string | undefined, card: any): Promise<string> {
 		if (card) {
 			await card.update({
 				body: `User denied browser launch: ${reason || "No reason provided"}`,
@@ -201,9 +212,8 @@ export class BrowserActionTool implements IDiracTool {
 		result: BrowserActionResult,
 		card: any,
 	): Promise<Array<DiracTextContentBlock | DiracImageContentBlock>> {
-		const responseText = `The browser action has been executed. The console logs and screenshot have been captured for your analysis.\n\nConsole logs:\n${
-			result.logs || "(No new logs)"
-		}\n\n(REMEMBER: if you need to proceed to using non-\`browser_action\` tools or launch a new browser, you MUST first close this browser. For example, if after analyzing the logs and screenshot you need to edit a file, you must first close the browser before you can use the write_to_file tool.)`
+		const responseText = `The browser action has been executed. The console logs and screenshot have been captured for your analysis.\n\nConsole logs:\n${result.logs || "(No new logs)"
+			}\n\n(REMEMBER: if you need to proceed to using non-\`browser_action\` tools or launch a new browser, you MUST first close this browser. For example, if after analyzing the logs and screenshot you need to edit a file, you must first close the browser before you can use the write_to_file tool.)`
 
 		if (card) {
 			await card.update({

@@ -27,7 +27,16 @@ export class ContextLoader {
 		useCompactPrompt = false,
 	): Promise<[DiracContent[], string, boolean, SkillMetadata[], boolean, string?, SlashCommandDirectAction[]?]> {
 		const cwd = this.dependencies.cwd
-		const { localWorkflowToggles, globalWorkflowToggles } = await refreshWorkflowToggles(this.dependencies.stateManager, cwd)
+		const runtime = this.dependencies.getRequestRuntime()
+		const { settings, workspaceConfiguration } = runtime.workingConfiguration
+		const { localWorkflowToggles, globalWorkflowToggles } = await refreshWorkflowToggles(
+			this.dependencies.stateManager,
+			cwd,
+			{
+				globalWorkflowToggles: settings.globalWorkflowToggles,
+				localWorkflowToggles: workspaceConfiguration.workflowToggles,
+			},
+		)
 
 		// Discover and filter skills by toggles
 		const availableSkills = await this.resolveAvailableSkills(cwd)
@@ -103,10 +112,11 @@ export class ContextLoader {
 		const providerSkills = filterSkillsByProviderCapabilities(resolvedSkills, {
 			native_web_search: this.dependencies.getCurrentProviderInfo().supportsNativeWebSearch === true,
 		})
-		const globalToggles = this.dependencies.stateManager.getGlobalSettingsKey("globalSkillsToggles") ?? {}
-		const localToggles = this.dependencies.stateManager.getWorkspaceStateKey("localSkillsToggles") ?? {}
+		const { settings, workspaceConfiguration } = this.dependencies.getRequestRuntime().workingConfiguration
+		const globalToggles = settings.globalSkillsToggles ?? {}
+		const localToggles = workspaceConfiguration.localSkillsToggles ?? {}
 		return providerSkills.filter((skill) => {
-			if (this.dependencies.yoloModeToggled && skill.interactiveOnly) return false
+			if (settings.yoloModeToggled && skill.interactiveOnly) return false
 			if (skill.source === "builtin") return true
 			const toggles = skill.source === "global" ? globalToggles : localToggles
 			return toggles[skill.path] !== false

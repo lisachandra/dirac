@@ -15,25 +15,36 @@ import { DiracIcon } from "./icons"
 import { DiracRulesToggles } from "./dirac-rules"
 import { HistoryItem } from "./HistoryItem"
 import { DiracMessageModelInfo } from "./messages"
+import type { ReleaseNotesView } from "./release-notes"
 import { OnboardingModelGroup } from "./proto/dirac/state"
 import {
+	DEFAULT_INFERENCE_SPEED,
 	DEFAULT_OPENAI_REASONING_EFFORT,
+	INFERENCE_SPEED_LABELS,
+	INFERENCE_SPEED_OPTIONS,
+	InferenceSpeed,
+	isInferenceSpeed,
 	isOpenaiReasoningEffort,
 	Mode,
 	OPENAI_REASONING_EFFORT_LABELS,
 	OPENAI_REASONING_EFFORT_OPTIONS,
 	OpenaiReasoningEffort,
 } from "./storage/types"
-export type { Mode, OpenaiReasoningEffort }
+export type { InferenceSpeed, Mode, OpenaiReasoningEffort }
 export {
+	DEFAULT_INFERENCE_SPEED,
 	DEFAULT_OPENAI_REASONING_EFFORT,
+	INFERENCE_SPEED_LABELS,
+	INFERENCE_SPEED_OPTIONS,
 	OPENAI_REASONING_EFFORT_LABELS,
 	OPENAI_REASONING_EFFORT_OPTIONS,
+	isInferenceSpeed,
 	isOpenaiReasoningEffort,
 }
 
 import { TelemetrySetting } from "./TelemetrySetting"
 import type { UserApprovedCommand } from "./UserApprovedCommand"
+import type { GoalViewState } from "./goal"
 // webview will hold state
 export interface ExtensionMessage {
 	type: "grpc_response" // New type for gRPC responses
@@ -62,6 +73,11 @@ export interface ToolMetadata {
 }
 
 export interface ExtensionState {
+	/** Selected presentation surface and the last operation included in a full hydration. */
+	presentationSurfaceId?: string
+	presentationOffset?: number
+	/** Explicit null clears a previously selected Goal in partial state consumers. */
+	goal?: GoalViewState | null
 	isNewUser: boolean
 	welcomeViewCompleted: boolean
 	onboardingModels?: OnboardingModelGroup | undefined
@@ -72,6 +88,8 @@ export interface ExtensionState {
 	utilityModelUseCondense: boolean
 	utilityModelUseNewTask: boolean
 	utilityModelUseGenerateCommitMessage: boolean
+	utilityModelUsePermissionHandling: boolean
+	utilityModelPermissionPolicy: string
 	autoApprovalSettings: AutoApprovalSettings
 	userApprovedCommands: UserApprovedCommand[]
 	browserSettings: BrowserSettings
@@ -86,6 +104,7 @@ export interface ExtensionState {
 	platform: Platform
 	environment?: Environment
 	shouldShowAnnouncement: boolean
+	releaseNotes?: ReleaseNotesView
 	taskHistory: HistoryItem[]
 	telemetrySetting: TelemetrySetting
 	shellIntegrationTimeout: number
@@ -141,6 +160,7 @@ export interface ExtensionState {
 	writePromptMetadataDirectory?: string
 	optOutOfRemoteConfig?: boolean
 	doubleCheckCompletionEnabled?: boolean
+	lowVerbosityEnabled?: boolean
 	banners?: BannerCardData[]
 	availableSkills?: SkillMetadata[]
 	availableTools: ToolMetadata[]
@@ -338,6 +358,15 @@ export interface DiracApiReqInfo {
 	reasoningTokens?: number
 	cacheReads?: number
 	cost?: number
+	/** Distinguishes provider-reported or calculable metrics from placeholder zeroes. */
+	usageAvailability?: {
+		inputTokens: boolean
+		outputTokens: boolean
+		reasoningTokens: boolean
+		cacheWrites: boolean
+		cacheReads: boolean
+		cost: boolean
+	}
 	contextWindow?: number
 	contextUsagePercentage?: number
 	/** Aggregate metrics from messages deleted during checkpoint restore. Used for accurate total tracking without inflating per-request counts. */

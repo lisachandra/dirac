@@ -29,6 +29,7 @@ import { ToolDiscoveryService } from "@core/task/tools/discovery/ToolDiscoverySe
 import { DiracToolSet } from "../registry/DiracToolSet"
 import { toolSpecFunctionDeclarations, toolSpecInputSchema } from "../spec"
 import { mockProviderInfo } from "./test-helpers"
+import { PromptBuilder } from "../registry/PromptBuilder"
 
 // ============================================================================
 // Configuration
@@ -149,6 +150,7 @@ const baseContext: SystemPromptContext = {
 	supportsBrowserUse: true,
 	diracWebToolsEnabled: true,
 	subagentsEnabled: true,
+	lowVerbosityEnabled: true,
 	browserSettings: { viewport: { width: 1280, height: 720 } },
 	globalDiracRulesFileInstructions: "Follow global rules",
 	localDiracRulesFileInstructions: "Follow local rules",
@@ -317,18 +319,29 @@ describe("Prompt System Integration Tests", () => {
 		})
 	})
 
-	describe("Parallel Tool Calling", () => {
-		it(`should include parallel tool-calling guidance when enabled`, async function () {
-			const context: SystemPromptContext = {
-				...baseContext,
-				enableParallelToolCalling: true,
-			}
-
-			await runPromptTest(this, context, async ({ systemPrompt }) => {
-				expect(systemPrompt).to.include(
-					"You may use multiple tools in a single response when the operations are independent",
-				)
+	describe("Stable Operating Contract", () => {
+		it("should describe tool batching without depending on native parallel support", async function () {
+			await runPromptTest(this, baseContext, async ({ systemPrompt }) => {
+				expect(systemPrompt).to.include("grouping independent operations into one tool call")
+				expect(systemPrompt).to.include("calling multiple independent tools in the same response")
 			})
+		})
+
+		it("should remain stable across task modes", async function () {
+			const actPrompt = await new PromptBuilder({
+				...baseContext,
+				providerInfo: { ...baseContext.providerInfo, mode: "act" },
+			}).build()
+			const planPrompt = await new PromptBuilder({
+				...baseContext,
+				providerInfo: { ...baseContext.providerInfo, mode: "plan" },
+			}).build()
+
+			expect(planPrompt).to.equal(actPrompt)
+			expect(actPrompt).to.include(
+				"The initial mode is provided at task start, and you will be notified every time the mode switches.",
+			)
+			expect(actPrompt).to.not.include("In each user message")
 		})
 	})
 

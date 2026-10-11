@@ -1,5 +1,4 @@
-import { DiracMessage } from "@shared/ExtensionMessage"
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { ChatState } from "../types/chatTypes"
 import { useChatStore } from "@/features/chat/store/chatStore"
 import { useShallow } from "zustand/react/shallow"
@@ -8,7 +7,7 @@ import { useShallow } from "zustand/react/shallow"
  * Custom hook for managing chat state
  * Handles input values, selection states, and UI state
  */
-export function useChatState(messages: DiracMessage[]): ChatState {
+export function useChatState(): ChatState {
 	// Input and selection state
 	const [inputValue, setInputValue] = useState("")
 	const [activeQuote, setActiveQuote] = useState<string | null>(null)
@@ -24,11 +23,20 @@ export function useChatState(messages: DiracMessage[]): ChatState {
 	const textAreaRef = useRef<HTMLTextAreaElement>(null)
 
 	// Derived state
-	const lastMessage = useMemo(() => messages.at(-1), [messages])
-	const secondLastMessage = useMemo(() => messages.at(-2), [messages])
+	const presentationState = useChatStore(
+		useShallow((state) => ({
+			lastMessage: state.lastMessage,
+			secondLastMessage: state.secondLastMessage,
+			task: state.taskMessage,
+			uiActionState: state.uiActionState,
+			activeVoiceStreamId: state.activeVoiceStreamId,
+			isApiRequestActive: state.isApiRequestActive,
+			taskStatus: state.taskStatus,
+		})),
+	)
+	const { lastMessage, secondLastMessage, task } = presentationState
 
 	// Clear expanded rows when task changes
-	const task = useMemo(() => messages.at(0), [messages])
 	const clearExpandedRows = useCallback(() => {
 		setExpandedRows({})
 		useChatStore.getState().clearCardCollapsedStates()
@@ -73,18 +81,7 @@ export function useChatState(messages: DiracMessage[]): ChatState {
 		textAreaRef,
 
 		// Derived values
-		messages,
-		lastMessage,
-		secondLastMessage,
-		task,
-		...useChatStore(
-			useShallow((state) => ({
-				uiActionState: state.uiActionState,
-				activeVoiceStreamId: state.activeVoiceStreamId,
-				isApiRequestActive: state.isApiRequestActive,
-				taskStatus: state.taskStatus,
-			})),
-		),
+		...presentationState,
 
 		// Handlers
 		handleFocusChange,

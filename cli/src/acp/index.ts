@@ -90,6 +90,8 @@ export interface AcpModeOptions {
   thinkingBudgetTokens?: number;
   /** Reasoning effort explicitly selected at process startup */
   reasoningEffort?: string;
+  /** Inference speed explicitly selected at process startup */
+  inferenceSpeed?: "default" | "standard" | "fast";
   /** Additional runtime hooks directory */
   hooksDir?: string;
   /** Enable verbose/debug logging to stderr */
@@ -148,6 +150,7 @@ export async function runAcpMode(options: AcpModeOptions = {}): Promise<void> {
         yolo: options.yolo,
         thinkingBudgetTokens: options.thinkingBudgetTokens,
         reasoningEffort: options.reasoningEffort,
+        inferenceSpeed: options.inferenceSpeed,
         hooksDir: options.hooksDir,
       });
       return agent;
@@ -210,6 +213,7 @@ async function runDetachedAcpMode(
     yolo: options.yolo,
     thinkingBudgetTokens: options.thinkingBudgetTokens,
     reasoningEffort: options.reasoningEffort,
+    inferenceSpeed: options.inferenceSpeed,
     hooksDir: options.hooksDir,
     socketPath: options.listen!,
   });

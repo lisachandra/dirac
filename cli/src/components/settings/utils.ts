@@ -12,7 +12,10 @@ export function normalizeReasoningEffort(value: unknown): OpenaiReasoningEffort 
 	return DEFAULT_OPENAI_REASONING_EFFORT
 }
 
-export function nextReasoningEffort(current: OpenaiReasoningEffort): OpenaiReasoningEffort {
-	const idx = OPENAI_REASONING_EFFORT_OPTIONS.indexOf(current)
-	return OPENAI_REASONING_EFFORT_OPTIONS[(idx + 1) % OPENAI_REASONING_EFFORT_OPTIONS.length]
+export function nextReasoningEffort(
+	current: OpenaiReasoningEffort,
+	options: readonly OpenaiReasoningEffort[] = OPENAI_REASONING_EFFORT_OPTIONS,
+): OpenaiReasoningEffort {
+	const idx = options.indexOf(current)
+	return options[(idx + 1) % options.length]
 }

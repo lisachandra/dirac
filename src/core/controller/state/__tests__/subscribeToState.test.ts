@@ -4,17 +4,15 @@ import { EmptyRequest } from "@shared/proto/dirac/common"
 import type { ExtensionState } from "@shared/ExtensionMessage"
 import type { Controller } from "../../index"
 import { getRequestRegistry } from "../../grpc-handler"
-import { sendStateUpdate, subscribeToState } from "../subscribeToState"
+import { subscribeToState } from "../subscribeToState"
 
 describe("subscribeToState", () => {
-	it("hydrates through the ordered publisher and forwards its sequence number", async () => {
+	it("hydrates only the new subscription before live broadcasts", async () => {
 		const requestId = "ordered-state-subscription"
 		const receivedSequences: number[] = []
 		const state = { version: "test" } as ExtensionState
 		const controller = {
-			postStateToWebview: async () => {
-				await sendStateUpdate(state, 42)
-			},
+			getStateToPostToWebview: async () => state,
 		} as Controller
 
 		try {
@@ -27,7 +25,7 @@ describe("subscribeToState", () => {
 				requestId,
 			)
 
-			assert.deepEqual(receivedSequences, [42])
+			assert.deepEqual(receivedSequences, [0])
 		} finally {
 			getRequestRegistry().cancelRequest(requestId)
 		}

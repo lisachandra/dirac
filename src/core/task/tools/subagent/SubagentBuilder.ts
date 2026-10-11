@@ -1,10 +1,8 @@
-import { buildApiHandler, buildApiHandlerForSelection } from "@core/api"
 import { LEGACY_RESPONSE_TOOLS, RESPOND_TOOL_NAME, ResponseOperation } from "@shared/responseTool"
 import type { SubagentIdentity } from "@shared/subagents"
 import { DiracDefaultTool } from "@shared/tools"
-import { ApiProvider, type ModelProviderSelection } from "@/shared/api"
-import { getProviderModelIdKey } from "@/shared/storage/provider-keys"
-import type { TaskConfig } from "../types/TaskConfig"
+import type { ModelProviderSelection } from "@/shared/api"
+import type { SubagentRuntime, TaskConfig } from "../types/TaskConfig"
 import type { AgentBaseConfig } from "./AgentConfigLoader"
 import { AgentConfigLoader } from "./AgentConfigLoader"
 import type { SubagentRunRecorder } from "./SubagentRunRecorder"
@@ -44,7 +42,7 @@ During the task, use respond with operation "progress" for timely trajectory upd
 export class SubagentBuilder {
 	private readonly agentConfig: AgentConfig = {}
 	private readonly allowedTools: string[]
-	private readonly apiHandler: ReturnType<typeof buildApiHandler>
+	private readonly runtime: SubagentRuntime
 	private readonly providerId: string
 
 	constructor(
@@ -56,29 +54,16 @@ export class SubagentBuilder {
 		this.agentConfig = subagentConfig ?? {}
 		this.allowedTools = this.resolveAllowedTools(this.agentConfig.tools)
 
-		const mode = this.baseConfig.services.stateManager.getGlobalSettingsKey("mode")
-		const apiConfiguration = this.baseConfig.services.stateManager.getApiConfiguration()
-		if (this.options.utilityModelSelection) {
-			this.providerId = this.options.utilityModelSelection.provider
-			this.apiHandler = buildApiHandlerForSelection(apiConfiguration, this.options.utilityModelSelection, {
-				ulid: this.baseConfig.ulid,
-			})
-			return
-		}
-
-		const effectiveApiConfiguration = {
-			...apiConfiguration,
-			ulid: this.baseConfig.ulid,
-		} as Record<string, unknown>
-		this.applyModelOverride(effectiveApiConfiguration, mode, this.agentConfig.modelId)
-		this.providerId = ((mode === "plan"
-			? effectiveApiConfiguration.planModeApiProvider
-			: effectiveApiConfiguration.actModeApiProvider) ?? effectiveApiConfiguration.apiProvider) as string
-		this.apiHandler = buildApiHandler(effectiveApiConfiguration as typeof apiConfiguration, mode)
+		const runtime = this.baseConfig.callbacks.createSubagentRuntime({
+			modelId: this.agentConfig.modelId,
+			utilityModelSelection: this.options.utilityModelSelection,
+		})
+		this.providerId = runtime.providerId
+		this.runtime = runtime
 	}
 
-	getApiHandler(): ReturnType<typeof buildApiHandler> {
-		return this.apiHandler
+	getRuntime(): SubagentRuntime {
+		return this.runtime
 	}
 
 	getProviderId(): string {
@@ -132,17 +117,5 @@ export class SubagentBuilder {
 		}
 
 		return `${lines.join("\n")}\n\n`
-	}
-
-	private applyModelOverride(apiConfiguration: Record<string, unknown>, _mode: string, modelId?: string): void {
-		const trimmedModelId = modelId?.trim()
-		if (!trimmedModelId) {
-			return
-		}
-
-		const mode = _mode === "plan" ? "plan" : "act"
-		const provider = (apiConfiguration[_mode === "plan" ? "planModeApiProvider" : "actModeApiProvider"] ??
-			apiConfiguration.apiProvider) as ApiProvider
-		apiConfiguration[getProviderModelIdKey(provider as ApiProvider, mode)] = trimmedModelId
 	}
 }

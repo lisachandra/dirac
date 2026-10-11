@@ -1,17 +1,18 @@
 import { expect } from "chai"
-import { describe, it } from "mocha"
+import * as fs from "fs"
+import { afterEach, describe, it } from "mocha"
+import * as os from "os"
+import * as path from "path"
+import sinon from "sinon"
+import { HostProvider } from "@/hosts/host-provider"
 import {
+	MAX_PENDING_PRESENTATION_PUBLICATION_BYTES,
 	MessageStateHandler,
 	UI_MESSAGES_FLUSH_MAX_DELAY_MS,
 } from "../core/task/message-state"
 import { TaskState } from "../core/task/TaskState"
-import { DiracMessage, DiracMessageType } from "../shared/ExtensionMessage"
+import { CardStatus, DiracMessage, DiracMessageType } from "../shared/ExtensionMessage"
 import { setVscodeHostProviderMock } from "./host-provider-test-utils"
-import { HostProvider } from "@/hosts/host-provider"
-import * as os from "os"
-import * as path from "path"
-import * as fs from "fs"
-import sinon from "sinon"
 
 /**
  * Unit tests for MessageStateHandler's mutex protection (RC-4)
@@ -20,6 +21,8 @@ import sinon from "sinon"
  */
 describe("MessageStateHandler Mutex Protection", () => {
 	let tmpDir: string
+	let createdHandlers: MessageStateHandler[] = []
+	let handlerId = 0
 
 	before(() => {
 		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dirac-msh-test-"))
@@ -31,17 +34,24 @@ describe("MessageStateHandler Mutex Protection", () => {
 		HostProvider.reset()
 	})
 
+	afterEach(async () => {
+		await Promise.all(createdHandlers.map((handler) => handler.flushPendingWrites()))
+		createdHandlers = []
+	})
+
 	/**
 	 * Helper to create a minimal MessageStateHandler for testing
 	 */
-	function createTestHandler(): MessageStateHandler {
+	function createTestHandler(taskId = `test-task-id-${++handlerId}`): MessageStateHandler {
 		const taskState = new TaskState()
-		return new MessageStateHandler({
-			taskId: "test-task-id",
+		const handler = new MessageStateHandler({
+			taskId,
 			ulid: "test-ulid",
 			taskState,
 			updateTaskHistory: async () => [],
 		})
+		createdHandlers.push(handler)
+		return handler
 	}
 
 	/**
@@ -288,9 +298,7 @@ describe("MessageStateHandler Mutex Protection", () => {
 
 	it("strips transient provenance at every API history write boundary", async () => {
 		const handler = createTestHandler()
-		handler.setApiConversationHistory([
-			{ role: "user", content: [{ type: "text", text: "set", isUserInput: true }] },
-		])
+		handler.setApiConversationHistory([{ role: "user", content: [{ type: "text", text: "set", isUserInput: true }] }])
 		expect((handler.getApiConversationHistory()[0].content as any[])[0]).not.to.have.property("isUserInput")
 
 		await handler.addToApiConversationHistory({
@@ -349,4 +357,116 @@ describe("MessageStateHandler Mutex Protection", () => {
 			clock.restore()
 		}
 	})
+
+	it("records status patches and stream appends without unchanged prefixes", async () => {
+		const handler = createTestHandler()
+		const largeBody = `sentinel-${"x".repeat(2 * 1024 * 1024)}`
+		handler.setDiracMessages([
+			{
+				id: "large-card",
+				ts: 1,
+				content: {
+					type: DiracMessageType.CARD,
+					card: { id: "large-card", header: "large", status: CardStatus.RUNNING, renderType: "text", body: largeBody },
+				},
+			},
+			{ id: "stream", ts: 2, content: { type: DiracMessageType.MARKDOWN, content: largeBody } },
+			{
+				id: "api-status",
+				ts: 3,
+				content: {
+					type: DiracMessageType.API_STATUS,
+					status: { request: largeBody, retryStatus: { attempt: 1, maxAttempts: 3, delaySec: 2 } },
+				},
+			},
+		])
+
+		await handler.patchCardById("large-card", { status: CardStatus.SUCCESS })
+		await handler.appendMarkdownById("stream", "tail-chunk")
+		await handler.patchApiStatusById("api-status", { cost: 0.25 }, ["retryStatus"])
+		const encoded = JSON.stringify(handler.getPendingPresentationOperations())
+
+		expect(encoded).to.contain("tail-chunk")
+		expect(encoded).not.to.contain("sentinel-")
+		expect(Buffer.byteLength(encoded)).to.be.lessThan(1024)
+		const apiStatus = handler.getLatestApiStatusMessage()
+		expect(apiStatus?.content.type).to.equal(DiracMessageType.API_STATUS)
+		if (apiStatus?.content.type !== DiracMessageType.API_STATUS) throw new Error("Expected latest API status")
+		expect(apiStatus.content.status.request).to.equal(largeBody)
+		expect(apiStatus.content.status.retryStatus).to.equal(undefined)
+		expect(apiStatus.content.status.cost).to.equal(0.25)
+	})
+
+	it("forces hydration when publication operations exceed the bounded buffer", async () => {
+		const handler = createTestHandler()
+		handler.setDiracMessages([{ id: "stream", ts: 1, content: { type: DiracMessageType.MARKDOWN, content: "" } }])
+
+		await handler.appendMarkdownById("stream", "x".repeat(MAX_PENDING_PRESENTATION_PUBLICATION_BYTES + 1))
+
+		expect(handler.hasPresentationPublicationGap()).to.equal(true)
+		expect(handler.getPendingPresentationOperations()).to.deep.equal([])
+		const snapshot = await handler.capturePresentationSnapshot()
+		expect(snapshot.messages[0].content.type).to.equal(DiracMessageType.MARKDOWN)
+		if (snapshot.messages[0].content.type !== DiracMessageType.MARKDOWN) throw new Error("Expected markdown")
+		expect(snapshot.messages[0].content.content.length).to.equal(MAX_PENDING_PRESENTATION_PUBLICATION_BYTES + 1)
+		handler.acknowledgePresentationOperations(snapshot.offset)
+		expect(handler.hasPresentationPublicationGap()).to.equal(false)
+	})
+
+	it("acknowledges only presentation operations included in a completed publication", async () => {
+		const handler = createTestHandler()
+		await handler.addToDiracMessages({
+			id: "first",
+			ts: 1,
+			content: { type: DiracMessageType.MARKDOWN, content: "first" },
+		})
+		const publishedThrough = handler.getPendingPresentationOperations().at(-1)!.offset
+		await handler.addToDiracMessages({
+			id: "second",
+			ts: 2,
+			content: { type: DiracMessageType.MARKDOWN, content: "second" },
+		})
+
+		handler.acknowledgePresentationOperations(publishedThrough)
+
+		expect(handler.getPendingPresentationOperations().map((operation) => operation.offset)).to.deep.equal([
+			publishedThrough + 1,
+		])
+	})
+
+	it("maintains the latest API status pointer across deletion and replacement", async () => {
+		const handler = createTestHandler()
+		handler.setDiracMessages([
+			{ id: "first-api", ts: 1, content: { type: DiracMessageType.API_STATUS, status: { request: "first" } } },
+			{ id: "markdown", ts: 2, content: { type: DiracMessageType.MARKDOWN, content: "middle" } },
+			{ id: "second-api", ts: 3, content: { type: DiracMessageType.API_STATUS, status: { request: "second" } } },
+		])
+
+		expect(handler.getLatestApiStatusMessage()?.id).to.equal("second-api")
+		await handler.deleteDiracMessage(handler.findMessageIndexById("second-api"))
+		expect(handler.getLatestApiStatusMessage()?.id).to.equal("first-api")
+		await handler.patchMessageById("first-api", {
+			content: { type: DiracMessageType.MARKDOWN, content: "replaced" },
+		})
+		expect(handler.getLatestApiStatusMessage()).to.equal(undefined)
+	})
+
+	it("discards pending and late writes after persistence retirement", async () => {
+		const taskId = `retired-task-${++handlerId}`
+		const handler = createTestHandler(taskId)
+		await handler.addToDiracMessages(createTestMessage("pending"))
+
+		await handler.retirePersistence()
+		await handler.addToDiracMessages(createTestMessage("late"))
+		await handler.addToApiConversationHistory({ role: "user", content: "late API message" })
+		await handler.overwriteApiConversationProviderState({})
+		await handler.recordDeliveredSteeringMessageIds(["late-steering-message"])
+		await handler.flushPendingWrites()
+
+		expect(handler.getPendingPresentationOperations()).to.deep.equal([])
+		expect(fs.existsSync(path.join(tmpDir, "tasks", taskId, "ui_messages.jsonl"))).to.equal(false)
+		expect(fs.existsSync(path.join(tmpDir, "tasks", taskId, "api_conversation_history.jsonl"))).to.equal(false)
+		expect(fs.existsSync(path.join(tmpDir, "tasks", taskId, "api_conversation_provider_state.json"))).to.equal(false)
+	})
+
 })

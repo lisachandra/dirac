@@ -1,7 +1,5 @@
 import { Mode } from "@shared/ExtensionMessage"
-import { getApiMetrics, getLastApiReqInfo } from "@shared/getApiMetrics"
-import { BooleanRequest } from "@shared/proto/dirac/common"
-import React, { useCallback, useEffect, useMemo } from "react"
+import React, { useEffect, useMemo } from "react"
 import { useMount } from "react-use"
 import { useAppStore } from "@/app/store/appStore"
 import { useShowNavbar } from "@/context/PlatformContext"
@@ -10,102 +8,53 @@ import { useChatStore } from "@/features/chat/store/chatStore"
 import { normalizeApiConfiguration } from "@/features/settings/components/utils/providerUtils"
 import { useSettingsStore } from "@/features/settings/store/settingsStore"
 import { cn } from "@/lib/utils"
-import { FileServiceClient } from "@/shared/api/grpc-client"
-import { useThrottledValue } from "@/shared/lib/useThrottledValue"
 import { Navbar } from "@/shared/ui/Navbar"
 import { ChatLayout } from "./components/ChatLayout"
-import { CHAT_CONSTANTS } from "./constants"
+import { InteractionState, useInteractionState } from "./context/InteractionStateContext"
 // Decorators
 import { ActionButtonsDecorator } from "./decorators/view/ActionButtonsDecorator"
 import { AutoApproveDecorator } from "./decorators/view/AutoApproveDecorator"
 import { useChatState } from "./hooks/useChatState"
 import { useMessageHandlers } from "./hooks/useMessageHandlers"
-import { InteractionState, useInteractionState } from "./context/InteractionStateContext"
 import { useScrollBehavior } from "./hooks/useScrollBehavior"
+import { GoalSection } from "./sections/GoalSection"
 // Sections
 import { InputSection } from "./sections/InputSection"
 import { MessagesSection } from "./sections/MessagesSection"
 import { TaskSection } from "./sections/TaskSection"
 import { WelcomeSection } from "./sections/WelcomeSection"
 import { ChatSection, ChatViewContext, ChatViewDecorator, ChatViewProps } from "./types"
-import { filterVisibleMessages } from "./utils/messageUtils"
-
-const MAX_IMAGES_AND_FILES_PER_MESSAGE = CHAT_CONSTANTS.MAX_IMAGES_AND_FILES_PER_MESSAGE
+import { useShallow } from "zustand/react/shallow"
 
 export const ModularChatView: React.FC<ChatViewProps> = ({ isHidden, showAnnouncement, hideAnnouncement, showHistoryView }) => {
 	const showNavbar = useShowNavbar()
 	const version = useAppStore((state) => state.version)
-	const messages = useChatStore((state) => state.diracMessages)
-	const activeVoiceStreamId = useChatStore((state) => state.activeVoiceStreamId)
-	const isApiRequestActive = useChatStore((state) => state.isApiRequestActive)
+	const { messages, task, renderedMessageIds, apiMetrics, lastApiReqInfo } = useChatStore(
+		useShallow((state) => ({
+			messages: state.diracMessages,
+			task: state.taskMessage,
+			renderedMessageIds: state.visibleMessageIds,
+			apiMetrics: state.apiMetrics,
+			lastApiReqInfo: state.lastApiReqInfo,
+		})),
+	)
+	const goal = useChatStore((state) => state.goal)
 	const taskHistory = useTaskStore((state) => state.taskHistory)
 	const apiConfiguration = useSettingsStore((state) => state.apiConfiguration)
 	const telemetrySetting = useSettingsStore((state) => state.telemetrySetting)
 	const mode = useSettingsStore((state) => state.mode)
+	const effectiveMode = goal?.mode ?? mode
 	const shouldShowQuickWins = !!taskHistory && taskHistory.length > 0
 
-	const task = useMemo(() => messages.at(0), [messages])
-	const streamingActive = isApiRequestActive || !!activeVoiceStreamId
-	const renderedMessageSource = useThrottledValue(messages, streamingActive ? 100 : 0)
-
-	const modifiedMessages = useMemo(() => {
-		return renderedMessageSource.slice(1)
-	}, [renderedMessageSource])
-
-	const apiMetrics = useMemo(() => getApiMetrics(modifiedMessages), [modifiedMessages])
-	const lastApiReqInfo = useMemo(() => getLastApiReqInfo(modifiedMessages), [modifiedMessages])
-
-	const chatState = useChatState(messages)
-	const {
-		selectedImages,
-		setSelectedImages,
-		selectedFiles,
-		setSelectedFiles,
-		sendingDisabled,
-		uiActionState,
-		expandedRows,
-		setExpandedRows,
-		textAreaRef,
-	} = chatState
+	const chatState = useChatState()
+	const { sendingDisabled, uiActionState, expandedRows, setExpandedRows, textAreaRef } = chatState
 
 	const messageHandlers = useMessageHandlers(chatState)
 
 	const { state: interactionState } = useInteractionState()
 	const { selectedModelInfo, selectedModelId, selectedProvider } = useMemo(() => {
-		return normalizeApiConfiguration(apiConfiguration, mode as Mode)
-	}, [apiConfiguration, mode])
-
-	const selectFilesAndImages = useCallback(async () => {
-		try {
-			const response = await FileServiceClient.selectFiles(
-				BooleanRequest.create({
-					value: selectedModelInfo.supportsImages,
-				}),
-			)
-			if (response?.values1 && response.values2 && (response.values1.length > 0 || response.values2.length > 0)) {
-				const currentTotal = selectedImages.length + selectedFiles.length
-				const availableSlots = MAX_IMAGES_AND_FILES_PER_MESSAGE - currentTotal
-
-				if (availableSlots > 0) {
-					const imagesToAdd = Math.min(response.values1.length, availableSlots)
-					if (imagesToAdd > 0) {
-						setSelectedImages((prevImages) => [...prevImages, ...response.values1.slice(0, imagesToAdd)])
-					}
-
-					const remainingSlots = availableSlots - imagesToAdd
-					if (remainingSlots > 0) {
-						setSelectedFiles((prevFiles) => [...prevFiles, ...response.values2.slice(0, remainingSlots)])
-					}
-				}
-			}
-		} catch (error) {
-			console.error("Error selecting images & files:", error)
-		}
-	}, [selectedModelInfo.supportsImages, selectedImages.length, selectedFiles.length, setSelectedImages, setSelectedFiles])
-
-	const shouldDisableFilesAndImages =
-		interactionState === InteractionState.RUNNING ||
-		selectedImages.length + selectedFiles.length >= MAX_IMAGES_AND_FILES_PER_MESSAGE
+		return normalizeApiConfiguration(apiConfiguration, effectiveMode as Mode)
+	}, [apiConfiguration, effectiveMode])
 
 	useMount(() => {
 		textAreaRef.current?.focus()
@@ -123,26 +72,25 @@ export const ModularChatView: React.FC<ChatViewProps> = ({ isHidden, showAnnounc
 		}
 	}, [isHidden, sendingDisabled, hasButtons, textAreaRef])
 
-	const visibleMessages = useMemo(() => {
-		return filterVisibleMessages(modifiedMessages)
-	}, [modifiedMessages])
-
-	const renderedMessages = visibleMessages
-
-	const scrollBehavior = useScrollBehavior(messages, visibleMessages, renderedMessages, expandedRows, setExpandedRows)
+	const scrollBehavior = useScrollBehavior(messages, renderedMessageIds, renderedMessageIds, expandedRows, setExpandedRows)
 
 	const placeholderText = useMemo(() => {
+		if (goal?.followUpActive) return "Steer this follow-up…"
+		if (goal?.status === "working") return "Steer this Goal…"
+		if (goal?.status === "waiting") return "Steer this Goal while requests await a response…"
+		if (goal?.status === "paused") return "Ask a follow-up (Goal stays paused)…"
+		if (goal?.status === "blocked") return "Ask a follow-up (Goal stays blocked)…"
+		if (goal?.status === "achieved" || goal?.status === "stopped") return "Ask a follow-up…"
 		if (!task) return "Type your task here..."
 		if (interactionState === InteractionState.RUNNING) return "Send guidance for the next turn without interrupting…"
 		return "Type a message..."
-	}, [task, interactionState])
+	}, [goal, task, interactionState])
 
 	const context = useMemo<ChatViewContext>(
 		() => ({
+			goal,
 			task,
-			messages,
-			modifiedMessages,
-			renderedMessages,
+			renderedMessageIds,
 			apiMetrics,
 			lastApiReqInfo,
 			chatState,
@@ -160,17 +108,14 @@ export const ModularChatView: React.FC<ChatViewProps> = ({ isHidden, showAnnounc
 				...selectedModelInfo,
 				selectedModelId,
 				selectedProvider,
-				mode,
+				mode: effectiveMode,
 			},
-			shouldDisableFilesAndImages,
-			selectFilesAndImages,
 			placeholderText,
 		}),
 		[
+			goal,
 			task,
-			messages,
-			modifiedMessages,
-			renderedMessages,
+			renderedMessageIds,
 			apiMetrics,
 			lastApiReqInfo,
 			chatState,
@@ -187,21 +132,23 @@ export const ModularChatView: React.FC<ChatViewProps> = ({ isHidden, showAnnounc
 			selectedModelInfo,
 			selectedModelId,
 			selectedProvider,
-			mode,
-			shouldDisableFilesAndImages,
-			selectFilesAndImages,
+			effectiveMode,
 			placeholderText,
 		],
 	)
 
-	const sections = useMemo<ChatSection[]>(() => [WelcomeSection, TaskSection, MessagesSection, InputSection], [])
+	const sections = useMemo<ChatSection[]>(() => [WelcomeSection, GoalSection, TaskSection, MessagesSection, InputSection], [])
 
 	const decorators = useMemo<ChatViewDecorator[]>(() => [AutoApproveDecorator, ActionButtonsDecorator], [])
 
 	return (
 		<ChatLayout isHidden={isHidden}>
 			<div className="modular-chat-shell flex flex-col flex-1 overflow-hidden relative">
-				<div className={cn("modular-chat-shell flex flex-col flex-1 overflow-hidden", mode === "plan" ? "bg-grid-plan" : "")}>
+				<div
+					className={cn(
+						"modular-chat-shell flex flex-col flex-1 overflow-hidden",
+						effectiveMode === "plan" ? "bg-grid-plan" : "",
+					)}>
 					{showNavbar && <Navbar />}
 					<div className="flex-1 flex flex-col overflow-hidden relative">
 						{sections.map((section) => (
@@ -217,7 +164,7 @@ export const ModularChatView: React.FC<ChatViewProps> = ({ isHidden, showAnnounc
 						))}
 					</div>
 
-					<div className="px-4 pb-4">{InputSection.shouldRender(context) && InputSection.render(context)}</div>
+					<div className="px-4">{InputSection.shouldRender(context) && InputSection.render(context)}</div>
 				</div>
 			</div>
 		</ChatLayout>

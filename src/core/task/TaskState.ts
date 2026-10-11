@@ -6,6 +6,13 @@ import type { HookExecution } from "./types/HookExecution"
 import type { SteeringMessage } from "./steering"
 import { SkillMetadata } from "@/shared/skills"
 import { TaskStatus } from "@shared/ExtensionMessage"
+import type { SerializedTaskError, TaskCancellationIntent, TaskRunOutcome } from "./TaskRunOutcome"
+
+export interface CompletionVerificationFailure {
+	candidateFingerprint?: string
+	reports: string[]
+}
+
 
 export interface TaskReplacementRequest {
 	context: string
@@ -51,20 +58,22 @@ export class TaskState {
 	askResponseFiles?: string[]
 	lastMessageTs?: number
 	waitingCardIds: string[] = []
-
 	get lastWaitingCardId(): string | undefined {
 		return this.waitingCardIds[0]
 	}
 
-	// Plan mode specific state
+	// Plan interaction and mode-entry state
 	isAwaitingPlanResponse = false
 	didRespondToPlanAskBySwitchingMode = false
-	didSwitchToActMode = false
+	/** Remains pending until the exact request that includes the notice is persisted. */
+	pendingModeNotice?: { mode: "plan" | "act"; includedInRequestId?: string }
 
 	// Context and history
 	conversationHistoryDeletedRange?: [number, number]
 	/** Session-owned snapshots injected into every compacted request. */
 	pinnedContext?: string
+	/** Canonical task text supplied when this Task lifecycle was created. */
+	initialTask?: string
 
 	// Tool execution flags
 	didRejectTool = false
@@ -78,6 +87,8 @@ export class TaskState {
 	/** Completion side effects are committed; steering is sealed until the task loop publishes completion. */
 	completionCommitted = false
 	checkpointManagerErrorMessage?: string
+	/** Last rejected completion candidate and all verifier reports that it must address. */
+	completionVerificationFailure?: CompletionVerificationFailure
 
 	// Retry tracking — separate counters for independent failure modes
 	apiErrorRetryAttempts = 0
@@ -87,6 +98,14 @@ export class TaskState {
 	isInitialized = false
 
 	// Task Abort / Cancellation
+	/** Owner intent captured before teardown begins. The first terminal intent wins. */
+	cancellationIntent?: TaskCancellationIntent
+	/** Response accepted by the Task completion commit. */
+	completionResponse?: string
+	/** Fatal error preserved for the Task owner. */
+	terminalError?: SerializedTaskError
+	/** Task-owned, single-assignment terminal result. */
+	runOutcome?: TaskRunOutcome
 	#abortController = new AbortController()
 
 	get abort(): boolean {
@@ -138,9 +157,21 @@ export class TaskState {
 	totalCacheReadTokens = 0
 	totalCost = 0
 
+	// Utility permission usage is tracked separately from primary context-window metrics.
+	utilityPermissionInputTokens = 0
+	utilityPermissionOutputTokens = 0
+	utilityPermissionCacheWriteTokens = 0
+	utilityPermissionCacheReadTokens = 0
+	utilityPermissionCost = 0
+	utilityModelReasoningTokens = 0
+	utilityModelUsageObserved = false
+	utilityModelReasoningAvailable = true
+	utilityModelCacheWriteAvailable = true
+	utilityModelCacheReadAvailable = true
+	utilityModelCostAvailable = true
+
 	// Persistent task-owned mid-turn guidance. Never reset with stream-local state.
 	steeringMessages: SteeringMessage[] = []
-
 
 	// Pending user content from a chat-message tool skip.
 	// Set when the user sends text or attachments while a tool is awaiting card input.

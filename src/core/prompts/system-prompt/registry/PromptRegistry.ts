@@ -1,4 +1,3 @@
-import { ensureBuiltinToolsRegistered } from "@core/task/tools/registry/refreshToolRegistry"
 import type { ToolRequestSnapshot } from "@core/task/tools/runtime/ToolSnapshot"
 import type { DiracTool } from "@/shared/tools"
 import type { SystemPromptContext } from "../types"
@@ -10,9 +9,7 @@ export class PromptRegistry {
 
 	private cachedPrompt?: { fingerprint: string; result: string }
 
-	private constructor() {
-		ensureBuiltinToolsRegistered()
-	}
+	private constructor() { }
 
 	static getInstance(): PromptRegistry {
 		if (!PromptRegistry.instance) {
@@ -47,7 +44,6 @@ export class PromptRegistry {
 			context.cwd,
 			context.yoloModeToggled ? 1 : 0,
 			context.utilityModelConfigured ? 1 : 0,
-			context.enableParallelToolCalling ? 1 : 0,
 			context.activeShellIsPosix ? 1 : 0,
 			context.activeShellType,
 			context.activeShellPath,

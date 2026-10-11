@@ -3,6 +3,7 @@
 		"esModuleInterop": true,
 		"experimentalDecorators": true,
 		"forceConsistentCasingInFileNames": true,
+		"incremental": true,
 		"isolatedModules": true,
 		"jsx": "react",
 		"lib": [
@@ -19,6 +20,7 @@
 		"rootDir": ".",
 		"skipLibCheck": true,
 		"sourceMap": true,
+		"tsBuildInfoFile": "./node_modules/.tmp/tsconfig.tsbuildinfo",
 		"strict": true,
 		"target": "es2022",
 		"useDefineForClassFields": true,

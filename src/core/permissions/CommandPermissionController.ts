@@ -4,6 +4,7 @@ import chokidar, { FSWatcher } from "chokidar"
 import fs from "fs/promises"
 import path from "path"
 import { Logger } from "@/shared/services/Logger"
+import { ChokidarWatcherCloser } from "@/shared/utils/ChokidarWatcherCloser"
 import { CommandParser, type ParsedCommand } from "./CommandParser"
 import { DangerousCharDetector } from "./DangerousCharDetector"
 import { PermissionRuleEvaluator } from "./PermissionRuleEvaluator"
@@ -27,6 +28,7 @@ import { COMMAND_PERMISSIONS_ENV_VAR, CommandPermissionConfig, PermissionValidat
 export class CommandPermissionController {
 	private workspaceRoot: string | null = null
 	private fileWatcher?: FSWatcher
+	private readonly watcherCloser = new ChokidarWatcherCloser()
 	private config: CommandPermissionConfig | null = null
 	private readonly ruleEvaluator = new PermissionRuleEvaluator()
 	private readonly commandParser = new CommandParser()
@@ -45,26 +47,41 @@ export class CommandPermissionController {
 
 	/** Set up a file watcher for .dirac/permissions.json */
 	private async setupFileWatcher(): Promise<void> {
+		await this.watcherCloser.closeAll()
 		if (this.fileWatcher) {
-			await this.fileWatcher.close()
+			const previousWatcher = this.fileWatcher
 			this.fileWatcher = undefined
+			await this.watcherCloser.close(previousWatcher)
 		}
 		if (!this.workspaceRoot) return
 
 		const configPath = path.join(this.workspaceRoot, ".dirac", "permissions.json")
-
-		this.fileWatcher = this.watcherFactory(configPath, {
-			persistent: true,
-			ignoreInitial: true,
-			awaitWriteFinish: { stabilityThreshold: 100, pollInterval: 100 },
-			atomic: true,
-		})
-
-		this.fileWatcher.on("all", (_event) => {
-			void this.loadConfig().catch((error) => {
-				Logger.error("Failed to reload command permissions:", error)
+		try {
+			const watcher = this.watcherFactory(configPath, {
+				persistent: true,
+				ignoreInitial: true,
+				awaitWriteFinish: { stabilityThreshold: 100, pollInterval: 100 },
+				atomic: true,
 			})
-		})
+			this.fileWatcher = watcher
+			watcher.on("error", (error) => {
+				if (this.fileWatcher !== watcher) return
+				this.fileWatcher = undefined
+				Logger.error("Command permissions live reload is disabled after watcher failure:", error)
+				void this.watcherCloser
+					.close(watcher)
+					.catch((closeError) => Logger.error("Failed to close disabled command permissions watcher:", closeError))
+			})
+			watcher.on("all", (_event) => {
+				if (this.fileWatcher !== watcher) return
+				void this.loadConfig().catch((error) => {
+					Logger.error("Failed to reload command permissions:", error)
+				})
+			})
+		} catch (error) {
+			this.fileWatcher = undefined
+			Logger.error("Command permissions live reload could not start and is disabled:", error)
+		}
 	}
 
 	/** Load configuration from environment and file. */
@@ -294,9 +311,8 @@ export class CommandPermissionController {
 
 	/** Clean up resources when the controller is no longer needed. */
 	async dispose(): Promise<void> {
-		if (this.fileWatcher) {
-			await this.fileWatcher.close()
-			this.fileWatcher = undefined
-		}
+		const watcher = this.fileWatcher
+		this.fileWatcher = undefined
+		await this.watcherCloser.closeAll(watcher ? [watcher] : [])
 	}
 }

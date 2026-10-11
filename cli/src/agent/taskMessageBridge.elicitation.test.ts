@@ -435,7 +435,7 @@ describe("TaskMessageBridge form elicitation", () => {
 		expect(secondStarted).toBe(true);
 	});
 
-	it("reports cumulative ACP token usage and standard context updates", async () => {
+	it("turns an OpenRouter API-status message into context and cumulative token usage", async () => {
 		const usageMessage = {
 			id: "api-status-usage",
 			ts: 10,
@@ -471,6 +471,54 @@ describe("TaskMessageBridge form elicitation", () => {
 				cachedReadTokens: 10,
 				cachedWriteTokens: 5,
 			},
+		});
+	});
+
+	it("reports provider-reported zero cost in ACP usage updates", async () => {
+		const usageMessage = {
+			id: "api-status-zero-cost",
+			ts: 11,
+			content: {
+				type: DiracMessageType.API_STATUS,
+				status: { tokensIn: 12, tokensOut: 3, cost: 0, contextWindow: 1_048_576 },
+			},
+		} as DiracMessage;
+
+		await (bridge as any).processMessageWithDelta("session-1", sessionState(), usageMessage);
+
+		expect(emitSessionUpdate).toHaveBeenCalledWith("session-1", {
+			sessionUpdate: "usage_update",
+			used: 15,
+			size: 1_048_576,
+			cost: { amount: 0, currency: "USD" },
+		});
+		expect(bridge.promptResponse("end_turn").usage).toEqual({
+			totalTokens: 15,
+			inputTokens: 12,
+			outputTokens: 3,
+		});
+	});
+
+	it("does not emit an invalid cost-only ACP usage update", async () => {
+		const usageMessage = {
+			id: "api-status-no-context-window",
+			ts: 12,
+			content: {
+				type: DiracMessageType.API_STATUS,
+				status: { tokensIn: 12, tokensOut: 3, cost: 0.01 },
+			},
+		} as DiracMessage;
+
+		await (bridge as any).processMessageWithDelta("session-1", sessionState(), usageMessage);
+
+		expect(emitSessionUpdate).not.toHaveBeenCalledWith(
+			"session-1",
+			expect.objectContaining({ sessionUpdate: "usage_update" }),
+		);
+		expect(bridge.promptResponse("end_turn").usage).toEqual({
+			totalTokens: 15,
+			inputTokens: 12,
+			outputTokens: 3,
 		});
 	});
 

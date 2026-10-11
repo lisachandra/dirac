@@ -1,56 +1,38 @@
 import "should"
-import { convertToMistralMessages } from "../mistral-format"
 import type { Anthropic } from "@anthropic-ai/sdk"
+import { convertToMistralMessages } from "../mistral-format"
 
-// Characterization tests for convertToMistralMessages.
-// Mistral only accepts text and image_url blocks for users, text-only for assistants.
 describe("convertToMistralMessages", () => {
 	it("passes through string content with role", () => {
-		const result = convertToMistralMessages([{ role: "user", content: "hello" } as any])
-		result.should.deepEqual([{ role: "user", content: "hello" }])
+		convertToMistralMessages([{ role: "user", content: "hello" } as any]).should.deepEqual([
+			{ role: "user", content: "hello" },
+		])
 	})
 
-	it("passes through assistant string content", () => {
-		const result = convertToMistralMessages([{ role: "assistant", content: "hi" } as any])
-		result.should.deepEqual([{ role: "assistant", content: "hi" }])
-	})
-
-	it("converts user text blocks to string content", () => {
+	it("converts direct user text and images", () => {
 		const result = convertToMistralMessages([
-			{ role: "user", content: [{ type: "text", text: "hello" }] } as Anthropic.Messages.MessageParam,
+			{
+				role: "user",
+				content: [
+					{ type: "text", text: "inspect" },
+					{ type: "image", source: { type: "base64", media_type: "image/png", data: "abc" } },
+					{ type: "image", source: { type: "url", url: "https://x.com/i.png" } as any },
+				],
+			} as Anthropic.Messages.MessageParam,
 		])
-		result.should.deepEqual([{ role: "user", content: [{ type: "text", text: "hello" }] }])
-	})
-
-	it("converts base64 image to image_url when supportsImages=true", () => {
-		const result = convertToMistralMessages(
-			[
-				{
-					role: "user",
-					content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: "abc" } }],
-				} as Anthropic.Messages.MessageParam,
-			],
-			true,
-		)
 		result.should.deepEqual([
-			{ role: "user", content: [{ type: "image_url", imageUrl: { url: "data:image/png;base64,abc" } }] },
+			{
+				role: "user",
+				content: [
+					{ type: "text", text: "inspect" },
+					{ type: "image_url", imageUrl: { url: "data:image/png;base64,abc" } },
+					{ type: "image_url", imageUrl: { url: "https://x.com/i.png" } },
+				],
+			},
 		])
 	})
 
-	it("converts url image to image_url when supportsImages=true", () => {
-		const result = convertToMistralMessages(
-			[
-				{
-					role: "user",
-					content: [{ type: "image", source: { type: "url", url: "https://x.com/i.png" } as any }],
-				} as Anthropic.Messages.MessageParam,
-			],
-			true,
-		)
-		result.should.deepEqual([{ role: "user", content: [{ type: "image_url", imageUrl: { url: "https://x.com/i.png" } }] }])
-	})
-
-	it("replaces image with [Image] text when supportsImages=false", () => {
+	it("replaces direct images with placeholders when images are unsupported", () => {
 		const result = convertToMistralMessages(
 			[
 				{
@@ -63,50 +45,134 @@ describe("convertToMistralMessages", () => {
 		result.should.deepEqual([{ role: "user", content: [{ type: "text", text: "[Image]" }] }])
 	})
 
-	it("filters out non-text/image blocks for user role", () => {
-		const result = convertToMistralMessages([
-			{
-				role: "user",
-				content: [{ type: "tool_result", tool_use_id: "t1", content: "r" } as any, { type: "text", text: "keep" }],
-			},
-		] as any)
-		result.should.deepEqual([{ role: "user", content: [{ type: "text", text: "keep" }] }])
-	})
-
-	it("skips user messages with no text/image blocks", () => {
-		const result = convertToMistralMessages([
-			{ role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "r" } as any] },
-		] as any)
-		result.should.have.length(0)
-	})
-
-	it("converts assistant text blocks to joined string", () => {
+	it("preserves assistant native tool calls", () => {
 		const result = convertToMistralMessages([
 			{
 				role: "assistant",
 				content: [
-					{ type: "text", text: "line1" },
-					{ type: "text", text: "line2" },
+					{ type: "text", text: "checking" },
+					{ type: "tool_use", id: "Call00001", name: "read_file", input: { path: "image.png" } },
+				],
+			} as any,
+		])
+		result.should.deepEqual([
+			{
+				role: "assistant",
+				content: "checking",
+				toolCalls: [
+					{
+						id: "Call00001",
+						index: 0,
+						type: "function",
+						function: { name: "read_file", arguments: '{"path":"image.png"}' },
+					},
 				],
 			},
-		] as any)
-		result.should.deepEqual([{ role: "assistant", content: "line1\nline2" }])
+		])
 	})
 
-	it("filters out non-text blocks for assistant role", () => {
+	it("normalizes provider tool call IDs to stable Mistral IDs", () => {
+		const messages = [
+			{
+				role: "assistant",
+				content: [{ type: "tool_use", id: "toolu_provider_specific_id", name: "read_file", input: {} }],
+			},
+			{
+				role: "user",
+				content: [{ type: "tool_result", tool_use_id: "toolu_provider_specific_id", content: "done" }],
+			},
+		] as any
+
+		const first = convertToMistralMessages(messages)
+		const second = convertToMistralMessages(messages)
+		const toolCallId = (first[0] as any).toolCalls[0].id
+
+		toolCallId.should.match(/^[A-Za-z0-9]{9}$/)
+		;(first[1] as any).toolCallId.should.equal(toolCallId)
+		;(second[0] as any).toolCalls[0].id.should.equal(toolCallId)
+	})
+
+	it("emits native tool messages with matching call identity", () => {
 		const result = convertToMistralMessages([
 			{
 				role: "assistant",
-				content: [{ type: "tool_use", id: "t1", name: "fn", input: {} } as any, { type: "text", text: "keep" }],
+				content: [{ type: "tool_use", id: "Call00001", name: "read_file", input: {} }],
+			},
+			{
+				role: "user",
+				content: [{ type: "tool_result", tool_use_id: "Call00001", content: "file contents" }],
 			},
 		] as any)
-		result.should.deepEqual([{ role: "assistant", content: "keep" }])
+		result.should.deepEqual([
+			{
+				role: "assistant",
+				content: null,
+				toolCalls: [{ id: "Call00001", index: 0, type: "function", function: { name: "read_file", arguments: "{}" } }],
+			},
+			{
+				role: "tool",
+				toolCallId: "Call00001",
+				name: "read_file",
+				content: [{ type: "text", text: "file contents" }],
+			},
+		])
 	})
 
-	it("skips assistant messages with no text blocks", () => {
+	it("preserves image-bearing tool results in native tool content", () => {
 		const result = convertToMistralMessages([
-			{ role: "assistant", content: [{ type: "tool_use", id: "t1", name: "fn", input: {} } as any] },
+			{
+				role: "assistant",
+				content: [{ type: "tool_use", id: "Call00001", name: "read_file", input: {} }],
+			},
+			{
+				role: "user",
+				content: [
+					{
+						type: "tool_result",
+						tool_use_id: "Call00001",
+						content: [
+							{ type: "text", text: "image contents" },
+							{ type: "image", source: { type: "base64", media_type: "image/png", data: "abc" } },
+						],
+					},
+				],
+			},
 		] as any)
-		result.should.have.length(0)
+		result[1].should.deepEqual({
+			role: "tool",
+			toolCallId: "Call00001",
+			name: "read_file",
+			content: [
+				{ type: "text", text: "image contents" },
+				{ type: "image_url", imageUrl: { url: "data:image/png;base64,abc" } },
+			],
+		})
+	})
+
+	it("emits tool results before ordinary user content from the same turn", () => {
+		const result = convertToMistralMessages([
+			{
+				role: "user",
+				content: [
+					{ type: "text", text: "continue" },
+					{ type: "tool_result", tool_use_id: "Call00001", content: "done" },
+				],
+			},
+		] as any)
+		result.should.deepEqual([
+			{
+				role: "tool",
+				toolCallId: "Call00001",
+				name: undefined,
+				content: [{ type: "text", text: "done" }],
+			},
+			{ role: "user", content: [{ type: "text", text: "continue" }] },
+		])
+	})
+
+	it("skips assistant messages with no supported content", () => {
+		convertToMistralMessages([
+			{ role: "assistant", content: [{ type: "thinking", thinking: "secret", signature: "sig" } as any] },
+		] as any).should.have.length(0)
 	})
 })

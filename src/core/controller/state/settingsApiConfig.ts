@@ -1,23 +1,28 @@
 import { UpdateSettingsRequest } from "@shared/proto/dirac/state"
 import { convertProtoToApiConfiguration } from "@shared/proto-conversions/models/api-configuration-conversion"
 import { Controller } from ".."
-import { applyApiConfigurationTransaction } from "../models/apiConfigurationTransaction"
+import { applyApiConfigurationTransaction, commitWorkingConfigurationUpdate } from "../models/apiConfigurationTransaction"
+import { persistApiConfigurationAndMode } from "../models/apiConfigurationPersistence"
 import { convertMode } from "./settingsMode"
 
-/** Apply API configuration from webview request after validating the active task runtime. */
-export function applyApiConfiguration(controller: Controller, request: UpdateSettingsRequest): void {
-	if (!request.apiConfiguration) return
-	applyApiConfigurationTransaction(
-		controller,
-		convertProtoToApiConfiguration(request.apiConfiguration),
-		undefined,
-		convertMode(request.mode),
-	)
-}
+/** Apply one webview API/mode update through a single persistence and active-Task commit boundary. */
+export async function applyApiConfiguration(controller: Controller, request: UpdateSettingsRequest): Promise<void> {
+	const mode = convertMode(request.mode)
+	if (!request.apiConfiguration) {
+		if (mode === undefined) return
+		await commitWorkingConfigurationUpdate(
+			controller,
+			() => persistApiConfigurationAndMode(controller.stateManager, {}, mode),
+			controller.task ? { settings: { mode } } : undefined,
+		)
+		return
+	}
 
-/** Rebuild API handler from current state if a task is active. */
-export function rebuildApiHandlerIfTask(controller: Controller): void {
-	if (!controller.task) return
-	const currentMode = controller.stateManager.getGlobalSettingsKey("mode")
-	controller.task.rebuildApiHandler(controller.stateManager.getApiConfiguration(), currentMode)
+	const configuration = convertProtoToApiConfiguration(request.apiConfiguration)
+	await applyApiConfigurationTransaction(
+		controller,
+		configuration,
+		() => persistApiConfigurationAndMode(controller.stateManager, configuration, mode),
+		mode,
+	)
 }

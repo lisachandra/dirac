@@ -5,26 +5,16 @@ import type { TaskState } from "../../TaskState"
 
 // Converts tool response content into tool_result blocks and pushes to user message content.
 export class ToolResultPusher {
-	constructor(private taskState: TaskState) {}
+	constructor(private taskState: TaskState) { }
 
 	async pushToolResult(content: ToolResponse, block: ToolUse): Promise<void> {
-		const toolResultBlocks: DiracUserToolResultContentBlock[] = []
 		const toolUseId = block.id || block.call_id || ""
-		if (typeof content === "string") {
-			toolResultBlocks.push({ type: "tool_result", tool_use_id: toolUseId, content })
-		} else if (Array.isArray(content)) {
-			for (const item of content) {
-				if (item.type === "text")
-					toolResultBlocks.push({ type: "tool_result", tool_use_id: toolUseId, content: item.text })
-				else if (item.type === "image")
-					toolResultBlocks.push({
-						type: "tool_result",
-						tool_use_id: toolUseId,
-						content: [{ type: "image", source: item.source }],
-					})
-			}
+		const toolResult: DiracUserToolResultContentBlock = {
+			type: "tool_result",
+			tool_use_id: toolUseId,
+			content,
 		}
-		this.taskState.userMessageContent.push(...toolResultBlocks)
+		this.taskState.userMessageContent.push(toolResult)
 	}
 
 	// Appends a warning to the tool result if the tool call count exceeds 50.

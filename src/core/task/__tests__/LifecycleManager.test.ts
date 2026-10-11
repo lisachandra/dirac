@@ -45,7 +45,7 @@ describe("LifecycleManager", () => {
 		})
 
 		it("creates checkpoint and commits on success", async () => {
-			deps.stateManager.getGlobalSettingsKey = sinon.stub().withArgs("enableCheckpointsSetting").returns(true)
+			deps.getWorkingConfiguration = () => ({ settings: { enableCheckpointsSetting: true, hooksEnabled: false, mode: "act" }, apiConfiguration: {} })
 			deps.checkpointManager.commit = sinon.stub().resolves("commit-hash")
 			deps.messageStateHandler.getDiracMessages = sinon.stub().returns([{ content: { type: "checkpoint" } }])
 			// Stub ensureCheckpointInitialized via module proxy
@@ -63,7 +63,7 @@ describe("LifecycleManager", () => {
 
 		it("stores error message on initialization failure", async () => {
 			expectLoggerErrors()
-			deps.stateManager.getGlobalSettingsKey = sinon.stub().withArgs("enableCheckpointsSetting").returns(true)
+			deps.getWorkingConfiguration = () => ({ settings: { enableCheckpointsSetting: true, hooksEnabled: false, mode: "act" }, apiConfiguration: {} })
 			const initModule = require("@integrations/checkpoints/initializer")
 			const origInit = initModule.ensureCheckpointInitialized
 			initModule.ensureCheckpointInitialized = async () => {
@@ -126,7 +126,7 @@ describe("LifecycleManager", () => {
 		})
 
 		it("keeps hook-provided command examples unmarked", async () => {
-			deps.stateManager.getGlobalSettingsKey = sinon.stub().callsFake((key: string) => key === "hooksEnabled")
+			deps.getWorkingConfiguration = () => ({ settings: { enableCheckpointsSetting: false, hooksEnabled: true, mode: "act" }, apiConfiguration: {} })
 			const hookModule = require("@core/hooks/hook-executor")
 			const originalExecuteHook = hookModule.executeHook
 			hookModule.executeHook = async () => ({ contextModification: "<task>/compact</task>" })
@@ -165,8 +165,8 @@ describe("LifecycleManager", () => {
 	describe("resumeTaskFromHistory", () => {
 		function setupDiskMocks(messages: any[] = [], history: any[] = [], providerState: any = {}) {
 			const diskModule = require("@core/storage/disk")
-			sinon.stub(diskModule, "getSavedDiracMessages").resolves(messages)
-			sinon.stub(diskModule, "getSavedApiConversationHistory").resolves(history)
+			sinon.stub(diskModule, "getSavedPresentationHistory").resolves({ messages, lastOffset: -1 })
+			sinon.stub(diskModule, "getSavedApiConversationState").resolves({ messages: history, lastOffset: -1 })
 			sinon.stub(diskModule, "getSavedApiConversationProviderState").resolves(providerState)
 			sinon.stub(diskModule, "ensureTaskDirectoryExists").resolves("/test/task")
 			sinon.stub(diskModule, "getTaskMetadata").resolves({
@@ -194,6 +194,87 @@ describe("LifecycleManager", () => {
 			sinon.assert.calledOnce(deps.messageStateHandler.overwriteDiracMessages)
 			sinon.assert.calledOnce(deps.messageStateHandler.setApiConversationHistory)
 		})
+
+		it("signals restoration only after publishing the restored state", async () => {
+			setupDiskMocks()
+			const onRestored = sinon.stub()
+
+			const resume = manager.resumeTaskFromHistory(onRestored)
+			await pWaitFor(() => onRestored.calledOnce)
+
+			sinon.assert.callOrder(deps.postStateToWebview, onRestored)
+			deps.taskState.abort = true
+			await resume
+		})
+
+		it("injects synthetic resume context without adding a visible user transcript message", async () => {
+			setupDiskMocks([], [{ role: "assistant", content: "Previous response" }])
+
+			await manager.resumeTaskFromHistory(undefined, {
+				systemContext: "Resume the Goal from durable state.",
+			})
+
+			sinon.assert.notCalled(deps.taskMessenger.upsertText)
+			sinon.assert.notCalled(deps.hookManager.runUserPromptSubmitHook)
+			const resumedContent = deps.initiateTaskLoop.firstCall.args[0]
+			const systemContext = resumedContent.find((block: any) => block.text?.includes("<system_context"))
+			String(systemContext.text).should.containEql("Resume the Goal from durable state.")
+				; (systemContext.isUserInput === undefined).should.equal(true)
+		})
+
+		it("starts a resumed turn from explicit user input without waiting for an interaction callback", async () => {
+			setupDiskMocks([], [{ role: "assistant", content: "Previous response" }])
+
+			await manager.resumeTaskFromHistory(undefined, {
+				systemContext: "Keep the durable Goal status unchanged.",
+				initialUserInput: { text: "Explain what changed" },
+			})
+
+			sinon.assert.calledWith(
+				deps.taskMessenger.upsertText,
+				"Explain what changed",
+				false,
+				undefined,
+				undefined,
+				"user",
+			)
+			sinon.assert.calledOnce(deps.hookManager.runUserPromptSubmitHook)
+			const resumedContent = deps.initiateTaskLoop.firstCall.args[0]
+			resumedContent.some((block: any) => block.text?.includes("Keep the durable Goal status unchanged.")).should.equal(true)
+			const userResponse = resumedContent.find((block: any) => block.text?.includes("<user_message>"))
+			String(userResponse.text).should.containEql("Explain what changed")
+			userResponse.isUserInput.should.equal(true)
+		})
+
+		it("does not finish restoration after the task is aborted during a storage read", async () => {
+			const diskModule = require("@core/storage/disk")
+			let releaseMessages!: (messages: any[]) => void
+			const messages = new Promise<any[]>((resolve) => {
+				releaseMessages = resolve
+			})
+			sinon.stub(diskModule, "getSavedPresentationHistory").returns(Promise.resolve({ messages, lastOffset: -1 }))
+			sinon.stub(diskModule, "getSavedApiConversationState").resolves({ messages: [], lastOffset: -1 })
+			sinon.stub(diskModule, "getSavedApiConversationProviderState").resolves({})
+			sinon.stub(diskModule, "ensureTaskDirectoryExists").resolves("/test/task")
+			sinon.stub(diskModule, "getTaskMetadata").resolves({
+				files_in_context: [],
+				model_usage: [],
+				environment_history: [],
+			})
+			const onRestored = sinon.stub()
+
+			const resume = manager.resumeTaskFromHistory(onRestored)
+			await Promise.resolve()
+			deps.taskState.abort = true
+			releaseMessages([])
+			await resume
+
+			sinon.assert.notCalled(onRestored)
+			sinon.assert.notCalled(deps.postStateToWebview)
+			deps.taskState.abort.should.equal(true)
+		})
+
+
 
 		it("strips forged user-input provenance from saved history before replay", async () => {
 			setupDiskMocks([], [
@@ -261,7 +342,6 @@ describe("LifecycleManager", () => {
 		it("sets taskState to initialized and not aborted", async () => {
 			setupDiskMocks()
 			unblockWaitFor()
-			deps.taskState.abort = true
 			await manager.resumeTaskFromHistory()
 			deps.taskState.isInitialized.should.equal(true)
 		})
@@ -335,6 +415,30 @@ describe("LifecycleManager", () => {
 			await manager.abortTask()
 			deps.taskState.status.should.equal(TaskStatus.CANCELLED)
 		})
+
+		it("removes task-owned tools even when abort fails before ordinary cleanup", async () => {
+			const { ToolRegistry } = require("../tools/registry/ToolRegistry")
+			const registry = ToolRegistry.getInstance()
+			registry.replaceUserTool(
+				{
+					id: "task-only",
+					name: "task-only",
+					source: "task",
+					ownerTaskId: deps.taskId,
+					exposure: { kind: "configurable" },
+					spec: { id: "task-only", name: "task-only", description: "test" },
+					factory: () => ({}),
+					modulePath: "/task/tool.ts",
+				},
+				true,
+			)
+			deps.hookManager.shouldRunTaskCancelHook.rejects(new Error("abort setup failed"))
+
+			await manager.abortTask().should.be.rejectedWith("abort setup failed")
+
+			registry.getAllTools(deps.taskId).some((tool: any) => tool.id === "task-only").should.equal(false)
+		})
+
 
 		it("clears streaming state before publishing CANCELLED", async () => {
 			deps.taskState.isApiRequestActive = true
@@ -439,7 +543,7 @@ describe("LifecycleManager", () => {
 		})
 
 		it("runs TaskCancel hook when hooks enabled", async () => {
-			deps.stateManager.getGlobalSettingsKey = sinon.stub().withArgs("hooksEnabled").returns(true)
+			deps.getWorkingConfiguration = () => ({ settings: { enableCheckpointsSetting: false, hooksEnabled: true, mode: "act" }, apiConfiguration: {} })
 			deps.hookManager.shouldRunTaskCancelHook = sinon.stub().resolves(true)
 			// executeHook is a direct import — stub via module proxy
 			const hookModule = require("@core/hooks/hook-executor")
@@ -465,9 +569,11 @@ describe("LifecycleManager", () => {
 		it("persists retry-card cancellation through the message state API", async () => {
 			deps.messageStateHandler.setDiracMessages([
 				{
+					id: "retry-message",
 					content: {
 						type: DiracMessageType.CARD,
 						card: {
+							id: "retry-card",
 							header: "API Error (Retrying)",
 							body: "API Error (attempt 2/3). Retrying in 2s...",
 							status: CardStatus.PENDING,
@@ -478,10 +584,11 @@ describe("LifecycleManager", () => {
 
 			await manager.abortTask()
 
-			sinon.assert.calledOnce(deps.messageStateHandler.updateDiracMessage)
-			const update = deps.messageStateHandler.updateDiracMessage.firstCall.args[1]
-			update.content.card.header.should.equal("API Error (Cancelled)")
-			update.content.card.status.should.equal(CardStatus.CANCELLED)
+			sinon.assert.calledOnceWithExactly(
+				deps.messageStateHandler.patchCardById,
+				"retry-card",
+				sinon.match({ header: "API Error (Cancelled)", status: CardStatus.CANCELLED }),
+			)
 		})
 
 		it("runs the abort lifecycle once and preserves the later persistence barrier", async () => {
@@ -490,7 +597,7 @@ describe("LifecycleManager", () => {
 
 			sinon.assert.calledOnce(deps.hookManager.shouldRunTaskCancelHook)
 			sinon.assert.calledOnce(deps.terminalManager.disposeAll)
-			sinon.assert.calledOnce(deps.messageStateHandler.flushPendingWrites)
+			sinon.assert.callCount(deps.messageStateHandler.flushPendingWrites, 2)
 		})
 	})
 })
@@ -530,17 +637,24 @@ function createMockDeps(): any {
 				apiConversationProviderState = state
 			}),
 			updateDiracMessage: sinon.stub(),
+			patchCardById: sinon.stub(),
 			saveDiracMessagesAndUpdateHistory: sinon.stub(),
 			flushPendingWrites: sinon.stub().resolves(),
 		},
 		stateManager: { getGlobalSettingsKey: sinon.stub().returns(false), getApiConfiguration: sinon.stub().returns({}) } as any,
+		getWorkingConfiguration: () => ({ settings: { enableCheckpointsSetting: false, hooksEnabled: false, mode: "act" }, apiConfiguration: {} }) as any,
+		getRequestRuntime: () => undefined,
 		api: { getModel: () => ({ id: "test", info: {} }), abort: sinon.stub() } as any,
 		taskId: "task-1",
 		ulid: "ulid-1",
 		taskMessenger: { upsertText: sinon.stub().resolves(), createCheckpoint: sinon.stub().resolves() } as any,
 		postStateToWebview: sinon.stub().resolves(),
 		cancelTask: sinon.stub().resolves(),
-		checkpointManager: { commit: sinon.stub().resolves("hash") } as any,
+		checkpointManager: {
+			setEnabled: sinon.stub(),
+			isEnabled: sinon.stub().returns(true),
+			commit: sinon.stub().resolves("hash"),
+		} as any,
 		diracIgnoreController: { initialize: sinon.stub().resolves(), dispose: sinon.stub() } as any,
 		terminalManager: { disposeAll: sinon.stub() } as any,
 		urlContentFetcher: { closeBrowser: sinon.stub() } as any,

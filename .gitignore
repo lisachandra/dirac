@@ -62,7 +62,7 @@ __pycache__/
 test_out/
 tmp_*.txt
 *scratch*
-.dirac-symbol-index*
+.dirac-cache
 .dirac/*
 .dirac-cache/
 

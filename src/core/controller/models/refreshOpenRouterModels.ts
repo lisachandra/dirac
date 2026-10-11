@@ -59,7 +59,7 @@ interface OpenRouterRawModelInfo {
 	supported_parameters?: OpenRouterSupportedParam[] | null
 }
 
-export async function refreshOpenRouterModels(controller: Controller): Promise<Record<string, ModelInfo>> {
+export async function refreshOpenRouterModels(controller?: Controller): Promise<Record<string, ModelInfo>> {
 	return fetchAndCacheModels({
 		provider: "openRouter",
 		cacheFileName: GlobalFileNames.openRouterModels,

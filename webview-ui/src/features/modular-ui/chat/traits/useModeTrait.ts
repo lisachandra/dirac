@@ -5,11 +5,13 @@ import { InputTrait, ModularInputContext } from "../types"
 
 export const useModeTrait = (
 	mode: "plan" | "act",
+	disabled = false,
 ): InputTrait & {
 	onModeToggle: (context: ModularInputContext) => void
 } => {
 	const onModeToggle = useCallback(
 		async (context: ModularInputContext) => {
+			if (disabled) return
 			const { inputValue, setInputValue, selectedImages, setSelectedImages, selectedFiles, setSelectedFiles, textAreaRef } =
 				context
 
@@ -41,7 +43,7 @@ export const useModeTrait = (
 				}, 100)
 			}
 		},
-		[mode],
+		[disabled, mode],
 	)
 
 	// Note: useShortcut needs to be called in a component, so we might need to handle it differently

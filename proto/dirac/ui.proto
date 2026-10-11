@@ -104,6 +104,7 @@ message ActionButton {
   string value = 2;
   optional bool primary = 3;
   optional string style = 4;
+  optional string url = 5;
 }
 
 message CardDiff {
@@ -142,6 +143,7 @@ message Card {
   optional string raw_output_json = 22;
   repeated CardDiff diffs = 23;
   repeated CardLocation locations = 24;
+  optional bool auto_scroll = 25;
 }
 
 // Enum for DiracSayTool tool types

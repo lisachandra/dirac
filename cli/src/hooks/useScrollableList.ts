@@ -12,54 +12,69 @@ interface ScrollableListResult {
 	showBottomIndicator: boolean
 }
 
+export function calculateScrollableList(
+	itemCount: number,
+	selectedIndex: number,
+	maxRows: number,
+): ScrollableListResult {
+	if (itemCount === 0) {
+		return {
+			visibleStart: 0,
+			visibleCount: 0,
+			showTopIndicator: false,
+			showBottomIndicator: false,
+		}
+	}
+
+	const rowBudget = Math.max(1, Math.floor(maxRows))
+	const boundedSelectedIndex = Math.max(0, Math.min(selectedIndex, itemCount - 1))
+	if (itemCount <= rowBudget) {
+		return {
+			visibleStart: 0,
+			visibleCount: itemCount,
+			showTopIndicator: false,
+			showBottomIndicator: false,
+		}
+	}
+
+	let visibleCount = rowBudget
+	let visibleStart = Math.max(
+		0,
+		Math.min(boundedSelectedIndex - Math.floor(visibleCount / 2), itemCount - visibleCount),
+	)
+
+	for (let pass = 0; pass < 3; pass++) {
+		const hasItemsAbove = visibleStart > 0
+		const hasItemsBelow = visibleStart + visibleCount < itemCount
+		const nextVisibleCount = Math.max(1, rowBudget - Number(hasItemsAbove) - Number(hasItemsBelow))
+		if (nextVisibleCount === visibleCount) break
+		visibleCount = nextVisibleCount
+		visibleStart = Math.max(
+			0,
+			Math.min(boundedSelectedIndex - Math.floor(visibleCount / 2), itemCount - visibleCount),
+		)
+	}
+
+	let showTopIndicator = visibleStart > 0
+	let showBottomIndicator = visibleStart + visibleCount < itemCount
+	let availableIndicatorRows = rowBudget - visibleCount
+	if (showTopIndicator && availableIndicatorRows > 0) availableIndicatorRows--
+	else showTopIndicator = false
+	if (showBottomIndicator && availableIndicatorRows > 0) availableIndicatorRows--
+	else showBottomIndicator = false
+
+	return {
+		visibleStart,
+		visibleCount,
+		showTopIndicator,
+		showBottomIndicator,
+	}
+}
+
 /**
- * Calculate visible window for a scrollable list
- * Keeps the selected item in view while showing scroll indicators
- *
- * @param itemCount - Total number of items in the list
- * @param selectedIndex - Currently selected item index
- * @param maxRows - Maximum rows to display (indicators take up row space when shown)
+ * Calculate visible window for a scrollable list.
+ * Keeps the selected item in view while fitting indicators into the row budget.
  */
 export function useScrollableList(itemCount: number, selectedIndex: number, maxRows: number): ScrollableListResult {
-	return useMemo(() => {
-		if (itemCount <= maxRows) {
-			return {
-				visibleStart: 0,
-				visibleCount: itemCount,
-				showTopIndicator: false,
-				showBottomIndicator: false,
-			}
-		}
-
-		// Determine if we need indicators based on index position
-		const needsTopIndicator = selectedIndex > 0
-		const needsBottomIndicator = selectedIndex < itemCount - 1
-
-		// Calculate how many items we can show (subtract space for indicators)
-		let itemSlots = maxRows
-		if (needsTopIndicator && selectedIndex >= maxRows - 1) itemSlots--
-		if (needsBottomIndicator && selectedIndex <= itemCount - maxRows) itemSlots--
-
-		// Calculate start position keeping selected item in view
-		const maxStart = itemCount - itemSlots
-		const idealStart = selectedIndex - Math.floor(itemSlots / 2)
-		const start = Math.max(0, Math.min(idealStart, maxStart))
-
-		const showTop = start > 0
-		const showBottom = start + itemSlots < itemCount
-
-		// Recalculate item slots based on actual indicators shown
-		let finalItemSlots = maxRows
-		if (showTop) finalItemSlots--
-		if (showBottom) finalItemSlots--
-
-		const finalStart = Math.max(0, Math.min(selectedIndex - Math.floor(finalItemSlots / 2), itemCount - finalItemSlots))
-
-		return {
-			visibleStart: finalStart,
-			visibleCount: finalItemSlots,
-			showTopIndicator: finalStart > 0,
-			showBottomIndicator: finalStart + finalItemSlots < itemCount,
-		}
-	}, [itemCount, selectedIndex, maxRows])
+	return useMemo(() => calculateScrollableList(itemCount, selectedIndex, maxRows), [itemCount, selectedIndex, maxRows])
 }

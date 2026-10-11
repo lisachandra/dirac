@@ -1,5 +1,11 @@
-import type { ApiConfiguration, ApiProvider, ModelProviderSelection } from "@shared/api"
-import type { Mode } from "@shared/storage/types"
+import {
+	modelSupportsInferenceSpeed,
+	providerSupportsInferenceSpeed,
+	type ApiConfiguration,
+	type ApiProvider,
+	type ModelProviderSelection,
+} from "@shared/api"
+import type { InferenceSpeed, Mode } from "@shared/storage/types"
 
 const PROVIDER_MODEL_FIELD_SUFFIX: Partial<Record<ApiProvider, string>> = {
 	openrouter: "OpenRouter",
@@ -39,11 +45,18 @@ const PROVIDER_MODEL_INFO_FIELD_SUFFIX: Partial<Record<ApiProvider, string>> = {
 export function modelProviderSelectionUpdates(
 	mode: Mode,
 	selection: ModelProviderSelection,
+	inferenceSpeed?: InferenceSpeed,
 ): Partial<ApiConfiguration> {
 	const prefix = mode === "plan" ? "planMode" : "actMode"
 	const updates: Record<string, unknown> = {
 		[`${prefix}ApiProvider`]: selection.provider,
 		[`${prefix}ApiModelId`]: selection.modelId,
+	}
+	if (
+		(inferenceSpeed === "fast" && !modelSupportsInferenceSpeed(selection.provider, selection.modelId)) ||
+		(inferenceSpeed === "standard" && !providerSupportsInferenceSpeed(selection.provider))
+	) {
+		updates[`${prefix}InferenceSpeed`] = "default"
 	}
 
 	const modelFieldSuffix = PROVIDER_MODEL_FIELD_SUFFIX[selection.provider]

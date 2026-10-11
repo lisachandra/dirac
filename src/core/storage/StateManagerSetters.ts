@@ -1,5 +1,5 @@
 import type { ApiConfiguration, ModelProviderPreset } from "@shared/api"
-import { buildLegacySynthetic1mStateUpdates } from "@shared/storage/legacy-model-id-migration"
+import type { RunHistoryItem } from "@shared/HistoryItem"
 import {
 	type GlobalStateAndSettings,
 	type GlobalStateAndSettingsKey,
@@ -15,6 +15,7 @@ import {
 import { STATE_MANAGER_NOT_INITIALIZED } from "./error-messages"
 import { normalizeLoadedSetting, normalizeLoadedSettings } from "./StateManagerSettings"
 import type { StatePersistenceManager } from "./StatePersistenceManager"
+import { applyTaskHistoryMutations, type TaskHistoryMutation } from "./taskHistory"
 
 export interface StateManagerSettersContext {
 	isInitialized: boolean
@@ -37,18 +38,33 @@ export function setGlobalState<K extends keyof GlobalStateAndSettings>(
 	value: GlobalStateAndSettings[K],
 ): void {
 	guardInitialized(ctx)
+	if (key === "taskHistory") throw new Error("Task history requires an ID-scoped mutation")
 	const normalizedValue = isSettingsKey(key) ? normalizeLoadedSetting(key as SettingsKey, value as never) : value
-	;(ctx.globalStateCache as Record<string, unknown>)[key] = normalizedValue
+		; (ctx.globalStateCache as Record<string, unknown>)[key] = normalizedValue
 	ctx.persistence.addPendingGlobalState(key)
 	ctx.notifyStateChange()
 }
 
 export function setGlobalStateBatch(ctx: StateManagerSettersContext, updates: Partial<GlobalStateAndSettings>): void {
 	guardInitialized(ctx)
-	const normalizedUpdates = { ...updates, ...buildLegacySynthetic1mStateUpdates(updates) }
+	if (Object.hasOwn(updates, "taskHistory")) throw new Error("Task history requires an ID-scoped mutation")
+	const normalizedUpdates = normalizeLoadedSettings(updates as Partial<Settings>) as Partial<GlobalStateAndSettings>
 	Object.assign(ctx.globalStateCache, normalizedUpdates)
 	ctx.persistence.addPendingGlobalStateBatch(Object.keys(normalizedUpdates) as GlobalStateAndSettingsKey[])
 	ctx.notifyStateChange()
+}
+
+export function mutateTaskHistory(
+	ctx: StateManagerSettersContext,
+	mutation: TaskHistoryMutation,
+): RunHistoryItem[] {
+	guardInitialized(ctx)
+	const immutableMutation = structuredClone(mutation)
+	const updated = applyTaskHistoryMutations(ctx.globalStateCache.taskHistory, [immutableMutation])
+	ctx.globalStateCache.taskHistory = updated
+	ctx.persistence.addPendingTaskHistoryMutation(immutableMutation)
+	ctx.notifyStateChange()
+	return updated
 }
 
 export function setTaskSettings<K extends keyof Settings>(
@@ -67,6 +83,22 @@ export function setTaskSettingsBatch(ctx: StateManagerSettersContext, taskId: st
 	const normalizedUpdates = normalizeLoadedSettings(updates)
 	Object.assign(ctx.taskStateCache, normalizedUpdates)
 	ctx.persistence.addPendingTaskStateBatch(taskId, Object.keys(normalizedUpdates) as SettingsKey[])
+}
+
+export function hasTaskSetting<K extends keyof Settings>(ctx: StateManagerSettersContext, key: K): boolean {
+	guardInitialized(ctx)
+	return Object.hasOwn(ctx.taskStateCache, key)
+}
+
+export function getTaskSetting<K extends keyof Settings>(ctx: StateManagerSettersContext, key: K): Settings[K] | undefined {
+	guardInitialized(ctx)
+	return ctx.taskStateCache[key]
+}
+
+export function clearTaskSetting<K extends keyof Settings>(ctx: StateManagerSettersContext, taskId: string, key: K): void {
+	guardInitialized(ctx)
+	delete ctx.taskStateCache[key]
+	ctx.persistence.addPendingTaskState(taskId, key)
 }
 
 export async function loadTaskSettings(ctx: StateManagerSettersContext, taskId: string): Promise<void> {
@@ -109,7 +141,7 @@ export function setSecretsBatch(ctx: StateManagerSettersContext, updates: Partia
 
 export function setWorkspaceState(ctx: StateManagerSettersContext, key: string, value: unknown): void {
 	guardInitialized(ctx)
-	;(ctx.workspaceStateCache as Record<string, unknown>)[key] = value
+		; (ctx.workspaceStateCache as Record<string, unknown>)[key] = value
 	ctx.persistence.addPendingWorkspaceState(key as LocalStateKey)
 }
 
@@ -128,12 +160,17 @@ export function setSessionOverride<K extends keyof Settings>(ctx: StateManagerSe
 	ctx.sessionOverrideCache[key] = normalizeLoadedSetting(key, value)
 }
 
-export function setSessionOverrideCache(ctx: StateManagerSettersContext, overrides: Partial<Settings>): void {
-	for (const key of Object.keys(ctx.sessionOverrideCache)) {
-		delete ctx.sessionOverrideCache[key as keyof Settings]
-	}
-	Object.assign(ctx.sessionOverrideCache, normalizeLoadedSettings(overrides))
+
+export function hasSessionOverride<K extends keyof Settings>(ctx: StateManagerSettersContext, key: K): boolean {
+	guardInitialized(ctx)
+	return Object.hasOwn(ctx.sessionOverrideCache, key)
 }
+
+export function clearSessionOverride<K extends keyof Settings>(ctx: StateManagerSettersContext, key: K): void {
+	guardInitialized(ctx)
+	delete ctx.sessionOverrideCache[key]
+}
+
 
 export function refreshModelProviderPresetsFromDisk(ctx: StateManagerSettersContext): void {
 	guardInitialized(ctx)
@@ -159,9 +196,9 @@ export function setApiConfiguration(ctx: StateManagerSettersContext, apiConfigur
 		(acc, [key, value]) => {
 			if (key === undefined) return acc
 			if (isSecretKey(key)) {
-				;(acc.secretsUpdates as Record<string, string | undefined>)[key] = value as string | undefined
+				; (acc.secretsUpdates as Record<string, string | undefined>)[key] = value as string | undefined
 			} else if (isSettingsKey(key)) {
-				;(acc.settingsUpdates as Record<string, unknown>)[key] = value
+				; (acc.settingsUpdates as Record<string, unknown>)[key] = value
 			}
 			return acc
 		},

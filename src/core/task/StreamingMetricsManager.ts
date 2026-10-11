@@ -10,6 +10,16 @@ export interface StreamingMetrics {
 	cacheWriteTokens: number
 	cacheReadTokens: number
 	totalCost: number | undefined
+	availability: UsageMetricAvailability
+}
+
+export interface UsageMetricAvailability {
+	inputTokens: boolean
+	outputTokens: boolean
+	reasoningTokens: boolean
+	cacheWrites: boolean
+	cacheReads: boolean
+	cost: boolean
 }
 
 interface UsageChunk {
@@ -38,6 +48,14 @@ export class StreamingMetricsManager {
 		cacheWriteTokens: 0,
 		cacheReadTokens: 0,
 		totalCost: undefined,
+		availability: {
+			inputTokens: false,
+			outputTokens: false,
+			reasoningTokens: false,
+			cacheWrites: false,
+			cacheReads: false,
+			cost: false,
+		},
 	}
 
 	constructor(
@@ -48,12 +66,18 @@ export class StreamingMetricsManager {
 
 	/** Merge a usage chunk into the running totals. */
 	updateFromChunk(chunk: UsageChunk): void {
+		this.metrics.availability.inputTokens = true
+		this.metrics.availability.outputTokens = true
+		this.metrics.availability.reasoningTokens ||= chunk.reasoningTokens !== undefined || chunk.thoughtsTokenCount !== undefined
+		this.metrics.availability.cacheWrites ||= chunk.cacheWriteTokens !== undefined
+		this.metrics.availability.cacheReads ||= chunk.cacheReadTokens !== undefined
 		this.metrics.inputTokens = chunk.inputTokens
 		this.metrics.outputTokens = chunk.outputTokens
 		this.metrics.reasoningTokens = chunk.reasoningTokens ?? chunk.thoughtsTokenCount ?? this.metrics.reasoningTokens
 		this.metrics.cacheWriteTokens = chunk.cacheWriteTokens ?? this.metrics.cacheWriteTokens
 		this.metrics.cacheReadTokens = chunk.cacheReadTokens ?? this.metrics.cacheReadTokens
 		this.metrics.totalCost = chunk.totalCost ?? this.metrics.totalCost
+		this.metrics.availability.cost = this.getTotalCost() !== undefined
 	}
 
 	/** Persist current metrics to the api_status dirac message. */
@@ -77,6 +101,7 @@ export class StreamingMetricsManager {
 			cacheReadTokens: this.metrics.cacheReadTokens,
 			api: this.api,
 			totalCost: this.metrics.totalCost,
+			usageAvailability: this.metrics.availability,
 			cancelReason,
 			streamingFailedMessage,
 			contextWindow,
@@ -84,8 +109,8 @@ export class StreamingMetricsManager {
 		})
 	}
 
-	/** Compute the cost, using the provider-calculated value when available. */
-	getTotalCost(): number {
+	/** Compute the cost, using the provider-calculated value when available. Returns undefined when pricing is unknown. */
+	getTotalCost(): number | undefined {
 		return (
 			this.metrics.totalCost ??
 			calculateCost({
@@ -101,6 +126,6 @@ export class StreamingMetricsManager {
 
 	/** Return a snapshot of the current metrics. */
 	getMetrics(): StreamingMetrics {
-		return { ...this.metrics }
+		return { ...this.metrics, availability: { ...this.metrics.availability } }
 	}
 }

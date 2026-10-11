@@ -1,5 +1,6 @@
 // Import proper AWS SDK types
 
+import type { Message, SystemContentBlock, ToolConfiguration } from "@aws-sdk/client-bedrock-runtime"
 import {
 	BedrockRuntimeClient,
 	ConverseCommand,
@@ -14,9 +15,6 @@ import {
 	type ModelInfo,
 } from "@shared/api"
 import { calculateApiCostOpenAI, calculateApiCostQwen } from "@utils/cost"
-import { applyCacheControlToMessages, chunkText, estimateTokenCount, extractNonStreamingContent, formatConverseError, formatMessagesForConverseAPI, getInferenceConfig, mapDiracToolsToBedrockToolConfig, prepareSystemMessages } from "./bedrock-converse-utils"
-import { createBedrockClient, resolveAwsCredentials } from "./bedrock-client"
-import { BedrockStreamParser } from "./bedrock-stream-parser"
 import { ExtensionRegistryInfo } from "@/registry"
 import { getErrorMessage } from "@/shared/errors"
 import type { DiracStorageMessage } from "@/shared/messages/content"
@@ -26,6 +24,19 @@ import type { ApiHandler, CommonApiHandlerOptions } from "../"
 import { withRetry } from "../retry"
 import { convertToR1Format } from "../transform/r1-format"
 import type { ApiStream } from "../transform/stream"
+import { createBedrockClient, resolveAwsCredentials } from "./bedrock-client"
+import {
+	applyCacheControlToMessages,
+	chunkText,
+	estimateTokenCount,
+	extractNonStreamingContent,
+	formatConverseError,
+	formatMessagesForConverseAPI,
+	getInferenceConfig,
+	mapDiracToolsToBedrockToolConfig,
+	prepareSystemMessages,
+} from "./bedrock-converse-utils"
+import { BedrockStreamParser } from "./bedrock-stream-parser"
 
 const BEDROCK_USER_AGENT_APP_ID = `dirac#${ExtensionRegistryInfo.version}`
 
@@ -58,17 +69,6 @@ export interface BedrockMessageConfig {
 	abortSignal?: AbortSignal
 }
 
-
-
-
-
-
-
-type SupportedContentType = "text" | "image" | "thinking" | "redacted_thinking" | "document"
-
-
-// Define provider options type based on AWS SDK patterns
-
 // a special jp inference profile was created for sonnet 4.6, opus 4.6, sonnet 4.5 & haiku 4.5
 // https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-support.html
 const JP_SUPPORTED_CRIS_MODELS = [
@@ -81,7 +81,6 @@ const JP_SUPPORTED_CRIS_MODELS = [
 
 // Parses Bedrock ConverseStream events into Dirac ApiStreamChunk objects.
 // Tracks per-block state (content buffers, block types, active tool calls) across the stream.
-
 
 // https://docs.anthropic.com/en/api/claude-on-amazon-bedrock
 export class AwsBedrockHandler implements ApiHandler {
@@ -201,20 +200,12 @@ export class AwsBedrockHandler implements ApiHandler {
 	private static readonly DEFAULT_REGION = "us-east-1"
 
 	/**
-	 * Gets AWS credentials using the provider chain
-	 * Centralizes credential retrieval logic for all AWS services
-	 */
-
-	/**
 	 * Gets the AWS region to use, with fallback to default
 	 */
 	private getRegion(): string {
 		return this.options.awsRegion || AwsBedrockHandler.DEFAULT_REGION
 	}
 
-	/**
-	 * Creates a BedrockRuntimeClient with the appropriate credentials
-	 */
 	/** Resolves AWS credentials for this handler from options or the node provider chain. */
 	public getAwsCredentials(): Promise<{ accessKeyId: string; secretAccessKey: string; sessionToken?: string }> {
 		return resolveAwsCredentials(this.options, this.getRegion(), BEDROCK_USER_AGENT_APP_ID)
@@ -473,34 +464,44 @@ export class AwsBedrockHandler implements ApiHandler {
 	}
 
 	/**
-	 * Prepares system messages with optional caching support
+	 * Shared Converse preamble: format messages, apply (optional) cache controls,
+	 * prepare system messages, and map tools. De-duplicates create*Message methods.
 	 */
-
-	/**
-	 * Gets inference configuration for different model types
-	 */
+	private prepareConverseInputs(
+		config: BedrockMessageConfig,
+		applyCache: boolean,
+	): {
+		messagesWithCache: Message[]
+		systemMessages: SystemContentBlock[] | undefined
+		toolConfig: ToolConfiguration | undefined
+	} {
+		const { messages, model, systemPrompt, tools } = config
+		const formattedMessages = formatMessagesForConverseAPI(messages, model.info.supportsImages !== false)
+		const userMsgIndices: number[] = []
+		messages.forEach((msg, index) => {
+			if (msg.role === "user") userMsgIndices.push(index)
+		})
+		const messagesWithCache = applyCache
+			? applyCacheControlToMessages(formattedMessages, {
+					lastUserIndex: userMsgIndices.at(-1) ?? -1,
+					secondLastUserIndex: userMsgIndices.at(-2) ?? -1,
+				})
+			: formattedMessages
+		const systemMessages = prepareSystemMessages(systemPrompt, applyCache)
+		const toolConfig = mapDiracToolsToBedrockToolConfig(tools)
+		return { messagesWithCache, systemMessages, toolConfig }
+	}
 
 	/**
 	 * Creates a message using Anthropic Claude models through AWS Bedrock Converse API
 	 * Implements support for Anthropic Claude models using the unified Converse API
 	 */
 	private async *createAnthropicMessage(config: BedrockMessageConfig): ApiStream {
-		const { systemPrompt, messages, modelId, model, tools } = config
-		// Format messages for Anthropic model using unified formatter
-		const formattedMessages = formatMessagesForConverseAPI(messages, model.info.supportsImages !== false)
-
-		// Get model info and message indices for caching
-		const userMsgIndices = messages.reduce((acc, msg, index) => (msg.role === "user" ? [...acc, index] : acc), [] as number[])
-		const lastUserMsgIndex = userMsgIndices[userMsgIndices.length - 1] ?? -1
-		const secondLastMsgUserIndex = userMsgIndices[userMsgIndices.length - 2] ?? -1
-
-		// Apply caching controls to messages if enabled
-		const messagesWithCache = this.options.awsBedrockUsePromptCache
-			? applyCacheControlToMessages(formattedMessages, [secondLastMsgUserIndex, lastUserMsgIndex])
-			: formattedMessages
-
-		// Prepare system message with caching support
-		const systemMessages = prepareSystemMessages(systemPrompt, this.options.awsBedrockUsePromptCache || false)
+		const { modelId, model } = config
+		const { messagesWithCache, systemMessages, toolConfig } = this.prepareConverseInputs(
+			config,
+			!!this.options.awsBedrockUsePromptCache,
+		)
 
 		// Get thinking configuration
 		const budget_tokens = this.options.thinkingBudgetTokens || 0
@@ -508,7 +509,6 @@ export class AwsBedrockHandler implements ApiHandler {
 		const useAdaptive = isAnthropicAdaptiveThinkingSupported(modelId, model.info)
 
 		// Prepare request for Anthropic model using Converse API
-		const toolConfig = mapDiracToolsToBedrockToolConfig(tools)
 		const command = new ConverseStreamCommand({
 			modelId: modelId,
 			messages: messagesWithCache,
@@ -534,45 +534,15 @@ export class AwsBedrockHandler implements ApiHandler {
 	}
 
 	/**
-	 * Formats messages for models using the Converse API specification
-	 * Used by both Anthropic and Nova models to avoid code duplication
-	 */
-
-	/**
-	 * Processes image content with proper error handling and user notification
-	 */
-
-	/**
-	 * Applies cache control to messages for prompt caching using AWS Bedrock's cachePoint system
-	 * AWS Bedrock uses cachePoint objects instead of Anthropic's cache_control approach
-	 */
-
-	/**
 	 * Creates a message using Amazon Nova models through AWS Bedrock
 	 * Implements support for Amazon Nova models with caching support
 	 */
 	private async *createNovaMessage(config: BedrockMessageConfig): ApiStream {
-		const { systemPrompt, messages, modelId, model, tools } = config
-		// Format messages for Nova model using unified formatter
-		const formattedMessages = formatMessagesForConverseAPI(messages, model.info.supportsImages !== false)
-
-		// Get model info and message indices for caching (for Nova models that support it)
-		const userMsgIndices = messages.reduce((acc, msg, index) => (msg.role === "user" ? [...acc, index] : acc), [] as number[])
-		const lastUserMsgIndex = userMsgIndices[userMsgIndices.length - 1] ?? -1
-		const secondLastMsgUserIndex = userMsgIndices[userMsgIndices.length - 2] ?? -1
-
-		// Apply caching controls to messages if model supports caching and option is enabled
-		const messagesWithCache =
-			this.options.awsBedrockUsePromptCache && model.info.supportsPromptCache
-				? applyCacheControlToMessages(formattedMessages, [secondLastMsgUserIndex, lastUserMsgIndex])
-				: formattedMessages
-
-		// Prepare system message with caching support for Nova models that support it
-		const enableCaching = this.options.awsBedrockUsePromptCache && model.info.supportsPromptCache
-		const systemMessages = prepareSystemMessages(systemPrompt, enableCaching || false)
+		const { modelId, model } = config
+		const applyCache = !!this.options.awsBedrockUsePromptCache && !!model.info.supportsPromptCache
+		const { messagesWithCache, systemMessages, toolConfig } = this.prepareConverseInputs(config, applyCache)
 
 		// Prepare request for Nova model
-		const toolConfig = mapDiracToolsToBedrockToolConfig(tools)
 		const command = new ConverseStreamCommand({
 			modelId: modelId,
 			messages: messagesWithCache,
@@ -603,29 +573,27 @@ export class AwsBedrockHandler implements ApiHandler {
 
 	// Shared non-streaming Converse API logic for OpenAI and Qwen models.
 	// Simulates streaming by chunking the response text into 1000-char segments.
+	// Contract (master): usage only when present (or estimated at end); errors yield [ERROR] text, not throw.
 	private async *createNonStreamingConverseMessage(
 		config: BedrockMessageConfig,
 		costFn: typeof calculateApiCostOpenAI,
 		label: string,
 	): ApiStream {
-		const { systemPrompt, messages, modelId, model, tools } = config
+		const { messages, model } = config
+		const { messagesWithCache, systemMessages, toolConfig } = this.prepareConverseInputs(config, false)
 		const client = await this.getBedrockClient()
-		const formattedMessages = formatMessagesForConverseAPI(messages, model.info.supportsImages !== false)
-		const systemMessages = systemPrompt ? [{ text: systemPrompt }] : undefined
-		const toolConfig = mapDiracToolsToBedrockToolConfig(tools)
 		const command = new ConverseCommand({
-			modelId,
-			messages: formattedMessages,
+			modelId: config.modelId,
+			messages: messagesWithCache,
 			system: systemMessages,
 			inferenceConfig: { maxTokens: model.info.maxTokens || 8192, temperature: model.info.temperature ?? 0 },
 			...(toolConfig ? { toolConfig } : {}),
 		})
 
 		try {
-			const inputTokenEstimate = this.estimateInputTokens(systemPrompt, messages)
+			const inputTokenEstimate = this.estimateInputTokens(config.systemPrompt, messages)
 			const response = await client.send(command, { abortSignal: config.abortSignal })
 			const { fullText, reasoningText } = extractNonStreamingContent(response)
-
 			const outputTokens = response.usage
 				? response.usage.outputTokens || estimateTokenCount(fullText + reasoningText)
 				: estimateTokenCount(fullText + reasoningText)
@@ -658,10 +626,4 @@ export class AwsBedrockHandler implements ApiHandler {
 			client.destroy()
 		}
 	}
-
-	// Extracts text and reasoning content from a non-streaming Converse response.
-
-	// Chunks text into 1000-char segments and yields as the given chunk type.
-
-	// Formats an error from the Converse API into a human-readable message.
 }

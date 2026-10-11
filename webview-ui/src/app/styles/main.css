@@ -567,6 +567,7 @@ vscode-dropdown::part(control) {
 }
 
 .settings-tab-trigger {
+	width: 100%;
 	border-radius: 0 6px 6px 0;
 	transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease;
 }
@@ -585,18 +586,43 @@ vscode-dropdown::part(control) {
 	display: block;
 }
 
+.settings-tab-compact-label {
+	display: none;
+}
+
+.settings-nav-tooltip[data-slot="tooltip-content"] {
+	color: var(--vscode-editorHoverWidget-foreground, var(--vscode-foreground));
+	background: var(--vscode-editorHoverWidget-background, var(--vscode-editor-background));
+	border-color: var(--vscode-editorHoverWidget-border, var(--dirac-border-strong));
+	box-shadow: var(--dirac-shadow-md);
+}
+
 @media (max-width: 639px) {
 	.settings-tab-list {
-		width: 52px;
+		width: 120px;
 	}
 
 	.settings-tab-trigger {
-		justify-content: center;
-		padding-inline: 0;
+		justify-content: flex-start;
+		padding-inline: 10px;
+		text-align: left;
+	}
+
+	.settings-tab-icon {
+		display: block;
+		width: 14px;
+		height: 14px;
+		flex: 0 0 auto;
 	}
 
 	.settings-tab-label {
 		display: none;
+	}
+
+	.settings-tab-compact-label {
+		display: block;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 }
 

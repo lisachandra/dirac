@@ -8,6 +8,7 @@ import { withRetry } from "../retry"
 import { sanitizeAnthropicMessages } from "../transform/anthropic-format"
 import { DiracStorageMessage } from "@/shared/messages/content"
 import { convertAnthropicMessagesToGemini } from "../transform/gemini-format"
+import { resolveGeminiImageSources } from "./gemini-image-resolver"
 import { convertToOpenAiMessages } from "../transform/openai-format"
 import { ApiStream } from "../transform/stream"
 
@@ -289,7 +290,8 @@ export class AIhubmixHandler implements ApiHandler {
 		const client = this.ensureGeminiClient()
 		const modelId = this.requireModelId()
 
-		const contents = convertAnthropicMessagesToGemini(messages as DiracStorageMessage[])
+		const resolvedMessages = await resolveGeminiImageSources(messages as DiracStorageMessage[])
+		const contents = convertAnthropicMessagesToGemini(resolvedMessages, modelId)
 
 		const requestConfig: GenerateContentConfig = {
 			systemInstruction: systemPrompt,

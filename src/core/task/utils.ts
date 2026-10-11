@@ -2,10 +2,9 @@ import { ApiHandler } from "@core/api"
 import { execSync } from "child_process"
 import { showSystemNotification } from "@/integrations/notifications"
 import { DiracApiReqCancelReason, DiracApiReqInfo, DiracMessageType } from "@/shared/ExtensionMessage"
-
-import { calculateApiCostAnthropic } from "@/utils/cost"
-import { calculateApiCostOpenAI, calculateApiCostQwen } from "@/utils/cost"
+import { calculateApiCostAnthropic, calculateApiCostOpenAI, calculateApiCostQwen } from "@/utils/cost"
 import { MessageStateHandler } from "./message-state"
+import type { UsageMetricAvailability } from "./StreamingMetricsManager"
 
 export const showNotificationForApproval = (message: string, notificationsEnabled: boolean) => {
 	if (notificationsEnabled) {
@@ -25,6 +24,7 @@ type UpdateApiReqMsgParams = {
 	cacheWriteTokens: number
 	cacheReadTokens: number
 	totalCost?: number
+	usageAvailability?: UsageMetricAvailability
 	api: ApiHandler
 	cancelReason?: DiracApiReqCancelReason
 	streamingFailedMessage?: string
@@ -40,7 +40,8 @@ export const calculateCost = (params: {
 	cacheReadTokens: number
 	reasoningTokens: number
 	api: ApiHandler
-}): number => {
+}): number | undefined => {
+	if (params.api.shouldEstimateCost?.() === false) return undefined
 	const info = params.api.getModel().info
 	const provider = params.api.constructor.name
 	if (provider === "ZAiHandler" || provider === "OpenAiHandler" || provider === "DeepSeekHandler") {
@@ -84,39 +85,39 @@ export const updateApiReqMsg = async (params: UpdateApiReqMsgParams) => {
 	}
 
 	const currentApiReqInfo: DiracApiReqInfo = msg.content.status
-	delete currentApiReqInfo.retryStatus // Clear retry status when request is finalized
 
-	await params.messageStateHandler.updateDiracMessage(params.lastApiReqIndex, {
-		content: {
-			type: DiracMessageType.API_STATUS,
+	const cost =
+		params.totalCost ??
+		calculateCost({
+			inputTokens: params.inputTokens,
+			outputTokens: params.outputTokens,
+			cacheWriteTokens: params.cacheWriteTokens,
+			cacheReadTokens: params.cacheReadTokens,
+			reasoningTokens: params.reasoningTokens,
+			api: params.api,
+		})
+	const patch: Partial<DiracApiReqInfo> = {
+		tokensIn: Math.max(params.inputTokens, currentApiReqInfo.tokensIn ?? 0),
+		tokensOut: Math.max(params.outputTokens, currentApiReqInfo.tokensOut ?? 0),
+		reasoningTokens: Math.max(params.reasoningTokens, currentApiReqInfo.reasoningTokens ?? 0),
+		cacheWrites: Math.max(params.cacheWriteTokens, currentApiReqInfo.cacheWrites ?? 0),
+		cacheReads: Math.max(params.cacheReadTokens, currentApiReqInfo.cacheReads ?? 0),
+	}
+	const deletions: (keyof DiracApiReqInfo)[] = ["retryStatus"]
 
-			status: {
-				...currentApiReqInfo, // Spread the modified info (with retryStatus removed)
-				tokensIn: Math.max(params.inputTokens, currentApiReqInfo.tokensIn ?? 0),
-				tokensOut: Math.max(params.outputTokens, currentApiReqInfo.tokensOut ?? 0),
-				reasoningTokens: Math.max(params.reasoningTokens, currentApiReqInfo.reasoningTokens ?? 0),
-				cacheWrites: Math.max(params.cacheWriteTokens, currentApiReqInfo.cacheWrites ?? 0),
-				cacheReads: Math.max(params.cacheReadTokens, currentApiReqInfo.cacheReads ?? 0),
-				cost:
-					params.totalCost ??
-					calculateCost({
-						inputTokens: params.inputTokens,
-						outputTokens: params.outputTokens,
-						cacheWriteTokens: params.cacheWriteTokens,
-						cacheReadTokens: params.cacheReadTokens,
-						reasoningTokens: params.reasoningTokens,
-						api: params.api,
-					}),
-				cancelReason: params.cancelReason,
-				streamingFailedMessage: params.streamingFailedMessage,
-				contextWindow: params.contextWindow ?? currentApiReqInfo.contextWindow,
-				contextUsagePercentage: params.contextUsagePercentage ?? currentApiReqInfo.contextUsagePercentage,
-			} satisfies DiracApiReqInfo,
-		},
-	})
+	if (cost === undefined) deletions.push("cost")
+	else patch.cost = cost
+	if (params.usageAvailability) {
+		patch.usageAvailability = { ...params.usageAvailability, cost: cost !== undefined }
+	}
+	if (params.cancelReason === undefined) deletions.push("cancelReason")
+	else patch.cancelReason = params.cancelReason
+	if (params.streamingFailedMessage === undefined) deletions.push("streamingFailedMessage")
+	else patch.streamingFailedMessage = params.streamingFailedMessage
+	if (params.contextWindow !== undefined) patch.contextWindow = params.contextWindow
+	if (params.contextUsagePercentage !== undefined) patch.contextUsagePercentage = params.contextUsagePercentage
 
-	// Ensure UI is updated
-	const updatedMsg = params.messageStateHandler.getDiracMessages()[params.lastApiReqIndex]
+	await params.messageStateHandler.patchApiStatusById(msg.id, patch, deletions)
 }
 
 /**

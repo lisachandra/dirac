@@ -15,14 +15,22 @@ import * as _paths from "./paths"
 import * as _remoteConfigCache from "./remoteConfigCache"
 import type { SkillsScanDirectory } from "./skillsStorage"
 import * as _skillsStorage from "./skillsStorage"
+import * as _taskDirectory from "./taskDirectory"
 import * as _taskHistory from "./taskHistory"
 import * as _taskStorage from "./taskStorage"
 
 export type { SkillsScanDirectory }
 export const atomicWriteFile = _atomicWrite.atomicWriteFile
 export const getSavedApiConversationHistory = _conversationHistory.getSavedApiConversationHistory
+export const getSavedApiConversationState = _conversationHistory.getSavedApiConversationState
 export const getSavedApiConversationProviderState = _conversationHistory.getSavedApiConversationProviderState
 export const getSavedDiracMessages = _conversationHistory.getSavedDiracMessages
+export const getSavedPresentationHistory = _conversationHistory.getSavedPresentationHistory
+export const appendApiConversationOperations = _conversationHistory.appendApiConversationOperations
+export const appendPresentationOperations = _conversationHistory.appendPresentationOperations
+export const createApiConversationBaseline = _conversationHistory.createApiConversationBaseline
+export const createPresentationBaseline = _conversationHistory.createPresentationBaseline
+export const getPresentationHistoryAtMessage = _conversationHistory.getPresentationHistoryAtMessage
 export const saveApiConversationHistory = _conversationHistory.saveApiConversationHistory
 export const saveApiConversationProviderState = _conversationHistory.saveApiConversationProviderState
 export const saveDiracMessages = _conversationHistory.saveDiracMessages
@@ -54,6 +62,13 @@ export const getTaskHistoryStateFilePath = _taskHistory.getTaskHistoryStateFileP
 export const readTaskHistoryFromState = _taskHistory.readTaskHistoryFromState
 export const taskHistoryStateFileExists = _taskHistory.taskHistoryStateFileExists
 export const writeTaskHistoryToState = _taskHistory.writeTaskHistoryToState
+export const commitTaskHistoryMutations = _taskHistory.commitTaskHistoryMutations
+export const tryAcquireTaskHistoryInventoryLease = _taskHistory.tryAcquireTaskHistoryInventoryLease
+export const withTaskHistoryInventoryLock = _taskHistory.withTaskHistoryInventoryLock
+export const deleteTaskDirectory = _taskDirectory.deleteTaskDirectory
+export const getTaskDirectoryPath = _taskDirectory.getTaskDirectoryPath
+export const getTasksDirectoryPath = _taskDirectory.getTasksDirectoryPath
+export const listTaskDirectoryIds = _taskDirectory.listTaskDirectoryIds
 export const getTaskMetadata = _taskStorage.getTaskMetadata
 export const readTaskSettingsFromStorage = _taskStorage.readTaskSettingsFromStorage
 export const saveTaskMetadata = _taskStorage.saveTaskMetadata

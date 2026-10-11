@@ -18,8 +18,8 @@ describe("ApiConversationManager steering delivery", () => {
 			taskMessenger: { upsertApiStatus: sinon.stub().resolves(), createCard: sinon.stub() },
 			messageStateHandler: {
 				addToApiConversationHistory: sinon.stub().resolves(),
-				getDiracMessages: sinon.stub().returns([]),
-				updateDiracMessage: sinon.stub().resolves(),
+				findMessageIndexById: sinon.stub().returns(0),
+				patchApiStatusById: sinon.stub().resolves(),
 			},
 			postStateToWebview: sinon.stub().resolves(),
 			onContextCompacted: sinon.stub(),
@@ -38,6 +38,7 @@ describe("ApiConversationManager steering delivery", () => {
 			providerId: "provider",
 			modelId: "model",
 			mode: "act",
+			requestId: "request-1",
 		})
 
 		assert.equal(claimSteeringMessages.callCount, 0)
@@ -48,9 +49,46 @@ describe("ApiConversationManager steering delivery", () => {
 		assert.equal(result.didConsumeUserContent, true)
 	})
 
-	it("consumes the Act-mode switch marker after preparing a normal request", async () => {
+	it("consumes a matching mode-entry marker after preparing a normal request", async () => {
+		for (const mode of ["plan", "act"] as const) {
+			const taskState = new TaskState()
+			taskState.pendingModeNotice = { mode, includedInRequestId: "request-1" }
+			const manager = new ApiConversationManager({
+				taskState,
+				stateManager: { getGlobalSettingsKey: sinon.stub() },
+				runUserPromptSubmitHook: sinon.stub().resolves({}),
+				loadContext: sinon.stub().callsFake(async (content: any[]) => [content, "", false, [], false, undefined]),
+				taskMessenger: { upsertApiStatus: sinon.stub().resolves(), createCard: sinon.stub() },
+				messageStateHandler: {
+					addToApiConversationHistory: sinon.stub().resolves(),
+					findMessageIndexById: sinon.stub().returns(0),
+					patchApiStatusById: sinon.stub().resolves(),
+				},
+				postStateToWebview: sinon.stub().resolves(),
+				taskInitializationStartTime: performance.now(),
+				ulid: "task-ulid",
+				taskId: "task-id",
+			} as any)
+
+			await manager.prepareApiRequest({
+				userContent: [],
+				includeFileDetails: false,
+				useCompactPrompt: false,
+				previousApiReqIndex: 0,
+				isFirstRequest: false,
+				providerId: "provider",
+				modelId: "model",
+				mode,
+				requestId: "request-1",
+			})
+
+			assert.equal(taskState.pendingModeNotice, undefined)
+		}
+	})
+
+	it("does not consume a newer mode-entry marker from a stale request", async () => {
 		const taskState = new TaskState()
-		taskState.didSwitchToActMode = true
+		taskState.pendingModeNotice = { mode: "act" }
 		const manager = new ApiConversationManager({
 			taskState,
 			stateManager: { getGlobalSettingsKey: sinon.stub() },
@@ -59,8 +97,45 @@ describe("ApiConversationManager steering delivery", () => {
 			taskMessenger: { upsertApiStatus: sinon.stub().resolves(), createCard: sinon.stub() },
 			messageStateHandler: {
 				addToApiConversationHistory: sinon.stub().resolves(),
-				getDiracMessages: sinon.stub().returns([]),
-				updateDiracMessage: sinon.stub().resolves(),
+				findMessageIndexById: sinon.stub().returns(0),
+				patchApiStatusById: sinon.stub().resolves(),
+			},
+			postStateToWebview: sinon.stub().resolves(),
+			taskInitializationStartTime: performance.now(),
+			ulid: "task-ulid",
+			taskId: "task-id",
+		} as any)
+
+		await manager.prepareApiRequest({
+			userContent: [],
+			includeFileDetails: false,
+			useCompactPrompt: false,
+			previousApiReqIndex: 0,
+			isFirstRequest: false,
+			providerId: "provider",
+			modelId: "model",
+			mode: "plan",
+			requestId: "request-1",
+		})
+
+		assert.equal(taskState.pendingModeNotice?.mode, "act")
+	})
+
+	it("does not consume a newer same-mode notice after a round-trip transition", async () => {
+		const taskState = new TaskState()
+		taskState.pendingModeNotice = { mode: "act", includedInRequestId: "request-1" }
+		const manager = new ApiConversationManager({
+			taskState,
+			stateManager: { getGlobalSettingsKey: sinon.stub() },
+			runUserPromptSubmitHook: sinon.stub().resolves({}),
+			loadContext: sinon.stub().callsFake(async (content: any[]) => [content, "", false, [], false, undefined]),
+			taskMessenger: { upsertApiStatus: sinon.stub().resolves(), createCard: sinon.stub() },
+			messageStateHandler: {
+				addToApiConversationHistory: sinon.stub().callsFake(async () => {
+					taskState.pendingModeNotice = { mode: "act", includedInRequestId: "request-2" }
+				}),
+				findMessageIndexById: sinon.stub().returns(0),
+				patchApiStatusById: sinon.stub().resolves(),
 			},
 			postStateToWebview: sinon.stub().resolves(),
 			taskInitializationStartTime: performance.now(),
@@ -77,24 +152,25 @@ describe("ApiConversationManager steering delivery", () => {
 			providerId: "provider",
 			modelId: "model",
 			mode: "act",
+			requestId: "request-1",
 		})
 
-		assert.equal(taskState.didSwitchToActMode, false)
+		assert.deepEqual(taskState.pendingModeNotice, { mode: "act", includedInRequestId: "request-2" })
 	})
 
-	it("retains the Act-mode switch marker when request preparation fails before persistence", async () => {
+	it("retains the mode-entry marker when request preparation fails before persistence", async () => {
 		const taskState = new TaskState()
-		taskState.didSwitchToActMode = true
+		taskState.pendingModeNotice = { mode: "act", includedInRequestId: "request-1" }
 		const manager = new ApiConversationManager({
 			taskState,
 			stateManager: { getGlobalSettingsKey: sinon.stub() },
 			runUserPromptSubmitHook: sinon.stub().resolves({}),
 			loadContext: sinon.stub().callsFake(async (content: any[]) => [content, "", false, [], false, undefined]),
-			taskMessenger: { upsertApiStatus: sinon.stub().rejects(new Error("status failed")), createCard: sinon.stub() },
+			taskMessenger: { upsertApiStatus: sinon.stub().resolves(), createCard: sinon.stub() },
 			messageStateHandler: {
-				addToApiConversationHistory: sinon.stub().resolves(),
-				getDiracMessages: sinon.stub().returns([]),
-				updateDiracMessage: sinon.stub().resolves(),
+				addToApiConversationHistory: sinon.stub().rejects(new Error("history persistence failed")),
+				findMessageIndexById: sinon.stub().returns(0),
+				patchApiStatusById: sinon.stub().resolves(),
 			},
 			postStateToWebview: sinon.stub().resolves(),
 			taskInitializationStartTime: performance.now(),
@@ -112,11 +188,12 @@ describe("ApiConversationManager steering delivery", () => {
 				providerId: "provider",
 				modelId: "model",
 				mode: "act",
+				requestId: "request-1",
 			}),
-			/status failed/,
+			/history persistence failed/,
 		)
 
-		assert.equal(taskState.didSwitchToActMode, true)
+		assert.equal(taskState.pendingModeNotice?.mode, "act")
 	})
 
 	it("runs the persistence callback immediately after the user message is stored", async () => {
@@ -129,8 +206,8 @@ describe("ApiConversationManager steering delivery", () => {
 			taskMessenger: { upsertApiStatus: sinon.stub().resolves(), createCard: sinon.stub() },
 			messageStateHandler: {
 				addToApiConversationHistory: sinon.stub().callsFake(async () => events.push("persisted")),
-				getDiracMessages: sinon.stub().returns([]),
-				updateDiracMessage: sinon.stub().resolves(),
+				findMessageIndexById: sinon.stub().returns(0),
+				patchApiStatusById: sinon.stub().resolves(),
 			},
 			postStateToWebview: sinon.stub().resolves(),
 			taskInitializationStartTime: performance.now(),
@@ -148,6 +225,7 @@ describe("ApiConversationManager steering delivery", () => {
 			providerId: "provider",
 			modelId: "model",
 			mode: "act",
+			requestId: "request-1",
 			afterUserContentPersisted: async () => {
 				events.push("callback")
 			},
@@ -158,6 +236,7 @@ describe("ApiConversationManager steering delivery", () => {
 
 	it("prepares active-model automatic compaction when Utility condensation is unavailable", async () => {
 		const taskState = new TaskState()
+		taskState.pendingModeNotice = { mode: "act" }
 		const loadContext = sinon.stub()
 		const createCard = sinon.stub()
 		const addToApiConversationHistory = sinon.stub().resolves()
@@ -171,8 +250,8 @@ describe("ApiConversationManager steering delivery", () => {
 			taskMessenger: { upsertApiStatus: sinon.stub().resolves(), createCard },
 			messageStateHandler: {
 				addToApiConversationHistory,
-				getDiracMessages: sinon.stub().returns([]),
-				updateDiracMessage: sinon.stub().resolves(),
+				findMessageIndexById: sinon.stub().returns(0),
+				patchApiStatusById: sinon.stub().resolves(),
 			},
 			getPinnedContext: () => "retain this pinned context",
 			postStateToWebview: sinon.stub().resolves(),
@@ -192,12 +271,14 @@ describe("ApiConversationManager steering delivery", () => {
 			providerId: "provider",
 			modelId: "model",
 			mode: "act",
+			requestId: "request-1",
 		})
 
 		assert.equal(loadContext.callCount, 0)
 		assert.equal(createCard.callCount, 0)
 		assert.equal(taskState.lastAutoCondenseTriggerIndex, 7)
 		assert.equal(taskState.pendingCondenseSource, "automatic")
+		assert.equal(taskState.pendingModeNotice?.mode, "act")
 		assert.equal(onContextCompacted.callCount, 0)
 		assert.equal(result.didConsumeUserContent, true)
 		const storedContent = addToApiConversationHistory.firstCall.args[0].content
@@ -206,9 +287,11 @@ describe("ApiConversationManager steering delivery", () => {
 	})
 
 	it("does not consume user content when the prompt hook cancels", async () => {
+		const taskState = new TaskState()
+		taskState.pendingModeNotice = { mode: "plan" }
 		const addToApiConversationHistory = sinon.stub().resolves()
 		const manager = new ApiConversationManager({
-			taskState: new TaskState(),
+			taskState,
 			runUserPromptSubmitHook: sinon.stub().resolves({ cancel: true, errorMessage: "cancelled" }),
 			messageStateHandler: { addToApiConversationHistory },
 		} as any)
@@ -222,16 +305,20 @@ describe("ApiConversationManager steering delivery", () => {
 			providerId: "provider",
 			modelId: "model",
 			mode: "act",
+			requestId: "request-1",
 		})
 
 		assert.equal(result.didConsumeUserContent, false)
 		assert.equal(addToApiConversationHistory.callCount, 0)
+		assert.equal(taskState.pendingModeNotice?.mode, "plan")
 	})
 
 	it("consumes direct-response commands without persisting ordinary user content", async () => {
+		const taskState = new TaskState()
+		taskState.pendingModeNotice = { mode: "act" }
 		const addToApiConversationHistory = sinon.stub().resolves()
 		const manager = new ApiConversationManager({
-			taskState: new TaskState(),
+			taskState,
 			runUserPromptSubmitHook: sinon.stub().resolves({}),
 			loadContext: sinon.stub().resolves([[], "", false, [], true, "tools reloaded"]),
 			messageStateHandler: { addToApiConversationHistory },
@@ -246,11 +333,13 @@ describe("ApiConversationManager steering delivery", () => {
 			providerId: "provider",
 			modelId: "model",
 			mode: "act",
+			requestId: "request-1",
 		})
 
 		assert.equal(result.didConsumeUserContent, true)
 		assert.equal(result.directResponseText, "tools reloaded")
 		assert.equal(addToApiConversationHistory.callCount, 0)
+		assert.equal(taskState.pendingModeNotice?.mode, "act")
 	})
 
 	it("consumes a condensation command even when local condensation cannot continue", async () => {
@@ -273,6 +362,7 @@ describe("ApiConversationManager steering delivery", () => {
 			providerId: "provider",
 			modelId: "model",
 			mode: "act",
+			requestId: "request-1",
 		})
 
 		assert.equal(runLocalConversationCompaction.callCount, 1)
@@ -323,8 +413,8 @@ describe("ApiConversationManager steering delivery", () => {
 				overwriteApiConversationProviderState: sinon.stub().callsFake(async (state: any) => {
 					providerState = state
 				}),
-				getDiracMessages: sinon.stub().returns([]),
-				updateDiracMessage: sinon.stub().resolves(),
+				findMessageIndexById: sinon.stub().returns(0),
+				patchApiStatusById: sinon.stub().resolves(),
 			},
 			postStateToWebview: sinon.stub().resolves(),
 			taskInitializationStartTime: performance.now(),
@@ -342,6 +432,7 @@ describe("ApiConversationManager steering delivery", () => {
 			providerId: "openai-codex",
 			modelId: "model",
 			mode: "act",
+			requestId: "request-1",
 		})
 		const dispatch = await manager.prepareProviderConversationDispatch({
 			systemPrompt: "system",

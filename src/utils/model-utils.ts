@@ -4,7 +4,7 @@ import { AnthropicModelId, anthropicModels, getProviderForModel } from "@/shared
 export { supportsReasoningEffortForModel } from "@shared/utils/reasoning-support"
 
 const CLAUDE_VERSION_MATCH_REGEX = /[-_ ]([\d](?:\.[05])?)[-_ ]?/
-export const GEMINI_MAX_OUTPUT_TOKENS = 32_768
+export const GEMINI_DEFAULT_MAX_OUTPUT_TOKENS = 32_768
 
 export function modelDoesntSupportWebp(apiHandlerModel: ApiHandlerModel): boolean {
 	const modelId = apiHandlerModel.id.toLowerCase()
@@ -33,9 +33,15 @@ export function isAnthropicModelId(modelId: string): modelId is AnthropicModelId
 	return modelId in anthropicModels || CLAUDE_MODELS.some((substring) => modelId.includes(substring))
 }
 
-export function isGPT5(id: string): boolean {
-	const modelId = normalize(id)
-	return modelId.includes("gpt-5") || modelId.includes("gpt5")
+const GPT_GENERATION_REGEX = /(?:^|[^a-z0-9])gpt-?(\d+)(?=$|[^0-9])/i
+
+export function isGptGenerationAtLeast(id: string, minimumGeneration: number): boolean {
+	const match = normalize(id).match(GPT_GENERATION_REGEX)
+	return match !== null && Number.parseInt(match[1], 10) >= minimumGeneration
+}
+
+export function supportsOpenAiPersistedReasoning(modelId: string, explicitlySupported?: boolean): boolean {
+	return explicitlySupported === true || isGptGenerationAtLeast(modelId, 6)
 }
 
 export function isLocalModel(providerInfo: ApiProviderInfo): boolean {

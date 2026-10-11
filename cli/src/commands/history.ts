@@ -44,6 +44,7 @@ export async function listHistory(options: { config?: string; limit?: number; pa
 		exit(0)
 	}
 
+	ctx.controller.enableInteractiveGoals()
 	await runInkApp(
 		React.createElement(App, {
 			view: "history",

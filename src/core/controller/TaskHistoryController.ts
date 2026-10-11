@@ -1,15 +1,45 @@
-import * as path from "path"
-import { HostProvider } from "@/hosts/host-provider"
-import { GlobalFileNames, ensureCacheDirectoryExists } from "@core/storage/disk"
+import type { Anthropic } from "@anthropic-ai/sdk"
+import { GoalStore } from "@core/goal/GoalStore"
+import {
+	deleteTaskDirectory,
+	ensureCacheDirectoryExists,
+	GlobalFileNames,
+	getSavedApiConversationHistory,
+	getTaskDirectoryPath,
+} from "@core/storage/disk"
+import { isActiveGoalStatus } from "@shared/goal"
+import {
+	type GoalHistoryItem,
+	type HistoryItem,
+	isGoalHistoryItem,
+	isTaskHistoryItem,
+	type RunHistoryItem,
+	type TaskHistoryItem,
+} from "@shared/HistoryItem"
+import { removeLegacySynthetic1mModelEntries } from "@shared/storage/legacy-model-id-migration"
 import { fileExistsAtPath } from "@utils/fs"
 import fs from "fs/promises"
+import * as path from "path"
 import { Logger } from "@/shared/services/Logger"
-import type { HistoryItem } from "@shared/HistoryItem"
-import type { Anthropic } from "@anthropic-ai/sdk"
-import { removeLegacySynthetic1mModelEntries } from "@shared/storage/legacy-model-id-migration"
+import { withTaskHistoryInventoryLock } from "@core/storage/taskHistory"
+
+export async function deleteRunStorage(item: RunHistoryItem, goalStore = new GoalStore()): Promise<void> {
+	if (!isGoalHistoryItem(item)) {
+		await deleteTaskDirectory(item.id)
+		return
+	}
+
+	const goal = await goalStore.read(item.id)
+	if (isActiveGoalStatus(goal.status)) throw new Error(`Goal ${item.id} must be paused or stopped before deletion`)
+	await Promise.all(goal.children.map((child) => deleteTaskDirectory(child.id)))
+	await deleteTaskDirectory(item.id)
+}
 
 export class TaskHistoryController {
-	constructor(private readonly stateManager: import("@core/storage/StateManager").StateManager) {}
+	constructor(
+		private readonly stateManager: import("@core/storage/StateManager").StateManager,
+		private readonly goalStore = new GoalStore(),
+	) {}
 
 	async readOpenRouterModels(): Promise<Record<string, import("@shared/api").ModelInfo> | undefined> {
 		const openRouterModelsFilePath = path.join(await ensureCacheDirectoryExists(), GlobalFileNames.openRouterModels)
@@ -26,7 +56,7 @@ export class TaskHistoryController {
 	}
 
 	async getTaskWithId(id: string): Promise<{
-		historyItem: HistoryItem
+		historyItem: TaskHistoryItem
 		taskDirPath: string
 		apiConversationHistoryFilePath: string
 		uiMessagesFilePath: string
@@ -35,16 +65,26 @@ export class TaskHistoryController {
 		apiConversationHistory: Anthropic.MessageParam[]
 	}> {
 		const history = this.stateManager.getGlobalStateKey("taskHistory")
-		const historyItem = history.find((item) => item.id === id)
+		const runHistoryItem = history.find((item) => item.id === id)
+		if (runHistoryItem && isGoalHistoryItem(runHistoryItem)) {
+			throw new Error(`Run ${id} is a Goal and cannot be loaded as a Task`)
+		}
+		const historyItem = runHistoryItem && isTaskHistoryItem(runHistoryItem) ? runHistoryItem : undefined
 		if (historyItem) {
-			const taskDirPath = path.join(HostProvider.get().globalStorageFsPath, "tasks", id)
+			const taskDirPath = getTaskDirectoryPath(id)
 			const apiConversationHistoryFilePath = path.join(taskDirPath, GlobalFileNames.apiConversationHistory)
 			const uiMessagesFilePath = path.join(taskDirPath, GlobalFileNames.uiMessages)
 			const contextHistoryFilePath = path.join(taskDirPath, GlobalFileNames.contextHistory)
 			const taskMetadataFilePath = path.join(taskDirPath, GlobalFileNames.taskMetadata)
-			const fileExists = await fileExistsAtPath(apiConversationHistoryFilePath)
-			if (fileExists) {
-				const apiConversationHistory = JSON.parse(await fs.readFile(apiConversationHistoryFilePath, "utf8"))
+			const hasConversationHistory = (
+				await Promise.all([
+					fileExistsAtPath(apiConversationHistoryFilePath),
+					fileExistsAtPath(path.join(taskDirPath, GlobalFileNames.apiConversationHistoryBaseline)),
+					fileExistsAtPath(path.join(taskDirPath, GlobalFileNames.apiConversationHistoryOperations)),
+				])
+			).some(Boolean)
+			if (hasConversationHistory) {
+				const apiConversationHistory = await getSavedApiConversationHistory(id)
 				return {
 					historyItem,
 					taskDirPath,
@@ -61,6 +101,18 @@ export class TaskHistoryController {
 		throw new Error("Task not found")
 	}
 
+	getRunHistoryItem(id: string): RunHistoryItem {
+		const item = this.stateManager.getGlobalStateKey("taskHistory").find((candidate) => candidate.id === id)
+		if (!item) throw new Error(`Run ${id} is not present in top-level history`)
+		return item
+	}
+
+	getGoalHistoryItem(id: string): GoalHistoryItem {
+		const item = this.getRunHistoryItem(id)
+		if (!isGoalHistoryItem(item)) throw new Error(`Run ${id} is not a Goal`)
+		return item
+	}
+
 	async exportTaskWithId(id: string) {
 		const { taskDirPath } = await this.getTaskWithId(id)
 		Logger.log(`[EXPORT] Opening task directory: ${taskDirPath}`)
@@ -68,22 +120,34 @@ export class TaskHistoryController {
 		await open(taskDirPath)
 	}
 
-	async deleteTaskFromState(id: string) {
-		const taskHistory = this.stateManager.getGlobalStateKey("taskHistory")
-		const updatedTaskHistory = taskHistory.filter((task) => task.id !== id)
-		this.stateManager.setGlobalState("taskHistory", updatedTaskHistory)
-		return updatedTaskHistory
+	async deleteTaskFromState(id: string): Promise<RunHistoryItem[]> {
+		return this.stateManager.removeTaskHistoryItems([id])
 	}
 
-	async updateTaskHistory(item: HistoryItem): Promise<HistoryItem[]> {
-		const history = this.stateManager.getGlobalStateKey("taskHistory")
-		const existingItemIndex = history.findIndex((h) => h.id === item.id)
-		if (existingItemIndex !== -1) {
-			history[existingItemIndex] = item
-		} else {
-			history.push(item)
-		}
-		this.stateManager.setGlobalState("taskHistory", history)
-		return history
+	async updateRunHistory(item: RunHistoryItem): Promise<RunHistoryItem[]> {
+		return this.stateManager.upsertTaskHistoryItem(item)
+	}
+
+	async updateTaskHistory(item: HistoryItem): Promise<RunHistoryItem[]> {
+		if (!isTaskHistoryItem(item)) throw new Error(`Goal ${item.id} cannot be written through updateTaskHistory`)
+		return this.updateRunHistory(item)
+	}
+
+	async updateGoalHistory(item: GoalHistoryItem): Promise<RunHistoryItem[]> {
+		return this.updateRunHistory(item)
+	}
+
+	/** Deletes complete run storage. Goal children remain private and are cascaded from goal.json. */
+	async deleteRunStorage(id: string): Promise<void> {
+		await deleteRunStorage(this.getRunHistoryItem(id), this.goalStore)
+	}
+
+	async deleteRunWithId(id: string): Promise<RunHistoryItem[]> {
+		return withTaskHistoryInventoryLock(async () => {
+			await this.deleteRunStorage(id)
+			const history = await this.deleteTaskFromState(id)
+			await this.stateManager.flushPendingState()
+			return history
+		})
 	}
 }

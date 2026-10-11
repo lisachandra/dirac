@@ -13,6 +13,8 @@ export function assembleModelState(stateManager: StateManager) {
 		utilityModelUseCondense: stateManager.getGlobalSettingsKey("utilityModelUseCondense"),
 		utilityModelUseNewTask: stateManager.getGlobalSettingsKey("utilityModelUseNewTask"),
 		utilityModelUseGenerateCommitMessage: stateManager.getGlobalSettingsKey("utilityModelUseGenerateCommitMessage"),
+		utilityModelUsePermissionHandling: stateManager.getGlobalSettingsKey("utilityModelUsePermissionHandling"),
+		utilityModelPermissionPolicy: stateManager.getGlobalSettingsKey("utilityModelPermissionPolicy"),
 		autoApprovalSettings: stateManager.getGlobalSettingsKey("autoApprovalSettings"),
 		userApprovedCommands: stateManager.getGlobalSettingsKey("userApprovedCommands"),
 		browserSettings: stateManager.getGlobalSettingsKey("browserSettings"),
@@ -53,6 +55,7 @@ export function assembleModelState(stateManager: StateManager) {
 		lastDismissedCliBannerVersion: stateManager.getGlobalStateKey("lastDismissedCliBannerVersion") || 0,
 		dismissedBanners: stateManager.getGlobalStateKey("dismissedBanners"),
 		doubleCheckCompletionEnabled: stateManager.getGlobalSettingsKey("doubleCheckCompletionEnabled"),
+		lowVerbosityEnabled: stateManager.getGlobalSettingsKey("lowVerbosityEnabled"),
 		multiRootSetting: { user: stateManager.getGlobalStateKey("multiRootEnabled"), featureFlag: true },
 		diracWebToolsEnabled: {
 			user: stateManager.getGlobalSettingsKey("diracWebToolsEnabled"),

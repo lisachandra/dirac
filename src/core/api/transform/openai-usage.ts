@@ -1,6 +1,7 @@
 import { ModelInfo } from "@shared/api"
+import type { InferenceSpeed } from "@shared/storage/types"
 import { ApiStreamUsageChunk } from "./stream"
-import { calculateApiCostOpenAI } from "@/utils/cost"
+import { calculateApiCostOpenAI, getModelInfoForInferenceSpeed } from "@/utils/cost"
 
 /**
  * Formats usage data from OpenAI-compatible providers into a standardized chunk,
@@ -23,6 +24,8 @@ export function formatOpenAiCompatibleUsage(
 	overrides?: {
 		cacheReadTokens?: number
 		cacheWriteTokens?: number
+		estimateCost?: boolean
+		inferenceSpeed?: InferenceSpeed
 	},
 ): ApiStreamUsageChunk {
 	const totalInputTokens = usage.prompt_tokens || 0
@@ -36,9 +39,17 @@ export function formatOpenAiCompatibleUsage(
 	const cacheWriteTokens =
 		overrides?.cacheWriteTokens ?? usage.prompt_tokens_details?.cache_write_tokens ?? usage.prompt_cache_miss_tokens ?? 0
 
-	// Prefer provider-reported cost (e.g. OpenRouter) or calculate locally
 	const totalCost =
-		usage.cost ?? calculateApiCostOpenAI(modelInfo, totalInputTokens, outputTokens, cacheWriteTokens, cacheReadTokens)
+		usage.cost ??
+		(overrides?.estimateCost === false
+			? undefined
+			: calculateApiCostOpenAI(
+					getModelInfoForInferenceSpeed(modelInfo, overrides?.inferenceSpeed),
+					totalInputTokens,
+					outputTokens,
+					cacheWriteTokens,
+					cacheReadTokens,
+				))
 
 	return {
 		type: "usage",
@@ -47,5 +58,6 @@ export function formatOpenAiCompatibleUsage(
 		cacheReadTokens: cacheReadTokens,
 		cacheWriteTokens: cacheWriteTokens,
 		totalCost: totalCost,
+		...(overrides?.inferenceSpeed ? { inferenceSpeed: overrides.inferenceSpeed } : {}),
 	}
 }

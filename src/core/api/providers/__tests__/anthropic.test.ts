@@ -12,6 +12,7 @@ function msgStart(usage: {
 	output_tokens?: number
 	cache_creation_input_tokens?: number | null
 	cache_read_input_tokens?: number | null
+	speed?: "fast" | "standard"
 }): Anthropic.RawMessageStartEvent {
 	return {
 		type: "message_start",
@@ -34,6 +35,7 @@ function msgStart(usage: {
 				output_tokens: usage.output_tokens ?? 0,
 				server_tool_use: null,
 				service_tier: null,
+				...(usage.speed ? { speed: usage.speed } : {}),
 			},
 		},
 	}
@@ -114,16 +116,18 @@ describe("AnthropicHandler", () => {
 	})
 
 	describe("getModel", () => {
-		it("should return the fast mode model when configured", () => {
+		it("applies Fast pricing to a Fast-capable base model", () => {
 			const handler = new AnthropicHandler({
 				apiKey: "test-api-key",
-				apiModelId: "claude-opus-4-6:fast",
+				apiModelId: "claude-opus-4-8",
+				inferenceSpeed: "fast",
 			})
 
 			const result = handler.getModel()
 
-			result.id.should.equal("claude-opus-4-6:fast")
-			result.info.should.deepEqual(anthropicModels["claude-opus-4-6:fast"])
+			result.id.should.equal("claude-opus-4-8")
+			expect(result.info.inputPrice).to.equal(10)
+			expect(result.info.outputPrice).to.equal(50)
 		})
 
 	})
@@ -132,7 +136,8 @@ describe("AnthropicHandler", () => {
 		it("should route fast mode requests through the beta messages API", async () => {
 			const handler = new AnthropicHandler({
 				apiKey: "test-api-key",
-				apiModelId: "claude-opus-4-6:fast",
+				apiModelId: "claude-opus-4-8",
+				inferenceSpeed: "fast",
 			})
 
 			const standardCreate = sinon.stub().resolves(createAsyncIterable())
@@ -159,11 +164,24 @@ describe("AnthropicHandler", () => {
 			sinon.assert.notCalled(standardCreate)
 			sinon.assert.calledOnce(betaCreate)
 			sinon.assert.calledWithMatch(betaCreate, {
-				model: "claude-opus-4-6",
+				model: "claude-opus-4-8",
 				betas: [ANTHROPIC_FAST_MODE_BETA],
 				speed: "fast",
 				stream: true,
 			})
+		})
+
+		it("rejects Fast mode for unsupported Anthropic models", async () => {
+			const handler = new AnthropicHandler({
+				apiKey: "test-api-key",
+				apiModelId: "claude-sonnet-4-6",
+				inferenceSpeed: "fast",
+			})
+			sinon.stub(handler as any, "ensureClient").returns({ messages: { create: sinon.stub() } })
+
+			await collect(handler.createMessage("system", [{ role: "user", content: "hello" }])).should.be.rejectedWith(
+				"The selected Anthropic model does not support Fast mode",
+			)
 		})
 
 	})
@@ -191,6 +209,19 @@ describe("AnthropicHandler", () => {
 				cacheWriteTokens: 30,
 				cacheReadTokens: 20,
 			})
+		})
+
+		it("uses the delivered speed for subsequent cost metadata", async () => {
+			const h = new AnthropicHandler({ apiKey: "k", apiModelId: "claude-opus-4-8", inferenceSpeed: "fast" })
+			const stream = fakeStream([msgStart({ input_tokens: 100, output_tokens: 50, speed: "standard" })])
+			sinon.stub(h as any, "ensureClient").returns({
+				beta: { messages: { create: sinon.stub().resolves(stream) } },
+			})
+
+			const out = await collect(h.createMessage("sys", [{ role: "user", content: "hi" }]))
+			expect(out[0]).to.include({ inferenceSpeed: "standard" })
+			expect(h.getModel().info.inputPrice).to.equal(5)
+			expect(h.getModel().info.outputPrice).to.equal(25)
 		})
 
 		it("defaults missing usage tokens to 0 and cache tokens to undefined", async () => {

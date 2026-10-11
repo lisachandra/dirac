@@ -1,10 +1,11 @@
-import type { HistoryItem } from "@shared/HistoryItem"
+import { type HistoryItem, isGoalHistoryItem } from "@shared/HistoryItem"
+import { historyItemFromProto } from "@shared/historyItemFromProto"
 import { BooleanRequest, EmptyRequest, StringArrayRequest } from "@shared/proto/dirac/common"
 import { GetTaskHistoryRequest, TaskFavoriteRequest } from "@shared/proto/dirac/task"
 import { VSCodeTextField } from "@vscode/webview-ui-toolkit/react"
 import Fuse, { type FuseResult } from "fuse.js"
 import { FunnelIcon } from "lucide-react"
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { memo, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { GroupedVirtuoso, Virtuoso } from "react-virtuoso"
 import { useAppStore } from "@/app/store/appStore"
 import { useTaskStore } from "@/entities/task/store/taskStore"
@@ -37,6 +38,30 @@ const HISTORY_FILTERS = {
 	favoritesOnly: "Favorites Only",
 }
 
+type DateGroupedHistoryListProps = {
+	groupedTasks: HistoryItem[]
+	groupCounts: number[]
+	groupLabels: string[]
+	renderHistoryItem: (item: HistoryItem) => ReactNode
+}
+
+export const DateGroupedHistoryList = ({
+	groupedTasks,
+	groupCounts,
+	groupLabels,
+	renderHistoryItem,
+}: DateGroupedHistoryListProps) => (
+	<GroupedVirtuoso
+		groupContent={(index) => (
+			<div className="sticky top-0 z-10 border-b border-border-panel bg-sidebar-background px-4 py-2 text-xs font-bold uppercase tracking-wide text-description">
+				{groupLabels[index]}
+			</div>
+		)}
+		groupCounts={groupCounts}
+		itemContent={(index) => renderHistoryItem(groupedTasks[index])}
+	/>
+)
+
 const HistoryView = ({ onDone }: HistoryViewProps) => {
 	const taskHistory = useTaskStore((state) => state.taskHistory)
 	const setTaskHistory = useTaskStore((state) => state.setTaskHistory)
@@ -49,7 +74,7 @@ const HistoryView = ({ onDone }: HistoryViewProps) => {
 	const [lastNonRelevantSort, setLastNonRelevantSort] = useState<SortOption>("newest")
 	const [selectedItems, setSelectedItems] = useState<string[]>([])
 	const [showFavoritesOnly, setShowFavoritesOnly] = useState(false)
-	const [showCurrentWorkspaceOnly, setShowCurrentWorkspaceOnly] = useState(false)
+	const [showCurrentWorkspaceOnly, setShowCurrentWorkspaceOnly] = useState(true)
 	const [pendingFavoriteToggles, setPendingFavoriteToggles] = useState<Record<string, boolean>>({})
 	const [deletingTaskIds, setDeletingTaskIds] = useState<Set<string>>(() => new Set())
 	const [isDeletingAll, setIsDeletingAll] = useState(false)
@@ -73,7 +98,7 @@ const HistoryView = ({ onDone }: HistoryViewProps) => {
 				}),
 			)
 			if (requestId === loadRequestIdRef.current) {
-				setTasks(response.tasks || [])
+				setTasks((response.tasks || []).map(historyItemFromProto))
 			}
 		} catch (error) {
 			console.error("Error loading task history:", error)
@@ -207,7 +232,7 @@ const HistoryView = ({ onDone }: HistoryViewProps) => {
 	const fuse = useMemo(
 		() =>
 			new Fuse(tasks, {
-				keys: ["task"],
+				keys: ["task", "objectivePreview"],
 				threshold: 0.6,
 				shouldSort: true,
 				isCaseSensitive: false,
@@ -233,15 +258,9 @@ const HistoryView = ({ onDone }: HistoryViewProps) => {
 				case "oldest":
 					return a.ts - b.ts
 				case "mostExpensive":
-					return (b.totalCost || 0) - (a.totalCost || 0)
+					return historyCost(b) - historyCost(a)
 				case "mostTokens":
-					return (
-						(b.tokensIn || 0) +
-						(b.tokensOut || 0) +
-						(b.cacheWrites || 0) +
-						(b.cacheReads || 0) -
-						((a.tokensIn || 0) + (a.tokensOut || 0) + (a.cacheWrites || 0) + (a.cacheReads || 0))
-					)
+					return historyTokens(b) - historyTokens(a)
 				default:
 					return b.ts - a.ts
 			}
@@ -338,16 +357,11 @@ const HistoryView = ({ onDone }: HistoryViewProps) => {
 			)
 		}
 		return (
-			<GroupedVirtuoso
-				computeItemKey={(index) => groupedTasks[index].id}
-				data={groupedTasks}
-				groupContent={(index) => (
-					<div className="sticky top-0 z-10 border-b border-border-panel bg-sidebar-background px-4 py-2 text-xs font-bold uppercase tracking-wide text-description">
-						{groupLabels[index]}
-					</div>
-				)}
+			<DateGroupedHistoryList
 				groupCounts={groupCounts}
-				itemContent={(_, __, item) => renderHistoryItem(item)}
+				groupedTasks={groupedTasks}
+				groupLabels={groupLabels}
+				renderHistoryItem={renderHistoryItem}
 			/>
 		)
 	})()
@@ -476,6 +490,15 @@ const HistoryView = ({ onDone }: HistoryViewProps) => {
 			</div>
 		</div>
 	)
+}
+
+function historyCost(item: HistoryItem): number {
+	return isGoalHistoryItem(item) ? (item.accounting.cost ?? 0) : item.totalCost
+}
+
+function historyTokens(item: HistoryItem): number {
+	if (isGoalHistoryItem(item)) return item.accounting.totalTokens ?? 0
+	return item.tokensIn + item.tokensOut + (item.cacheWrites ?? 0) + (item.cacheReads ?? 0)
 }
 
 // https://gist.github.com/evenfrost/1ba123656ded32fb7a0cd4651efd4db0

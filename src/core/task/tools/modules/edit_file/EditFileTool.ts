@@ -1,4 +1,6 @@
 import { formatResponse } from "@core/formatResponse"
+import { CardStatus } from "@shared/ExtensionMessage"
+import { toError } from "@shared/errors"
 import { getAnchoredLinePattern, getDelimiter } from "@utils/line-hashing"
 import { DiracDefaultTool, DiracToolSpec } from "@/shared/tools"
 import { IDiracTool } from "../../interfaces/IDiracTool"
@@ -116,48 +118,90 @@ export class EditFileTool implements IDiracTool<EditFileArgs> {
 		const files = this.validator.validateFiles(args, env)
 		if (typeof files === "string") return files
 
-		await env.context.ensureAnchorState()
+		const cards: Record<string, any> = {}
+		let writesApplied = false
 
-		const { preparedBatches, results, totalRequestedEdits, totalResolvedEdits, totalFailedEdits, cards } =
-			await this.batchPreparer.prepare(files, env)
+		try {
+			await env.context.ensureAnchorState()
 
-		if (preparedBatches.length === 0) {
+			const { preparedBatches, results, totalRequestedEdits, totalResolvedEdits, totalFailedEdits } =
+				await this.batchPreparer.prepare(files, env, cards)
+
+			if (preparedBatches.length === 0) {
+				env.telemetry.captureCustomMetadata({
+					filesCount: files.length,
+					requestedEdits: totalRequestedEdits,
+					appliedEdits: 0,
+					failedEdits: totalFailedEdits,
+					outcome: totalFailedEdits > 0 ? "failure" : "success",
+				})
+				const combined = ToolResponseCombiner.combine(results)
+				return totalFailedEdits > 0 && typeof combined === "string" ? formatResponse.toolError(combined) : combined
+			}
+
+			const { approved, userEdits, feedback } = await this.approvalFlow.handle(env, preparedBatches, cards)
+			if (!approved) return feedback || formatResponse.toolDenied()
+
+			env.config.callbacks.assertMutationAuthorized(DiracDefaultTool.EDIT_FILE)
+			const appliedResults = await this.applier.applyAndSave(env, preparedBatches, cards, userEdits)
+			writesApplied = true
+			const finalResults = await this.applier.finalizeResults(env, preparedBatches, appliedResults)
+			results.push(...finalResults)
+
+			const outcome = totalFailedEdits > 0 ? "partial" : "success"
+			if (outcome === "partial") {
+				results.unshift(
+					formatResponse.toolResult(
+						`Partial success: ${totalResolvedEdits} of ${totalRequestedEdits} edits were applied; ${totalFailedEdits} failed. Do not retry the ${totalResolvedEdits} applied edits. Retry only the indexed failed edits below.`,
+					),
+				)
+			}
+
 			env.telemetry.captureCustomMetadata({
 				filesCount: files.length,
 				requestedEdits: totalRequestedEdits,
-				appliedEdits: 0,
+				appliedEdits: totalResolvedEdits,
 				failedEdits: totalFailedEdits,
-				outcome: totalFailedEdits > 0 ? "failure" : "success",
+				outcome,
 			})
-			const combined = ToolResponseCombiner.combine(results)
-			return totalFailedEdits > 0 && typeof combined === "string" ? formatResponse.toolError(combined) : combined
+			await env.editor.hideReview()
+
+			return ToolResponseCombiner.combine(results)
+		} catch (error) {
+			const executionError = toError(error)
+			const cleanupFailures: string[] = []
+
+			if (!writesApplied) {
+				for (const card of Object.values(cards)) {
+					try {
+						await card.update({
+							status: CardStatus.ERROR,
+							body: `✕ Error: ${executionError.message}`,
+						})
+					} catch (presentationError) {
+						cleanupFailures.push(`card ${card.id} update failed: ${toError(presentationError).message}`)
+					}
+					try {
+						await card.finalize(CardStatus.ERROR)
+					} catch (presentationError) {
+						cleanupFailures.push(`card ${card.id} finalization failed: ${toError(presentationError).message}`)
+					}
+				}
+			}
+
+			try {
+				await env.editor.hideReview()
+			} catch (presentationError) {
+				cleanupFailures.push(`review cleanup failed: ${toError(presentationError).message}`)
+			}
+
+			const cleanupWarning = cleanupFailures.length > 0
+				? `\n\nObservability cleanup failed: ${cleanupFailures.join("; ")}`
+				: ""
+			if (writesApplied) {
+				throw new Error(`Edits were saved, but post-save processing failed: ${executionError.message}${cleanupWarning}`)
+			}
+			throw new Error(`Edit failed: ${executionError.message}${cleanupWarning}`)
 		}
-
-		const { approved, userEdits, feedback } = await this.approvalFlow.handle(env, preparedBatches, cards)
-		if (!approved) return feedback || formatResponse.toolDenied()
-
-		const appliedResults = await this.applier.applyAndSave(env, preparedBatches, cards, userEdits)
-		const finalResults = await this.applier.finalizeResults(env, preparedBatches, appliedResults)
-		results.push(...finalResults)
-
-		const outcome = totalFailedEdits > 0 ? "partial" : "success"
-		if (outcome === "partial") {
-			results.unshift(
-				formatResponse.toolResult(
-					`Partial success: ${totalResolvedEdits} of ${totalRequestedEdits} edits were applied; ${totalFailedEdits} failed. Do not retry the ${totalResolvedEdits} applied edits. Retry only the indexed failed edits below.`,
-				),
-			)
-		}
-
-		env.telemetry.captureCustomMetadata({
-			filesCount: files.length,
-			requestedEdits: totalRequestedEdits,
-			appliedEdits: totalResolvedEdits,
-			failedEdits: totalFailedEdits,
-			outcome,
-		})
-		await env.editor.hideReview()
-
-		return ToolResponseCombiner.combine(results)
 	}
 }

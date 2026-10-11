@@ -1,5 +1,5 @@
 import { buildExternalBasicHeaders } from "@/services/EnvUtils"
-import { DiracStorageMessage } from "@/shared/messages/content"
+import { DiracContent, DiracImageContentBlock, DiracStorageMessage } from "@/shared/messages/content"
 import { fetch } from "@/shared/net"
 import { Logger } from "@/shared/services/Logger"
 import { ModelInfo } from "../../../shared/api"
@@ -9,6 +9,18 @@ import { ApiStream } from "../transform/stream"
 interface DifyHandlerOptions {
 	difyApiKey?: string
 	difyBaseUrl?: string
+}
+
+interface DifyRequestFile {
+	type: "image"
+	transfer_method: "local_file" | "remote_url"
+	upload_file_id?: string
+	url?: string
+}
+
+interface DifyMessageInput {
+	query: string
+	files: DifyRequestFile[]
 }
 
 // Dify API Response Types
@@ -95,16 +107,15 @@ export class DifyHandler implements ApiHandler {
 	}
 
 	async *createMessage(systemPrompt: string, messages: DiracStorageMessage[]): ApiStream {
-		// Convert messages to Dify format
-		const query = this.convertMessagesToQuery(systemPrompt, messages)
 		this.abortController = new AbortController()
+		const { query, files } = await this.convertMessagesToInput(systemPrompt, messages)
 		const requestBody = {
 			inputs: {},
-			query: query,
+			query,
 			response_mode: "streaming",
 			conversation_id: this.conversationId || "",
-			user: "dirac-user", // A unique user identifier
-			files: [],
+			user: "dirac-user",
+			files,
 		}
 
 		const fullUrl = `${this.baseUrl}/chat-messages`
@@ -189,9 +200,9 @@ export class DifyHandler implements ApiHandler {
 				} else {
 					throw new Error(
 						`Dify API did not provide any assistant messages. ` +
-							`Events processed: [${processedEvents.join(", ")}]. ` +
-							`Check your Dify application configuration and ensure it's properly set up to return responses. ` +
-							`API URL: ${fullUrl}. Conversation ID: ${this.conversationId || "none"}.`,
+						`Events processed: [${processedEvents.join(", ")}]. ` +
+						`Check your Dify application configuration and ensure it's properly set up to return responses. ` +
+						`API URL: ${fullUrl}. Conversation ID: ${this.conversationId || "none"}.`,
 					)
 				}
 			}
@@ -282,25 +293,79 @@ export class DifyHandler implements ApiHandler {
 		return { chunks, fullText, hasYieldedContent, done: false }
 	}
 
-	private convertMessagesToQuery(systemPrompt: string, messages: DiracStorageMessage[]): string {
-		// Dify's context is managed by `conversation_id`. The `query` should be the last user message.
-		// The system prompt is typically configured in the Dify App itself.
-		const lastUserMessage = messages.filter((m) => m.role === "user").pop()
+	private async convertMessagesToInput(systemPrompt: string, messages: DiracStorageMessage[]): Promise<DifyMessageInput> {
+		const lastUserMessage = messages.filter((message) => message.role === "user").pop()
+		if (!lastUserMessage) return { query: "", files: [] }
 
-		if (!lastUserMessage) {
-			return "" // Should not happen in normal flow
+		const collected =
+			typeof lastUserMessage.content === "string"
+				? { textParts: [lastUserMessage.content], images: [] as DiracImageContentBlock[] }
+				: this.collectMessageContent(lastUserMessage.content)
+		const files: DifyRequestFile[] = []
+		for (const [index, image] of collected.images.entries()) {
+			files.push(await this.convertImageToDifyFile(image, index))
 		}
+		const userQuery = collected.textParts.join("\n") || (files.length > 0 ? "[Image attached]" : "")
 
-		const userQuery = Array.isArray(lastUserMessage.content)
-			? lastUserMessage.content.map((c) => ("text" in c ? c.text : "")).join("\n")
-			: (lastUserMessage.content as string)
-
-		// Only prepend the system prompt if it's the very first message of a new conversation.
 		if (!this.conversationId && systemPrompt) {
-			return `${systemPrompt}\n\n---\n\n${userQuery}`
+			return { query: `${systemPrompt}\n\n---\n\n${userQuery}`, files }
 		}
 
-		return userQuery
+		return { query: userQuery, files }
+	}
+
+	private collectMessageContent(content: DiracContent[]): {
+		textParts: string[]
+		images: DiracImageContentBlock[]
+	} {
+		const textParts: string[] = []
+		const images: DiracImageContentBlock[] = []
+
+		for (const block of content) {
+			if (block.type === "text") {
+				textParts.push(block.text)
+				continue
+			}
+			if (block.type === "image") {
+				images.push(block)
+				continue
+			}
+			if (block.type !== "tool_result") continue
+
+			textParts.push(`[Tool Result: ${block.tool_use_id}]`)
+			if (typeof block.content === "string") {
+				textParts.push(block.content)
+				textParts.push("[/Tool Result]")
+				continue
+			}
+
+			const nested = this.collectMessageContent(block.content as DiracContent[])
+			textParts.push(...nested.textParts)
+			if (nested.images.length > 0) {
+				textParts.push(`[${nested.images.length} image(s) attached from tool result: ${block.tool_use_id}]`)
+			}
+			textParts.push("[/Tool Result]")
+			images.push(...nested.images)
+		}
+
+		return { textParts, images }
+	}
+
+	private async convertImageToDifyFile(image: DiracImageContentBlock, index: number): Promise<DifyRequestFile> {
+		const source = image.source as DiracImageContentBlock["source"] | { type: "url"; url: string }
+		if (source.type === "url") {
+			return { type: "image", transfer_method: "remote_url", url: source.url }
+		}
+
+		const extensionByMediaType: Record<string, string> = {
+			"image/gif": "gif",
+			"image/jpeg": "jpg",
+			"image/png": "png",
+			"image/webp": "webp",
+		}
+		const extension = extensionByMediaType[source.media_type] || "img"
+		const uploadedFile = await this.uploadFile(Buffer.from(source.data, "base64"), `image-${index + 1}.${extension}`)
+		return { type: "image", transfer_method: "local_file", upload_file_id: uploadedFile.id }
 	}
 
 	getModel(): { id: string; info: ModelInfo } {
@@ -336,6 +401,7 @@ export class DifyHandler implements ApiHandler {
 			method: "POST",
 			headers: this.headers(),
 			body: formData,
+			signal: this.abortController?.signal,
 		})
 
 		if (!response.ok) {

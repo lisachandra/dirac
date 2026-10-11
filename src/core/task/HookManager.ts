@@ -1,7 +1,7 @@
 import { ApiHandler } from "@core/api"
 
 import { executeHook } from "@core/hooks/hook-executor"
-import { getHookModelContext } from "@core/hooks/hook-model-context"
+import { getTaskHookModelContext } from "./runtime/TaskRuntimeModelContext"
 import { getHooksEnabledSafe } from "@core/hooks/hooks-utils"
 import { isTaskCompletionCard } from "@shared/cardIdentity"
 import { DiracContent } from "@shared/messages/content"
@@ -141,7 +141,7 @@ export class HookManager {
 		userContent: DiracContent[],
 		_context: "initial_task" | "resume" | "feedback",
 	): Promise<UserPromptHookResult> {
-		const hooksEnabled = getHooksEnabledSafe(this.dependencies.stateManager.getGlobalSettingsKey("hooksEnabled"))
+		const hooksEnabled = getHooksEnabledSafe(this.dependencies.getWorkingConfiguration().settings.hooksEnabled)
 
 		if (!hooksEnabled) {
 			return {}
@@ -167,7 +167,7 @@ export class HookManager {
 			messageStateHandler: this.dependencies.messageStateHandler,
 			taskId: this.dependencies.taskId,
 			hooksEnabled,
-			model: getHookModelContext(this.dependencies.api!, this.dependencies.stateManager),
+			model: getTaskHookModelContext(this.dependencies.api!, this.dependencies.getWorkingConfiguration()),
 		})
 
 		// Handle cancellation from hook

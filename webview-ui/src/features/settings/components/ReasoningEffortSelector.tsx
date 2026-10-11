@@ -18,6 +18,7 @@ interface ReasoningEffortSelectorProps {
 	label?: string
 	description?: string
 	allowedEfforts?: readonly OpenaiReasoningEffort[]
+	defaultEffort?: OpenaiReasoningEffort
 }
 
 const ReasoningEffortSelector = ({
@@ -25,6 +26,7 @@ const ReasoningEffortSelector = ({
 	label = "Reasoning Effort",
 	description = "Higher effort improves depth, but uses more tokens.",
 	allowedEfforts = OPENAI_REASONING_EFFORT_OPTIONS,
+	defaultEffort = DEFAULT_OPENAI_REASONING_EFFORT,
 }: ReasoningEffortSelectorProps) => {
 	const { apiConfiguration } = useSettingsStore()
 	const { handleModeFieldChange } = useApiConfigurationHandlers()
@@ -32,8 +34,8 @@ const ReasoningEffortSelector = ({
 	const selectedEffort =
 		isOpenaiReasoningEffort(modeFields.reasoningEffort) && allowedEfforts.includes(modeFields.reasoningEffort)
 			? modeFields.reasoningEffort
-			: allowedEfforts.includes(DEFAULT_OPENAI_REASONING_EFFORT)
-				? DEFAULT_OPENAI_REASONING_EFFORT
+			: allowedEfforts.includes(defaultEffort)
+				? defaultEffort
 				: allowedEfforts[0]
 
 	return (

@@ -5,10 +5,9 @@ export * from "./ToolConstants"
 export { ToolDisplayUtils } from "./ToolDisplayUtils"
 
 export function getTaskCompletionTelemetry(config: TaskConfig) {
-	const currentMode = config.services.stateManager.getGlobalSettingsKey("mode")
-	const apiConfig = config.services.stateManager.getApiConfiguration()
-	const provider = currentMode === "plan" ? apiConfig.planModeApiProvider : apiConfig.actModeApiProvider
-	const model = config.api.getModel()
+	const currentMode = config.mode
+	const provider = config.providerId
+	const model = config.model
 	const durationMs = Math.max(0, Date.now() - config.taskState.taskStartTimeMs)
 
 	return {

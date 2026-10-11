@@ -179,7 +179,7 @@ describe("SymbolIndexService", () => {
 		const watcherUpdate = sandbox.stub(service as any, "applyWatcherEventsSerially").resolves()
 
 		const reconciliation = service.requestReconciliation("first")
-		const watcher = (service as any).applyWatcherEvents([{ absolutePath: "/workspace/a.ts", kind: "upsert" }])
+		const watcher = (service as any).applyWatcherEvents([{ absolutePath: "/workspace/a.ts", kind: "change" }])
 		await Promise.resolve()
 		watcherUpdate.notCalled.should.be.true()
 
@@ -189,32 +189,38 @@ describe("SymbolIndexService", () => {
 		sinon.assert.calledOnce(watcherUpdate)
 	})
 
-	it("evicts a previously indexed file when watcher parsing deliberately rejects it", async () => {
-		const service = SymbolIndexService.getInstance()
-		;(service as any).projectRoot = "/workspace"
-		;(service as any).eligibility = {
-			admitsRelativePath: sandbox.stub().returns(true),
-			enumerate: sandbox.stub().resolves({
-				paths: new Set(["rejected.ts"]),
-				watchDirectories: new Set(),
-				isGitWorkspace: true,
-				gitDirectory: "/workspace/.git",
-			}),
-		}
-		const applyMutation = sandbox.stub().returns({ changed: true, removed: 1, replaced: 0 })
-		;(service as any).db = {
-			applyMutation,
-			close: sandbox.stub(),
-		}
-		sandbox.stub(service as any, "stageFiles").resolves({
-			replacements: [],
-			rejectedPaths: ["rejected.ts"],
-			retryRequested: false,
-		})
+	it("evicts a previously indexed file when watcher parsing deliberately rejects it without enumerating the repository", async () => {
+		const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), "dirac-symbol-watcher-reject-"))
+		try {
+			const absolutePath = path.join(projectRoot, "rejected.ts")
+			await fs.writeFile(absolutePath, "export const rejected = 1\n")
+			const service = SymbolIndexService.getInstance()
+			;(service as any).projectRoot = projectRoot
+			;(service as any).eligiblePaths = new Set(["rejected.ts"])
+			const enumerate = sandbox.stub()
+			;(service as any).eligibility = {
+				admitsRelativePath: sandbox.stub().returns(true),
+				filterAbsolutePaths: sandbox.stub().resolves(new Set([absolutePath])),
+				enumerate,
+			}
+			const applyMutation = sandbox.stub().returns({ changed: true, removed: 1, replaced: 0 })
+			;(service as any).db = {
+				applyMutation,
+				close: sandbox.stub(),
+			}
+			sandbox.stub(service as any, "stageFiles").resolves({
+				replacements: [],
+				rejectedPaths: ["rejected.ts"],
+				retryRequested: false,
+			})
 
-		await (service as any).applyWatcherEvents([{ absolutePath: "/workspace/rejected.ts", kind: "upsert" }])
+			await (service as any).applyWatcherEvents([{ absolutePath, kind: "change" }])
 
-		applyMutation.firstCall.args[0].removals.should.deepEqual(["rejected.ts"])
+			enumerate.notCalled.should.be.true()
+			applyMutation.firstCall.args[0].removals.should.deepEqual(["rejected.ts"])
+		} finally {
+			await fs.rm(projectRoot, { recursive: true, force: true })
+		}
 	})
 
 	it("uses no cache directory or shutdown write when persistence is disabled", async () => {
@@ -266,7 +272,7 @@ describe("SymbolIndexService", () => {
 		;(service as any).eligibility = {
 			enumerate: sandbox.stub().resolves({
 				paths: new Set(),
-				watchDirectories: new Set(),
+				externalControlPaths: new Set(),
 				isGitWorkspace: true,
 				gitDirectory: "/workspace/.git",
 			}),

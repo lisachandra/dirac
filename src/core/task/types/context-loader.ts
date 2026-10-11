@@ -4,13 +4,15 @@ import { UrlContentFetcher } from "../../../services/browser/UrlContentFetcher"
 import { FileContextTracker } from "../../context/context-tracking/FileContextTracker"
 import { DiracIgnoreController } from "../../ignore/DiracIgnoreController"
 import { CommandPermissionController } from "../../permissions/CommandPermissionController"
-import { StateManager } from "../../storage/StateManager"
+import type { TaskRequestRuntime } from "../runtime/TaskRequestRuntime"
+import type { StateManager } from "../../storage/StateManager"
 import { TaskState } from "../TaskState"
 
 import type { TextCondensationTemplateId } from "@core/text-condensation/TextCondenser"
 export interface ContextLoaderDependencies {
 	ulid: string
 	stateManager: StateManager
+	getRequestRuntime: () => TaskRequestRuntime
 	cwd: string
 	urlContentFetcher: UrlContentFetcher
 	fileContextTracker: FileContextTracker
@@ -23,7 +25,6 @@ export interface ContextLoaderDependencies {
 
 	getCurrentProviderInfo: () => ApiProviderInfo
 	getEnvironmentDetails: (includeFileDetails?: boolean) => Promise<string>
-	yoloModeToggled?: boolean
 	isTextCondensationAvailable?: (template: TextCondensationTemplateId) => boolean
 
 	postStateToWebview: () => Promise<void>

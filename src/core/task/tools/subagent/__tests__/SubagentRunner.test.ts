@@ -2,28 +2,28 @@ import { strict as assert } from "node:assert"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import { expectLoggerErrors } from "@/test/loggerGuard"
 import * as coreApi from "@core/api"
 import * as skills from "@core/context/instructions/user-instructions/skills"
 import { DiracToolSet, PromptRegistry } from "@core/prompts/system-prompt"
 import type { TaskConfig } from "@core/task/tools/types/TaskConfig"
+import { SubagentExecutionStatus } from "@shared/ExtensionMessage"
+import { ResponseOperation } from "@shared/responseTool"
+import { SubagentTrajectoryEventType } from "@shared/subagents"
+import { DiracAskResponse } from "@shared/WebviewMessage"
 import { afterEach, describe, it } from "mocha"
 import sinon from "sinon"
 import { HostProvider } from "@/hosts/host-provider"
 import { ApiFormat } from "@/shared/proto/dirac/models"
 import { Logger } from "@/shared/services/Logger"
 import { DiracDefaultTool } from "@/shared/tools"
-import { ResponseOperation } from "@shared/responseTool"
+import { expectLoggerErrors } from "@/test/loggerGuard"
 import { TaskState } from "../../../TaskState"
-import { list_files_spec, ListFilesTool } from "../../modules/list_files"
-import { respondSpec, RespondTool } from "../../modules/respond/RespondTool"
-import { SubagentRunner } from "../SubagentRunner"
+import { ListFilesTool, list_files_spec } from "../../modules/list_files"
+import { RespondTool, respondSpec } from "../../modules/respond/RespondTool"
 import { SubagentBuilder } from "../SubagentBuilder"
-import { DiracAskResponse } from "@shared/WebviewMessage"
-import { SubagentExecutionStatus } from "@shared/ExtensionMessage"
-import { SubagentTrajectoryEventType } from "@shared/subagents"
-import { SubagentToolExecutor } from "../SubagentToolExecutor"
+import { SubagentRunner } from "../SubagentRunner"
 import { SubagentRunRecorder } from "../SubagentRunRecorder"
+import { SubagentToolExecutor } from "../SubagentToolExecutor"
 
 function initializeHostProvider() {
 	HostProvider.reset()
@@ -58,6 +58,7 @@ function createTaskConfig(): TaskConfig {
 		mode: "act",
 		strictPlanModeEnabled: false,
 		yoloModeToggled: false,
+		lowVerbosityEnabled: true,
 		doubleCheckCompletionEnabled: false,
 		vscodeTerminalExecutionMode: "backgroundExec",
 		enableParallelToolCalling: false,
@@ -65,35 +66,17 @@ function createTaskConfig(): TaskConfig {
 		context: {},
 		taskState: new TaskState(),
 		messageState: {},
-		api: {
-			getModel: () => ({
-				id: "anthropic/claude-sonnet-4.5",
-				info: {
-					contextWindow: 200_000,
-					apiFormat: ApiFormat.ANTHROPIC_CHAT,
-					supportsPromptCache: true,
-				},
-			}),
-			createMessage: sinon.stub().callsFake(async function* () { }),
-		},
-		services: {
-			stateManager: {
-				getGlobalSettingsKey: (key: string) => {
-					if (key === "mode") {
-						return "act"
-					}
-					if (key === "customPrompt") {
-						return undefined
-					}
-					return undefined
-				},
-				getGlobalStateKey: (_key: string) => undefined,
-				getApiConfiguration: () => ({
-					actModeApiProvider: "anthropic",
-					planModeApiProvider: "anthropic",
-				}),
+		providerId: "anthropic",
+		model: {
+			id: "anthropic/claude-sonnet-4.5",
+			info: {
+				contextWindow: 200_000,
+				apiFormat: ApiFormat.ANTHROPIC_CHAT,
+				supportsPromptCache: true,
 			},
 		},
+		supportsNativeWebSearch: false,
+		services: {},
 		browserSettings: {},
 		focusChainSettings: {},
 		autoApprovalSettings: {
@@ -113,6 +96,7 @@ function createTaskConfig(): TaskConfig {
 			updateFCListFromToolResponse: sinon.stub().resolves(),
 			shouldAutoApproveTool: sinon.stub().returns([true, true]),
 			shouldAutoApproveToolWithPath: sinon.stub().resolves(false),
+			resolveToolPathPermission: sinon.stub().resolves("utility_eligible"),
 			postStateToWebview: sinon.stub().resolves(),
 			cancelTask: sinon.stub().resolves(),
 			applyLatestBrowserSettings: sinon.stub().resolves(undefined),
@@ -121,6 +105,16 @@ function createTaskConfig(): TaskConfig {
 			clearActiveHookExecution: sinon.stub().resolves(),
 			getActiveHookExecution: sinon.stub().resolves(undefined),
 			runUserPromptSubmitHook: sinon.stub().resolves({}),
+			createSubagentRuntime: () => {
+				const handler = coreApi.buildApiHandler({ actModeApiProvider: "anthropic" } as any, "act")
+				return {
+					providerId: "anthropic",
+					model: structuredClone(handler.getModel()),
+					supportsNativeWebSearch: handler.supportsNativeWebSearch?.() === true,
+					createMessage: handler.createMessage.bind(handler),
+					abort: () => handler.abort?.(),
+				}
+			},
 		},
 		coordinator: {
 			getHandler: sinon.stub().callsFake((toolName: DiracDefaultTool) => {
@@ -194,6 +188,70 @@ describe("SubagentRunner", () => {
 		HostProvider.reset()
 	})
 
+	for (const terminal of ["failed", "cancelled"] as const) {
+		it(`retains reported request cost when a stream is ${terminal}`, async () => {
+			if (terminal === "failed") expectLoggerErrors()
+			const config = createTaskConfigWithListFilesSnapshot()
+			const createMessage = sinon.stub().callsFake(async function* () {
+				yield { type: "usage", inputTokens: 10, outputTokens: 0, totalCost: 0.1 }
+				if (terminal === "cancelled") config.taskState.abort = true
+				yield { type: "usage", inputTokens: 0, outputTokens: 5, totalCost: 0.2 }
+				throw new Error("stream interrupted")
+			})
+			sinon.stub(PromptRegistry.getInstance(), "get").resolves("system prompt")
+			sinon.stub(skills, "getOrDiscoverSkills").resolves([])
+			stubApiHandler(createMessage)
+			initializeHostProvider()
+			const costs: number[] = []
+			const result = await new SubagentRunner(config).run("Research", (update) => {
+				if (update.stats) costs.push(update.stats.totalCost)
+			})
+			assert.equal(result.status, terminal)
+			assert.equal(result.stats.totalCost, 0.2)
+			assert.equal(result.stats.inputTokens, 10)
+			assert.equal(result.stats.outputTokens, 5)
+			assert.ok(costs.includes(0.2))
+			sinon.assert.calledOnce(createMessage)
+		})
+	}
+
+
+	it("keeps inherited Utility permission handling live", () => {
+		let enabled = true
+		const permissionDecisionBinding = {
+			service: { decide: sinon.stub() },
+			configurationRevision: 1,
+		}
+		const baseConfig = createTaskConfig()
+		const taskMessenger = { createCard: sinon.stub() }
+			; (baseConfig as any).taskMessenger = taskMessenger
+		Object.defineProperty(baseConfig, "permissionDecisionBinding", {
+			configurable: true,
+			get: () => (enabled ? permissionDecisionBinding : undefined),
+		})
+		const harness = {
+			baseConfig,
+			runtime: {
+				providerId: baseConfig.providerId,
+				model: baseConfig.model,
+				supportsNativeWebSearch: baseConfig.supportsNativeWebSearch,
+			},
+			options: { agentIdentity: undefined },
+			runState: { activeCommandExecutions: 0 },
+			markActivity: sinon.stub(),
+		}
+		const subagentConfig = (SubagentRunner.prototype as any).createSubagentTaskConfig.call(
+			harness,
+			new TaskState(),
+			baseConfig.coordinator,
+		)
+
+		assert.equal(subagentConfig.permissionDecisionBinding, permissionDecisionBinding)
+		assert.equal(subagentConfig.taskMessenger, taskMessenger)
+		enabled = false
+		assert.equal(subagentConfig.permissionDecisionBinding, undefined)
+	})
+
 	it("emits native tool_use blocks with matching tool_result tool_use_id across turns", async () => {
 		const createMessage = sinon.stub()
 		createMessage.onFirstCall().callsFake(async function* () {
@@ -239,7 +297,8 @@ describe("SubagentRunner", () => {
 		})
 
 		const promptRegistry = PromptRegistry.getInstance()
-		sinon.stub(promptRegistry, "get").callsFake(async () => {
+		sinon.stub(promptRegistry, "get").callsFake(async (context) => {
+			assert.equal(context.lowVerbosityEnabled, true)
 			promptRegistry.nativeTools = [{ name: "list_files" } as any]
 			return "system prompt"
 		})
@@ -364,6 +423,70 @@ describe("SubagentRunner", () => {
 		])
 	})
 
+	// Regression: run() must not await recorder.flush() — a slow/stuck append must not delay terminal completion.
+	it("does not block terminal completion on a slow recorder flush (fire-and-forget)", async () => {
+		expectLoggerErrors()
+		const createMessage = sinon.stub()
+		createMessage.onFirstCall().callsFake(async function* () {
+			yield {
+				type: "tool_calls",
+				tool_call: { function: { id: "call-1", name: DiracDefaultTool.LIST_FILES, arguments: "{}" } },
+			}
+		})
+		createMessage.onSecondCall().callsFake(async function* () {
+			yield {
+				type: "tool_calls",
+				tool_call: {
+					function: {
+						id: "call-2",
+						name: DiracDefaultTool.RESPOND,
+						arguments: JSON.stringify({ operation: ResponseOperation.COMPLETE, text: "done" }),
+					},
+				},
+			}
+		})
+		const promptRegistry = PromptRegistry.getInstance()
+		sinon.stub(promptRegistry, "get").callsFake(async () => {
+			promptRegistry.nativeTools = [{ name: "list_files" } as any, { name: "respond" } as any]
+			return "system prompt"
+		})
+		sinon.stub(skills, "getOrDiscoverSkills").resolves([])
+		stubApiHandler(createMessage)
+		initializeHostProvider()
+
+		const taskDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "dirac-subagent-flush-"))
+		const recorder = await SubagentRunRecorder.create({
+			taskId: "task-flush",
+			agent: { id: 1, name: "Flush Agent" },
+			taskTitle: "Verify fire-and-forget flush",
+			prompt: "List files",
+			timeoutSeconds: 600,
+			includeHistory: false,
+			taskDirectory,
+			runId: "flush",
+		})
+		// Stub flush to hang — if run() awaited it, this test would never resolve.
+		let resolveFlush: () => void = () => { }
+		const flushPromise = new Promise<void>((resolve) => {
+			resolveFlush = resolve
+		})
+		const flushStub = sinon.stub(recorder, "flush").returns(flushPromise)
+
+		try {
+			const runner = new SubagentRunner(createTaskConfigWithListFilesSnapshot(), "subagent", { recorder })
+			const result = await runner.run("List files", () => { })
+
+			assert.equal(result.status, SubagentExecutionStatus.COMPLETED)
+			assert.equal(result.result, "done")
+			assert.ok(flushStub.called, "recorder.flush was called")
+		} finally {
+			resolveFlush()
+			await flushPromise
+			await new Promise((resolve) => setImmediate(resolve))
+			await fs.rm(taskDirectory, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 })
+		}
+	})
+
 	it("returns after the drain timeout when a progress observer never settles", async () => {
 		const createMessage = sinon.stub()
 		createMessage.onFirstCall().callsFake(async function* () {
@@ -401,7 +524,7 @@ describe("SubagentRunner", () => {
 				return new Promise<void>(() => { })
 			})
 			await clock.tickAsync(0)
-			await clock.tickAsync(1_000)
+			await clock.tickAsync(10_000)
 			const result = await resultPromise
 
 			assert.equal(result.status, SubagentExecutionStatus.COMPLETED)
@@ -1087,6 +1210,46 @@ describe("SubagentRunner", () => {
 		}
 	})
 
+	// Regression: on timeout/parent-cancel, the terminal phase must transition
+	// to "cancelled" — not stay "cancelling". The enterPhase call in
+	// recordTerminal was dropped during the FB-15c extraction.
+	it("reports cancelled phase on parent cancel, not cancelling", async () => {
+		expectLoggerErrors()
+		const createMessage = sinon.stub().callsFake(async function* () {
+			await new Promise<void>(() => { })
+		})
+		const promptRegistry = PromptRegistry.getInstance()
+		sinon.stub(promptRegistry, "get").resolves("system prompt")
+		sinon.stub(skills, "getOrDiscoverSkills").resolves([])
+		const abort = stubApiHandler(createMessage)
+		initializeHostProvider()
+
+		const clock = sinon.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] })
+		try {
+			const config = createTaskConfigWithListFilesSnapshot()
+			const updates: any[] = []
+			const runner = new SubagentRunner(config)
+			const runPromise = runner.run("Never settles", (update) => {
+				updates.push(update)
+			})
+			await clock.tickAsync(0)
+			config.taskState.abort = true
+			await clock.tickAsync(50)
+			const result = await runPromise
+
+			assert.equal(result.status, SubagentExecutionStatus.CANCELLED)
+			// Progress must show a terminal "cancelled" phase, not "cancelling".
+			const cancelledUpdates = updates.filter((u) => u.status === SubagentExecutionStatus.CANCELLED)
+			assert.ok(cancelledUpdates.length > 0, "should have at least one cancelled status update")
+			assert.ok(
+				cancelledUpdates.every((u) => u.phase === "cancelled"),
+				`expected phase "cancelled", got phases: ${cancelledUpdates.map((u: any) => u.phase).join(", ")}`,
+			)
+		} finally {
+			clock.restore()
+		}
+	})
+
 	it("records first-chunk liveness warnings without waiting for the overall timeout", async () => {
 		const createMessage = sinon.stub().callsFake(async function* () {
 			await new Promise<void>(() => { })
@@ -1135,5 +1298,4 @@ describe("SubagentRunner", () => {
 			await fs.rm(taskDirectory, { recursive: true, force: true })
 		}
 	})
-
 })

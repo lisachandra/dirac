@@ -1,11 +1,11 @@
 import { type ApiHandler, buildApiHandlerForSelection } from "@core/api"
 import { ActiveModelTextCondenser } from "@core/text-condensation/ActiveModelTextCondenser"
 import type { ContextManager } from "@core/context/context-management/ContextManager"
-import { getHookModelContext } from "@core/hooks/hook-model-context"
+import { getTaskHookModelContext } from "./runtime/TaskRuntimeModelContext"
 import { getHooksEnabledSafe } from "@core/hooks/hooks-utils"
 import { executePreCompactHookWithCleanup, HookCancellationError } from "@core/hooks/precompact-executor"
 import { continuationPrompt } from "@core/prompts/contextManagement"
-import type { StateManager } from "@core/storage/StateManager"
+import type { TaskWorkingConfiguration } from "./runtime/TaskWorkingConfiguration"
 import { ConversationCondensationService } from "@core/text-condensation/ConversationCondensationService"
 import {
 	CONVERSATION_CONTINUATION_TEMPLATE_ID,
@@ -17,7 +17,7 @@ import {
 	isUtilityTextCondensationAvailable,
 } from "@core/text-condensation/UtilityTextCondensationAvailability"
 import { UtilityModelCancelledError, UtilityModelRunner } from "@core/utility-model/UtilityModelRunner"
-import type { ModelProviderSelection } from "@shared/api"
+import type { ApiConfiguration, ModelProviderSelection } from "@shared/api"
 import { CardStatus, ICardHandle } from "@shared/ExtensionMessage"
 import { DiracIcon } from "@shared/icons"
 import { Logger } from "@shared/services/Logger"
@@ -27,6 +27,7 @@ import { getErrorMessage } from "@/shared/errors"
 import type { MessageStateHandler } from "./message-state"
 import type { TaskMessenger } from "./TaskMessenger"
 import type { TaskState } from "./TaskState"
+import { recordUtilityModelUsage } from "./recordUtilityModelUsage"
 import type { HookExecution } from "./types/HookExecution"
 
 export type LocalConversationCompactionSource = "automatic" | "user"
@@ -52,7 +53,7 @@ interface LocalConversationCompactionDependencies {
 	taskState: TaskState
 	messageStateHandler: MessageStateHandler
 	contextManager: ContextManager
-	stateManager: StateManager
+	getWorkingConfiguration: () => TaskWorkingConfiguration
 	taskMessenger: TaskMessenger
 	getApi: () => ApiHandler
 	createActiveModelHandler?: () => ApiHandler
@@ -89,10 +90,10 @@ export class LocalConversationCompaction {
 	isAvailable(): boolean {
 		return isUtilityTextCondensationAvailable(
 			{
-				utilityModelEnabled: this.dependencies.stateManager.getGlobalSettingsKey("utilityModelEnabled"),
-				utilityModelUseCondense: this.dependencies.stateManager.getGlobalSettingsKey("utilityModelUseCondense"),
-				utilityModelUseNewTask: this.dependencies.stateManager.getGlobalSettingsKey("utilityModelUseNewTask"),
-				utilityModelSelection: this.dependencies.stateManager.getGlobalSettingsKey("utilityModelSelection"),
+				utilityModelEnabled: this.dependencies.getWorkingConfiguration().settings.utilityModelEnabled,
+				utilityModelUseCondense: this.dependencies.getWorkingConfiguration().settings.utilityModelUseCondense,
+				utilityModelUseNewTask: this.dependencies.getWorkingConfiguration().settings.utilityModelUseNewTask,
+				utilityModelSelection: this.dependencies.getWorkingConfiguration().settings.utilityModelSelection,
 			},
 			CONVERSATION_CONTINUATION_TEMPLATE_ID,
 			createDefaultTextCondensationTemplateRegistry(),
@@ -102,10 +103,10 @@ export class LocalConversationCompaction {
 	async run(options: LocalConversationCompactionOptions): Promise<LocalConversationCompactionOutcome> {
 		const templates = createDefaultTextCondensationTemplateRegistry()
 		const settings = {
-			utilityModelEnabled: this.dependencies.stateManager.getGlobalSettingsKey("utilityModelEnabled"),
-			utilityModelUseCondense: this.dependencies.stateManager.getGlobalSettingsKey("utilityModelUseCondense"),
-			utilityModelUseNewTask: this.dependencies.stateManager.getGlobalSettingsKey("utilityModelUseNewTask"),
-			utilityModelSelection: this.dependencies.stateManager.getGlobalSettingsKey("utilityModelSelection"),
+			utilityModelEnabled: this.dependencies.getWorkingConfiguration().settings.utilityModelEnabled,
+			utilityModelUseCondense: this.dependencies.getWorkingConfiguration().settings.utilityModelUseCondense,
+			utilityModelUseNewTask: this.dependencies.getWorkingConfiguration().settings.utilityModelUseNewTask,
+			utilityModelSelection: this.dependencies.getWorkingConfiguration().settings.utilityModelSelection,
 		}
 		const selection = getConfiguredUtilityModelSelection(settings.utilityModelSelection)
 		const configuredIdentity = this.getConfiguredIdentity(settings.utilityModelSelection)
@@ -129,9 +130,13 @@ export class LocalConversationCompaction {
 					fallback: true,
 				}
 			} else {
-				handler = buildApiHandlerForSelection(this.dependencies.stateManager.getApiConfiguration(), selection!, {
-					ulid: this.dependencies.ulid,
-				})
+				handler = buildApiHandlerForSelection(
+					structuredClone(this.dependencies.getWorkingConfiguration().apiConfiguration) as ApiConfiguration,
+					selection!,
+					{
+						ulid: this.dependencies.ulid,
+					},
+				)
 				identity = {
 					providerId: selection!.provider,
 					modelId: handler.getModel().id,
@@ -285,7 +290,12 @@ export class LocalConversationCompaction {
 	): Promise<string> {
 		const textCondenser = useFallback
 			? new ActiveModelTextCondenser(handler, templates)
-			: new UtilityModelTextCondenser(new UtilityModelRunner(selection!, () => handler), templates)
+			: new UtilityModelTextCondenser(
+					new UtilityModelRunner(selection!, () => handler, {
+						onUsage: (event) => recordUtilityModelUsage(this.dependencies.taskState, this.dependencies.ulid, event),
+					}),
+					templates,
+				)
 		const service = new ConversationCondensationService({
 			messageState: this.dependencies.messageStateHandler,
 			contextManager: this.dependencies.contextManager,
@@ -302,13 +312,13 @@ export class LocalConversationCompaction {
 		source: LocalConversationCompactionSource,
 		range: [number, number],
 	): Promise<string | undefined> {
-		const hooksEnabled = getHooksEnabledSafe(this.dependencies.stateManager.getGlobalSettingsKey("hooksEnabled"))
+		const hooksEnabled = getHooksEnabledSafe(this.dependencies.getWorkingConfiguration().settings.hooksEnabled)
 		if (!hooksEnabled) return undefined
 
 		const result = await executePreCompactHookWithCleanup({
 			taskId: this.dependencies.taskId,
 			ulid: this.dependencies.ulid,
-			modelContext: getHookModelContext(this.dependencies.getApi(), this.dependencies.stateManager),
+			modelContext: getTaskHookModelContext(this.dependencies.getApi(), this.dependencies.getWorkingConfiguration()),
 			apiConversationHistory: this.dependencies.messageStateHandler.getApiConversationHistory(),
 			conversationHistoryDeletedRange: this.dependencies.taskState.conversationHistoryDeletedRange,
 			contextManager: this.dependencies.contextManager,

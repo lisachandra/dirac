@@ -22,7 +22,7 @@ class EditFileToolHandler {
 	private tool = new EditFileTool()
 	public diagnosticsDelayMs: number = 0
 	public diagnosticsTimeoutMs: number = 0
-	constructor(_validator: any, _forceSyntaxChecker: boolean) {}
+	constructor(_validator: any, _forceSyntaxChecker: boolean) { }
 	async execute(config: TaskConfig, block: any) {
 		const env = new SurfaceAdapter(config)
 		return this.tool.processCall(block.params, env)
@@ -35,6 +35,7 @@ function createConfig() {
 	let lastPath: string | undefined
 	let lastContent: string | undefined
 	const diffViewProvider = {
+		readText: sinon.stub().callsFake(async (filePath: string) => await fs.readFile(filePath, "utf8")),
 		open: sinon.stub().callsFake(async (path: string) => {
 			lastPath = path
 		}),
@@ -68,11 +69,13 @@ function createConfig() {
 	}
 
 	const callbacks = {
+		assertMutationAuthorized: sinon.stub(),
 		say: sinon.stub().resolves(undefined),
 		ask: sinon.stub().resolves({ response: DiracAskResponse.APPROVE }),
 		saveCheckpoint: sinon.stub().resolves(),
 		validation: sinon.stub().resolves(true),
 		shouldAutoApproveToolWithPath: sinon.stub().resolves(true),
+		resolveToolPathPermission: sinon.stub().resolves("auto_approve"),
 		removeLastPartialMessageIfExistsWithType: sinon.stub().resolves(),
 	}
 
@@ -90,16 +93,6 @@ function createConfig() {
 			},
 			diffViewProvider,
 			diracIgnoreController: { validateAccess: () => true },
-			stateManager: {
-				getApiConfiguration: () => ({
-					planModeApiProvider: "openai",
-					actModeApiProvider: "openai",
-				}),
-				getGlobalSettingsKey: (key: string) => {
-					if (key === "mode") return "act"
-					return undefined
-				},
-			},
 		},
 		callbacks,
 		context: createMockContext(),
@@ -136,7 +129,7 @@ describe("EditFileTool – debug syntax", () => {
 	afterEach(async () => {
 		sandbox.restore()
 		HostProvider.reset()
-		await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {})
+		await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => { })
 	})
 
 	it("should report syntax error in Python", async () => {
@@ -198,7 +191,7 @@ describe("EditFileTool – debug syntax", () => {
 		const result = await handler.execute(config, block)
 		assert.ok(typeof result === "string")
 		assert.ok(result.includes("Applied 1 edit(s) successfully"))
-		assert.ok(result.includes("New problems detected after saving the file"))
+		assert.ok(result.includes("Diagnostics:"))
 		assert.ok(result.includes("Found 1 problems"))
 	})
 
@@ -281,7 +274,7 @@ describe("EditFileTool – debug syntax", () => {
 
 		assert.ok(typeof result === "string")
 		assert.ok(result.includes("Applied 1 edit(s) successfully"))
-		assert.ok(result.includes("New problems detected after saving the file"))
+		assert.ok(result.includes("Diagnostics:"))
 		assert.ok(result.includes("Found 1 problems"))
 	})
 })

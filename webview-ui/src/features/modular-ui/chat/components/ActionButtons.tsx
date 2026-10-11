@@ -1,13 +1,13 @@
 import { type DiracMessage, type UIActionButton, UIActionButtonType } from "@shared/ExtensionMessage"
 import { VSCodeButton } from "@vscode/webview-ui-toolkit/react"
-import React, { useCallback, useEffect, useMemo, useState } from "react"
-import { findActiveNewTaskCard } from "../../utils/newTaskCard"
+import React, { useCallback, useEffect, useState } from "react"
+import { isNewTaskCard } from "../../utils/newTaskCard"
+import { useChatStore } from "@/features/chat/store/chatStore"
 import type { ChatState, MessageHandlers } from "../types/chatTypes"
 import { ButtonActionType } from "../utils/buttonConfig"
 
 interface ActionButtonsProps {
 	task?: DiracMessage
-	messages: DiracMessage[]
 	chatState: ChatState
 	messageHandlers: MessageHandlers
 	scrollBehavior: {
@@ -17,7 +17,7 @@ interface ActionButtonsProps {
 	}
 }
 
-const ActionButtons: React.FC<ActionButtonsProps> = ({ task, messages, chatState, messageHandlers, scrollBehavior }) => {
+const ActionButtons: React.FC<ActionButtonsProps> = ({ task, chatState, messageHandlers, scrollBehavior }) => {
 	const {
 		inputValue,
 		selectedImages,
@@ -29,11 +29,13 @@ const ActionButtons: React.FC<ActionButtonsProps> = ({ task, messages, chatState
 	} = chatState
 	const [isProcessing, setIsProcessing] = useState(false)
 
-	// Memoize last messages to avoid unnecessary recalculations
-	const [lastMessage, secondLastMessage] = useMemo(() => {
-		const len = messages.length
-		return len > 0 ? [messages[len - 1], messages[len - 2]] : [undefined, undefined]
-	}, [messages])
+	const { lastMessage, secondLastMessage } = chatState
+	const activeCard = useChatStore((state) => {
+		const activeCardId = state.uiActionState?.activeCardId
+		const activeCardIndex = activeCardId ? state.messageIndexById.get(activeCardId) : undefined
+		const message = activeCardIndex === undefined ? undefined : state.diracMessages[activeCardIndex]
+		return message?.content.type === "card" ? message.content.card : undefined
+	})
 
 	// Single effect to handle all configuration updates
 	useEffect(() => {
@@ -76,8 +78,7 @@ const ActionButtons: React.FC<ActionButtonsProps> = ({ task, messages, chatState
 
 	// Keyboard event handler
 	const globalButtons = uiActionState?.globalButtons || []
-	const activeNewTaskCard = findActiveNewTaskCard(messages, uiActionState?.activeCardId)
-	const promotedCardButtons = activeNewTaskCard ? (uiActionState?.cardButtons ?? []) : []
+	const promotedCardButtons = activeCard && isNewTaskCard(activeCard) ? (uiActionState?.cardButtons ?? []) : []
 	const hasActiveButtons = globalButtons.length > 0
 
 	const handleKeyDown = useCallback(

@@ -7,7 +7,7 @@ import { MessageStateHandler } from "../../core/task/message-state"
 import { TaskState } from "../../core/task/TaskState"
 
 interface CheckpointStorageConfig {
-	readonly enableCheckpoints: boolean
+	enableCheckpoints: boolean
 	readonly taskId: string
 }
 interface CheckpointStorageServices {
@@ -41,6 +41,14 @@ export class CheckpointStorageManager {
 		this.callbacks = callbacks
 	}
 
+	setEnabled(enabled: boolean): void {
+		this.config.enableCheckpoints = enabled
+	}
+
+	isEnabled(): boolean {
+		return this.config.enableCheckpoints
+	}
+
 	getTracker(): CheckpointTracker | undefined {
 		return this.checkpointTracker
 	}
@@ -66,6 +74,7 @@ export class CheckpointStorageManager {
 	 * Uses promise-based synchronization to prevent race conditions when called concurrently.
 	 */
 	async checkpointTrackerCheckAndInit(): Promise<CheckpointTracker | undefined> {
+		if (!this.config.enableCheckpoints) return undefined
 		if (this.checkpointTracker) return this.checkpointTracker
 		if (this.checkpointTrackerInitPromise) return await this.checkpointTrackerInitPromise
 
@@ -192,6 +201,7 @@ export class CheckpointStorageManager {
 	 * Ensures the tracker is initialized, creating it inline if needed (used by restore/diff paths)
 	 */
 	async ensureTrackerInitialized(): Promise<CheckpointTracker | undefined> {
+		if (!this.config.enableCheckpoints) return undefined
 		if (!this.checkpointTracker && !this.checkpointManagerErrorMessage) {
 			try {
 				const workspacePath = await this.getWorkspacePath()

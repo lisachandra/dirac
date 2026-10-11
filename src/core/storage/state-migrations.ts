@@ -3,7 +3,8 @@ import path from "path"
 import * as vscode from "vscode"
 import { HistoryItem } from "@/shared/HistoryItem"
 import { Logger } from "@/shared/services/Logger"
-import { ensureRulesDirectoryExists, readTaskHistoryFromState, writeTaskHistoryToState } from "./disk"
+import { ensureRulesDirectoryExists, readTaskHistoryFromState } from "./disk"
+import { commitTaskHistoryMutations } from "./taskHistory"
 
 export async function migrateWorkspaceToGlobalStorage(context: vscode.ExtensionContext) {
 	// Keys to migrate from workspace storage back to global storage
@@ -78,34 +79,18 @@ export async function migrateTaskHistoryToFile(context: vscode.ExtensionContext)
 			return
 		}
 
-		let finalData: HistoryItem[]
-		let migrationAction: string
-
 		const newLocationData = await readTaskHistoryFromState()
-
-		if (newLocationData.length === 0) {
-			// Move old data to new location
-			finalData = oldLocationData
-			migrationAction = "Migrated task history from old location to new location"
-		} else {
-			// Merge old data (more recent) with new data
-			finalData = [...newLocationData, ...oldLocationData]
-			migrationAction = "Merged task history from old and new locations"
-		}
-
-		// Perform migration operations sequentially - only clear old data if write succeeds
-		await writeTaskHistoryToState(finalData)
-
-		const successfullyWrittenData = await readTaskHistoryFromState()
-
-		if (!Array.isArray(successfullyWrittenData)) {
-			Logger.error("[Storage Migration] Failed to write taskHistory to file: Written data is not an array")
-			return
-		}
-
-		if (successfullyWrittenData.length !== finalData.length) {
+		const migrationAction =
+			newLocationData.length === 0
+				? "Migrated task history from old location to new location"
+				: "Merged task history from old and new locations"
+		const successfullyWrittenData = await commitTaskHistoryMutations([
+			{ kind: "insertMissing", items: oldLocationData },
+		])
+		const writtenIds = new Set(successfullyWrittenData.map((item) => item.id))
+		if (oldLocationData.some((item) => !writtenIds.has(item.id))) {
 			Logger.error(
-				"[Storage Migration] Failed to write taskHistory to file: Written data does not match the old location data",
+				"[Storage Migration] Failed to write taskHistory to file: Not every legacy run was committed",
 			)
 			return
 		}

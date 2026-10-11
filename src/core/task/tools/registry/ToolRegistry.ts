@@ -1,12 +1,14 @@
 import type { DiracToolSpec } from "@/shared/tools"
 import { Logger } from "@/shared/services/Logger"
 import type { SystemPromptContext } from "@core/prompts/system-prompt/types"
+import * as path from "path"
 import type { SkillMetadata } from "@shared/skills"
 import type { IDiracTool } from "../interfaces/IDiracTool"
 import type { TaskConfig } from "../types/TaskConfig"
 import type { DiscoveredTool, ToolSource } from "../discovery/DiscoveredTool"
 import { StateManager } from "@/core/storage/StateManager"
 import { LEGACY_RESPONSE_TOOLS, RESPOND_TOOL_NAME, RESPONSE_OPERATIONS, ResponseParameter } from "@shared/responseTool"
+import Mutex from "p-mutex"
 
 const SOURCE_PRIORITY: Record<ToolSource, number> = { builtin: 0, global: 1, workspace: 2, task: 3 }
 
@@ -20,6 +22,12 @@ const TOOL_OPERATION_SCOPES: Readonly<Record<string, readonly string[]>> = {
 interface ToolAuthorization {
 	allowed: boolean
 	operations?: string[]
+}
+
+export interface UserToolReplacementResult {
+	replaced: boolean
+	enabledNewTool: boolean
+	previousTool?: DiscoveredTool
 }
 
 function resolveToolAuthorization(tool: DiscoveredTool, allowed: readonly string[]): ToolAuthorization {
@@ -61,9 +69,13 @@ function scopeToolSpec(spec: DiracToolSpec, operations: readonly string[]): Dira
 }
 
 export class ToolRegistry {
+	private static readonly accessMutex = new Mutex()
 	private static instance: ToolRegistry | undefined
 	private builtinTools: Map<string, DiscoveredTool> = new Map()
 	private userTools: Map<string, DiscoveredTool> = new Map()
+	private workspaceToolsByRoot: Map<string, Map<string, DiscoveredTool>> = new Map()
+	private taskToolsByOwner: Map<string, Map<string, DiscoveredTool>> = new Map()
+	private defaultWorkspaceKey = ""
 	private enabledOverrides: Map<string, boolean> = new Map()
 	private _version = 0
 
@@ -72,6 +84,11 @@ export class ToolRegistry {
 			this.instance = new ToolRegistry()
 		}
 		return this.instance
+	}
+
+	/** Serialize every production mutation and Task inventory capture of the process-global registry. */
+	static async withExclusiveAccess<T>(operation: (registry: ToolRegistry) => T | Promise<T>): Promise<T> {
+		return this.accessMutex.withLock(async () => operation(this.getInstance()))
 	}
 
 	/** Reset singleton (for testing) */
@@ -95,107 +112,96 @@ export class ToolRegistry {
 		this.builtinTools.set(tool.id, tool)
 	}
 
-	registerUserTool(tool: DiscoveredTool): boolean {
-		if (this.collidesWithBuiltin(tool)) {
-			Logger.warn(`[ToolRegistry] User tool '${tool.id}' conflicts with built-in tool id/name. Skipping.`)
-			return false
+	registerUserTool(tool: DiscoveredTool, workspaceRoot?: string): boolean {
+		if (tool.source === "task") {
+			if (!tool.ownerTaskId) throw new Error(`Task tool '${tool.id}' is missing its owner Task id.`)
+			return this.registerTaskTool(tool.ownerTaskId, tool)
 		}
-
-		const existing = this.findUserToolByIdOrName(tool)
-		if (!existing) {
-			this.userTools.set(tool.id, tool)
-			this._version++
-			return true
+		if (tool.source === "workspace") {
+			const tools = workspaceRoot === undefined ? this.workspaceToolsForModule(tool.modulePath) : this.workspaceToolsForRoot(workspaceRoot)
+			return this.registerSharedUserTool(tools, tool)
 		}
-
-		if (existing.source === tool.source) {
-			return false
-		}
-		// Priority: task > workspace > global > builtin
-		const existingPri = SOURCE_PRIORITY[existing.source] ?? 0
-		const newPri = SOURCE_PRIORITY[tool.source] ?? 0
-		if (newPri > existingPri) {
-			this.userTools.delete(existing.id)
-			this.userTools.set(tool.id, tool)
-			this._version++
-			return true
-		}
-
-		Logger.warn(
-			`[ToolRegistry] User tool '${tool.id}' conflicts with existing tool '${existing.id}' (source: ${existing.source}). Keeping existing.`,
-		)
-		return false
+		return this.registerSharedUserTool(this.userTools, tool)
 	}
 
 	/**
 	 * Atomically adds or replaces the effective user tool. Existing toggle state
 	 * is preserved on replacement; enableIfNew applies only when no tool exists.
 	 */
-	replaceUserTool(tool: DiscoveredTool, enableIfNew = false): boolean {
-		if (this.collidesWithBuiltin(tool)) {
-			Logger.warn(`[ToolRegistry] User tool '${tool.id}' conflicts with built-in tool id/name. Skipping.`)
-			return false
-		}
+	replaceUserTool(tool: DiscoveredTool, enableIfNew = false, workspaceRoot?: string): boolean {
+		return this.replaceUserToolWithResult(tool, enableIfNew, workspaceRoot).replaced
+	}
 
-		const existing = this.findUserToolByIdOrName(tool)
-		if (!existing) {
-			this.userTools.set(tool.id, tool)
-			if (enableIfNew) {
-				this.enabledOverrides.set(tool.id, true)
+	/** Replace a user tool and report whether this operation enabled a newly inserted shared tool. */
+	replaceUserToolWithResult(
+		tool: DiscoveredTool,
+		enableIfNew = false,
+		workspaceRoot?: string,
+	): UserToolReplacementResult {
+		if (tool.source === "task") {
+			if (!tool.ownerTaskId) throw new Error(`Task tool '${tool.id}' is missing its owner Task id.`)
+			const ownerTools = this.taskToolsByOwner.get(tool.ownerTaskId)
+			const previousTool = ownerTools ? this.findToolByCollision(ownerTools.values(), tool) : undefined
+			return {
+				replaced: this.replaceTaskTool(tool.ownerTaskId, tool),
+				enabledNewTool: false,
+				previousTool,
 			}
-			this._version++
-			return true
+		}
+		const tools =
+			tool.source === "workspace"
+				? workspaceRoot === undefined
+					? this.workspaceToolsForModule(tool.modulePath)
+					: this.workspaceToolsForRoot(workspaceRoot)
+				: this.userTools
+		return this.replaceSharedUserTool(tools, tool, enableIfNew)
+	}
+
+	/** Reconcile global and one workspace's tools without replacing another workspace's inventory. */
+	reconcileWorkspaceUserTools(
+		discoveredTools: DiscoveredTool[],
+		forceVersionBump = false,
+		workspaceRoot?: string,
+	): boolean {
+		const nextGlobalTools = new Map<string, DiscoveredTool>()
+		const nextWorkspaceTools = new Map<string, DiscoveredTool>()
+		for (const tool of discoveredTools) {
+			this.registerUserToolInto(tool.source === "workspace" ? nextWorkspaceTools : nextGlobalTools, tool)
 		}
 
-		const existingPriority = SOURCE_PRIORITY[existing.source] ?? 0
-		const newPriority = SOURCE_PRIORITY[tool.source] ?? 0
-		if (existing.source !== tool.source && newPriority <= existingPriority) {
-			Logger.warn(
-				`[ToolRegistry] User tool '${tool.id}' conflicts with existing tool '${existing.id}' (source: ${existing.source}). Keeping existing.`,
-			)
-			return false
+		const workspaceKey = this.workspaceKey(workspaceRoot)
+		this.defaultWorkspaceKey = workspaceKey
+		const currentWorkspaceTools = this.workspaceToolsByRoot.get(workspaceKey) ?? new Map<string, DiscoveredTool>()
+		const changed =
+			!this.sameToolInventory(this.userTools, nextGlobalTools) ||
+			!this.sameToolInventory(currentWorkspaceTools, nextWorkspaceTools)
+		if (!changed) {
+			if (forceVersionBump) this._version++
+			return forceVersionBump
 		}
 
-		const enabledOverride = this.enabledOverrides.get(existing.id)
-		this.userTools.delete(existing.id)
-		this.userTools.set(tool.id, tool)
-		if (existing.id !== tool.id) {
-			this.enabledOverrides.delete(existing.id)
-		}
-		if (enabledOverride !== undefined) {
-			this.enabledOverrides.set(tool.id, enabledOverride)
-		}
+		this.userTools = nextGlobalTools
+		if (nextWorkspaceTools.size === 0) this.workspaceToolsByRoot.delete(workspaceKey)
+		else this.workspaceToolsByRoot.set(workspaceKey, nextWorkspaceTools)
 		this._version++
 		return true
 	}
 
-	/**
-	 * Reconcile global and workspace tools discovered from disk without invalidating
-	 * the registry when their effective inventory has not changed. Task tools are
-	 * runtime state and are retained as the highest-priority source.
-	 */
-	reconcileWorkspaceUserTools(discoveredTools: DiscoveredTool[], forceVersionBump = false): boolean {
-		const nextUserTools = new Map<string, DiscoveredTool>()
-
+	reconcileTaskTools(ownerTaskId: string, discoveredTools: DiscoveredTool[]): string[] {
+		const nextTools = new Map<string, DiscoveredTool>()
 		for (const tool of discoveredTools) {
-			this.registerUserToolInto(nextUserTools, tool)
+			if (tool.ownerTaskId !== ownerTaskId) throw new Error(`Task tool '${tool.id}' has the wrong owner Task id.`)
+			if (this.collidesWithBuiltin(tool)) continue
+			if (this.findToolByCollision(nextTools.values(), tool)) continue
+			nextTools.set(tool.id, tool)
 		}
-		for (const tool of this.userTools.values()) {
-			if (tool.source === "task") {
-				this.registerUserToolInto(nextUserTools, tool)
-			}
+		const currentTools = this.taskToolsByOwner.get(ownerTaskId) ?? new Map<string, DiscoveredTool>()
+		if (!this.sameToolInventory(currentTools, nextTools)) {
+			if (nextTools.size === 0) this.taskToolsByOwner.delete(ownerTaskId)
+			else this.taskToolsByOwner.set(ownerTaskId, nextTools)
+			this._version++
 		}
-
-		if (this.sameUserToolInventory(nextUserTools)) {
-			if (forceVersionBump) {
-				this._version++
-			}
-			return forceVersionBump
-		}
-
-		this.userTools = nextUserTools
-		this._version++
-		return true
+		return [...nextTools.keys()]
 	}
 
 	hasBuiltinTools(): boolean {
@@ -223,8 +229,9 @@ export class ToolRegistry {
 		return tool.source === "builtin"
 	}
 
-	getEnabledTools(): DiscoveredTool[] {
-		return this.getAllTools().filter((tool) => this.isEnabled(tool.id))
+	getEnabledTools(ownerTaskId?: string, workspaceRoot?: string): DiscoveredTool[] {
+		const tools = arguments.length >= 2 ? this.getAllTools(ownerTaskId, workspaceRoot) : this.getAllTools(ownerTaskId)
+		return tools.filter((tool) => this.isEnabledTool(tool))
 	}
 
 	getEnabledSpecs(context: SystemPromptContext): DiracToolSpec[] {
@@ -241,21 +248,47 @@ export class ToolRegistry {
 			.filter((spec) => !spec.contextRequirements || spec.contextRequirements(context))
 	}
 
-	getAllTools(): DiscoveredTool[] {
-		return [...this.builtinTools.values(), ...this.userTools.values()]
+	getAllTools(ownerTaskId?: string, workspaceRoot?: string): DiscoveredTool[] {
+		const globalTools = [...this.builtinTools.values(), ...this.userTools.values()]
+		const workspaceKey = arguments.length >= 2 ? this.workspaceKey(workspaceRoot) : this.defaultWorkspaceKey
+		const workspaceTools = this.workspaceToolsByRoot.get(workspaceKey)?.values() ?? []
+		const sharedTools = this.overlayTaskTools(globalTools, workspaceTools)
+		if (!ownerTaskId) return sharedTools
+		return this.overlayTaskTools(sharedTools, this.taskToolsByOwner.get(ownerTaskId)?.values() ?? [])
 	}
 
-	getConfigurableTools(): DiscoveredTool[] {
-		return this.getAllTools().filter((tool) => tool.exposure.kind === "configurable")
+	getKnownUserToolIds(): string[] {
+		const ids = new Set(this.userTools.keys())
+		for (const tools of this.workspaceToolsByRoot.values()) {
+			for (const id of tools.keys()) ids.add(id)
+		}
+		for (const tools of this.taskToolsByOwner.values()) {
+			for (const id of tools.keys()) ids.add(id)
+		}
+		return [...ids]
 	}
 
-	resolveSkillDependencyTools(activeSkills: readonly SkillMetadata[]): DiscoveredTool[] {
+	getConfigurableTools(ownerTaskId?: string, workspaceRoot?: string): DiscoveredTool[] {
+		const tools =
+			arguments.length >= 2 ? this.getAllTools(ownerTaskId, workspaceRoot) : this.getAllTools(ownerTaskId)
+		return tools.filter((tool) => tool.exposure.kind === "configurable")
+	}
+
+	resolveSkillDependencyTools(
+		activeSkills: readonly SkillMetadata[],
+		ownerTaskId?: string,
+		workspaceRoot?: string,
+	): DiscoveredTool[] {
 		const resolved = new Map<string, DiscoveredTool>()
+		const scopedTools = this.getAllTools(ownerTaskId, workspaceRoot)
 
 		for (const skill of activeSkills) {
 			if (skill.source !== "builtin") continue
 			for (const toolId of skill.toolDependencies ?? []) {
-				const tool = this.getTool(toolId)
+				const tool = scopedTools.find(
+					(candidate) =>
+						candidate.id === toolId || candidate.name === toolId || candidate.spec.name === toolId,
+				)
 				if (!tool) throw new Error(`Built-in skill '${skill.name}' depends on missing tool '${toolId}'.`)
 				if (tool.exposure.kind !== "skill_only") {
 					throw new Error(`Built-in skill '${skill.name}' declares non-skill-only dependency '${toolId}'.`)
@@ -285,6 +318,31 @@ export class ToolRegistry {
 			.map((tool) => tool.factory(config))
 	}
 
+	/** Restore the registry entry replaced by an upsert, or remove a newly inserted entry. */
+	rollbackUserToolReplacement(
+		tool: DiscoveredTool,
+		previousTool: DiscoveredTool | undefined,
+		disableNewTool: boolean,
+		workspaceRoot?: string,
+	): void {
+		if (previousTool) {
+			this.replaceUserTool(previousTool, false, workspaceRoot)
+			return
+		}
+		if (tool.source === "task") {
+			if (!tool.ownerTaskId) throw new Error(`Task tool '${tool.id}' is missing its owner Task id.`)
+			const ownerTools = this.taskToolsByOwner.get(tool.ownerTaskId)
+			if (!ownerTools?.delete(tool.id)) return
+			if (ownerTools.size === 0) this.taskToolsByOwner.delete(tool.ownerTaskId)
+			this._version++
+			return
+		}
+		const tools = tool.source === "workspace" ? this.workspaceToolsForRoot(workspaceRoot) : this.userTools
+		if (!tools.delete(tool.id)) return
+		if (disableNewTool) this.enabledOverrides.delete(tool.id)
+		this._version++
+	}
+
 	isToolAllowed(toolName: string, allowed: string[], operation?: string): boolean {
 		const tool = this.findToolByIdOrName(toolName)
 		if (!tool) {
@@ -301,6 +359,7 @@ export class ToolRegistry {
 	}
 
 	scopeToolForSubagent(tool: DiscoveredTool, allowed: readonly string[]): DiscoveredTool | undefined {
+		if (tool.exposure.kind === "profile_only") return undefined
 		const authorization = resolveToolAuthorization(tool, allowed)
 		if (!authorization.allowed) {
 			return undefined
@@ -363,21 +422,25 @@ export class ToolRegistry {
 	 * Built-ins are kept in a separate map and cannot be removed here.
 	 */
 	clearUserTools(): void {
-		for (const [id, tool] of this.userTools) {
-			if (tool.source !== "task") {
-				this.userTools.delete(id)
-			}
-		}
+		this.userTools.clear()
+		this.workspaceToolsByRoot.clear()
 	}
 
-	/** Remove a single user tool from the registry by id. Returns true if the tool was found and removed. */
+	/** Remove a single shared user tool by id. Task tools are removed by owner. */
 	removeUserTool(toolId: string): boolean {
-		const tool = this.userTools.get(toolId)
-		if (!tool) {
-			return false
+		let removed = this.userTools.delete(toolId)
+		for (const [workspaceKey, tools] of this.workspaceToolsByRoot) {
+			if (tools.delete(toolId)) removed = true
+			if (tools.size === 0) this.workspaceToolsByRoot.delete(workspaceKey)
 		}
-		this.userTools.delete(toolId)
+		if (!removed) return false
 		this.enabledOverrides.delete(toolId)
+		this._version++
+		return true
+	}
+
+	removeTaskTools(ownerTaskId: string): boolean {
+		if (!this.taskToolsByOwner.delete(ownerTaskId)) return false
 		this._version++
 		return true
 	}
@@ -390,6 +453,130 @@ export class ToolRegistry {
 			this.disable(toolId)
 		}
 		StateManager.get().setGlobalState("toolToggles", this.getToggles())
+	}
+
+	private registerSharedUserTool(tools: Map<string, DiscoveredTool>, tool: DiscoveredTool): boolean {
+		if (this.collidesWithBuiltin(tool)) {
+			Logger.warn(`[ToolRegistry] User tool '${tool.id}' conflicts with built-in tool id/name. Skipping.`)
+			return false
+		}
+		const existing = this.findToolByCollision(tools.values(), tool)
+		if (!existing) {
+			tools.set(tool.id, tool)
+			this._version++
+			return true
+		}
+		if (existing.source === tool.source) return false
+		if ((SOURCE_PRIORITY[tool.source] ?? 0) <= (SOURCE_PRIORITY[existing.source] ?? 0)) {
+			Logger.warn(
+				`[ToolRegistry] User tool '${tool.id}' conflicts with existing tool '${existing.id}' (source: ${existing.source}). Keeping existing.`,
+			)
+			return false
+		}
+		tools.delete(existing.id)
+		tools.set(tool.id, tool)
+		this._version++
+		return true
+	}
+
+	private replaceSharedUserTool(
+		tools: Map<string, DiscoveredTool>,
+		tool: DiscoveredTool,
+		enableIfNew: boolean,
+	): UserToolReplacementResult {
+		if (this.collidesWithBuiltin(tool)) {
+			Logger.warn(`[ToolRegistry] User tool '${tool.id}' conflicts with built-in tool id/name. Skipping.`)
+			return { replaced: false, enabledNewTool: false }
+		}
+		const existing = this.findToolByCollision(tools.values(), tool)
+		if (!existing) {
+			tools.set(tool.id, tool)
+			if (enableIfNew) this.enabledOverrides.set(tool.id, true)
+			this._version++
+			return { replaced: true, enabledNewTool: enableIfNew }
+		}
+		if (existing.source !== tool.source && (SOURCE_PRIORITY[tool.source] ?? 0) <= (SOURCE_PRIORITY[existing.source] ?? 0)) {
+			Logger.warn(
+				`[ToolRegistry] User tool '${tool.id}' conflicts with existing tool '${existing.id}' (source: ${existing.source}). Keeping existing.`,
+			)
+			return { replaced: false, enabledNewTool: false }
+		}
+		const enabledOverride = this.enabledOverrides.get(existing.id)
+		tools.delete(existing.id)
+		tools.set(tool.id, tool)
+		if (existing.id !== tool.id) this.enabledOverrides.delete(existing.id)
+		if (enabledOverride !== undefined) this.enabledOverrides.set(tool.id, enabledOverride)
+		this._version++
+		return { replaced: true, enabledNewTool: false, previousTool: existing }
+	}
+
+	private workspaceToolsForRoot(workspaceRoot?: string): Map<string, DiscoveredTool> {
+		const key = this.workspaceKey(workspaceRoot)
+		this.defaultWorkspaceKey = key
+		const tools = this.workspaceToolsByRoot.get(key) ?? new Map<string, DiscoveredTool>()
+		this.workspaceToolsByRoot.set(key, tools)
+		return tools
+	}
+
+	private workspaceToolsForModule(modulePath: string): Map<string, DiscoveredTool> {
+		const normalized = path.resolve(modulePath)
+		const marker = `${path.sep}.dirac${path.sep}tools${path.sep}`
+		const markerIndex = normalized.lastIndexOf(marker)
+		const workspaceRoot = markerIndex >= 0 ? normalized.slice(0, markerIndex) : undefined
+		return this.workspaceToolsForRoot(workspaceRoot)
+	}
+
+	private workspaceKey(workspaceRoot?: string): string {
+		return workspaceRoot ? path.resolve(workspaceRoot) : ""
+	}
+
+	private registerTaskTool(ownerTaskId: string, tool: DiscoveredTool): boolean {
+		if (this.collidesWithBuiltin(tool)) {
+			Logger.warn(`[ToolRegistry] Task tool '${tool.id}' conflicts with built-in tool id/name. Skipping.`)
+			return false
+		}
+		const ownerTools = this.taskToolsByOwner.get(ownerTaskId) ?? new Map<string, DiscoveredTool>()
+		if (this.findToolByCollision(ownerTools.values(), tool)) return false
+		ownerTools.set(tool.id, tool)
+		this.taskToolsByOwner.set(ownerTaskId, ownerTools)
+		this._version++
+		return true
+	}
+
+	private replaceTaskTool(ownerTaskId: string, tool: DiscoveredTool): boolean {
+		if (this.collidesWithBuiltin(tool)) {
+			Logger.warn(`[ToolRegistry] Task tool '${tool.id}' conflicts with built-in tool id/name. Skipping.`)
+			return false
+		}
+		const ownerTools = this.taskToolsByOwner.get(ownerTaskId) ?? new Map<string, DiscoveredTool>()
+		const existing = this.findToolByCollision(ownerTools.values(), tool)
+		if (existing) ownerTools.delete(existing.id)
+		ownerTools.set(tool.id, tool)
+		this.taskToolsByOwner.set(ownerTaskId, ownerTools)
+		this._version++
+		return true
+	}
+
+	private overlayTaskTools(sharedTools: DiscoveredTool[], taskTools: Iterable<DiscoveredTool>): DiscoveredTool[] {
+		const tools = new Map(sharedTools.map((tool) => [tool.id, tool]))
+		for (const taskTool of taskTools) {
+			const existing = this.findToolByCollision(tools.values(), taskTool)
+			if (existing) tools.delete(existing.id)
+			tools.set(taskTool.id, taskTool)
+		}
+		return [...tools.values()]
+	}
+
+	private isEnabledTool(tool: DiscoveredTool): boolean {
+		if (tool.exposure.kind === "skill_only") return false
+		if (tool.exposure.kind === "profile_only") return tool.source === "builtin"
+		if (tool.source === "task") return true
+		const override = this.enabledOverrides.get(tool.id)
+		return override ?? tool.source === "builtin"
+	}
+
+	private findToolByCollision(tools: Iterable<DiscoveredTool>, tool: DiscoveredTool): DiscoveredTool | undefined {
+		return Array.from(tools).find((candidate) => this.toolsCollide(candidate, tool))
 	}
 
 	private registerUserToolInto(tools: Map<string, DiscoveredTool>, tool: DiscoveredTool): boolean {
@@ -418,18 +605,13 @@ export class ToolRegistry {
 		return true
 	}
 
-	private sameUserToolInventory(nextUserTools: Map<string, DiscoveredTool>): boolean {
-		if (this.userTools.size !== nextUserTools.size) {
-			return false
-		}
 
-		for (const [id, currentTool] of this.userTools) {
-			const nextTool = nextUserTools.get(id)
-			if (!nextTool || !this.sameDiscoveredTool(currentTool, nextTool)) {
-				return false
-			}
+	private sameToolInventory(currentTools: Map<string, DiscoveredTool>, nextTools: Map<string, DiscoveredTool>): boolean {
+		if (currentTools.size !== nextTools.size) return false
+		for (const [id, currentTool] of currentTools) {
+			const nextTool = nextTools.get(id)
+			if (!nextTool || !this.sameDiscoveredTool(currentTool, nextTool)) return false
 		}
-
 		return true
 	}
 
@@ -452,14 +634,23 @@ export class ToolRegistry {
 	}
 
 	private getTool(toolId: string): DiscoveredTool | undefined {
-		return this.builtinTools.get(toolId) ?? this.userTools.get(toolId)
+		const defaultWorkspaceTool = this.workspaceToolsByRoot.get(this.defaultWorkspaceKey)?.get(toolId)
+		if (defaultWorkspaceTool) return defaultWorkspaceTool
+		const globalTool = this.builtinTools.get(toolId) ?? this.userTools.get(toolId)
+		if (globalTool) return globalTool
+		for (const tools of this.workspaceToolsByRoot.values()) {
+			const tool = tools.get(toolId)
+			if (tool) return tool
+		}
+		return undefined
 	}
 
 	private assertConfigurable(toolId: string): void {
 		const tool = this.getTool(toolId)
-		if (tool?.exposure.kind === "skill_only") {
-			throw new Error(`Skill-only tool '${toolId}' cannot be enabled or disabled directly.`)
-		}
+		if (!tool || tool.exposure.kind === "configurable") return
+		throw new Error(
+			`${tool.exposure.kind === "skill_only" ? "Skill-only" : "Profile-only"} tool '${toolId}' cannot be enabled or disabled directly.`,
+		)
 	}
 
 	private findToolByIdOrName(toolName: string): DiscoveredTool | undefined {
@@ -473,9 +664,6 @@ export class ToolRegistry {
 		)
 	}
 
-	private findUserToolByIdOrName(tool: DiscoveredTool): DiscoveredTool | undefined {
-		return Array.from(this.userTools.values()).find((existing) => this.toolsCollide(existing, tool))
-	}
 
 	private toolIdentifiers(tool: DiscoveredTool): Set<string> {
 		return new Set([tool.id, tool.name, tool.spec.name].filter(Boolean))

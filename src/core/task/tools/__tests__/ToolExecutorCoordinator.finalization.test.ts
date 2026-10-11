@@ -38,7 +38,7 @@ describe("ToolExecutorCoordinator card finalization", () => {
 		const coordinator = new ToolExecutorCoordinator()
 		coordinator.registerModularTool(new UnfinalizedCardTool(false))
 
-		await assert.rejects(() => coordinator.execute(config, block()), /did not finalize card\(s\).*mock-card-id \(running\)/)
+		await assert.rejects(() => coordinator.execute(config, block()), /left nonterminal card\(s\).*mock-card-\d+ \(running\)/)
 	})
 
 	it("rejects an unfinalized card after a failed tool result", async () => {
@@ -46,6 +46,9 @@ describe("ToolExecutorCoordinator card finalization", () => {
 		const coordinator = new ToolExecutorCoordinator()
 		coordinator.registerModularTool(new UnfinalizedCardTool(true))
 
-		await assert.rejects(() => coordinator.execute(config, block()), /did not finalize card\(s\).*mock-card-id \(running\)/)
+		await assert.rejects(
+			() => coordinator.execute(config, block()),
+			/left nonterminal card\(s\).*mock-card-\d+ \(running\).*Original execution error: expected tool failure/,
+		)
 	})
 })

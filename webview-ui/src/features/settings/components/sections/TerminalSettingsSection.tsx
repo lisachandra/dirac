@@ -98,7 +98,7 @@ export const TerminalSettingsSection: React.FC<TerminalSettingsSectionProps> = (
 				<div className="mb-5" id="terminal-settings-section">
 					<div className="mb-4">
 						<label className="font-medium block mb-1" htmlFor="default-terminal-profile">
-							Default Terminal Profile
+							Default terminal profile
 						</label>
 						<VSCodeDropdown
 							className="w-full"
@@ -112,7 +112,7 @@ export const TerminalSettingsSection: React.FC<TerminalSettingsSectionProps> = (
 							))}
 						</VSCodeDropdown>
 						<p className="text-xs text-(--vscode-descriptionForeground) mt-1">
-							Select the default terminal Dirac will use. 'Default' uses your VSCode global setting.
+							Choose the shell profile Dirac uses. Default follows the host's global terminal setting.
 						</p>
 					</div>
 
@@ -141,18 +141,18 @@ export const TerminalSettingsSection: React.FC<TerminalSettingsSectionProps> = (
 							<VSCodeCheckbox
 								checked={terminalReuseEnabled ?? true}
 								onClick={(e: any) => updateSetting("terminalReuseEnabled", e.target.checked === true)}>
-								Enable aggressive terminal reuse
+								Reuse existing terminals
 							</VSCodeCheckbox>
 						</div>
 						<p className="text-xs text-(--vscode-descriptionForeground)">
-							When enabled, Dirac will reuse existing terminal windows that aren't in the current working directory.
-							Disable this if you experience issues with task lockout after a terminal command.
+							Reuse idle terminal windows, including terminals opened in another working directory. Disable this if
+							commands become locked out.
 						</p>
 					</div>
 					{isVsCodePlatform && (
 						<div className="mb-4">
 							<label className="font-medium block mb-1" htmlFor="terminal-execution-mode">
-								Terminal Execution Mode
+								Execution mode
 							</label>
 							<VSCodeDropdown
 								className="w-full"

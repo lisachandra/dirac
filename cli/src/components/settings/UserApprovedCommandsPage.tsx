@@ -1,25 +1,36 @@
 import type { UserApprovedCommand, UserApprovedCommandMatch } from "@shared/UserApprovedCommand"
+import { SETTINGS_HELP } from "@shared/settings-presentation"
 import { Box, Text, useInput } from "ink"
 import { useEffect, useState } from "react"
 // biome-ignore lint/correctness/noUnusedImports: React is needed for JSX at runtime
 import React from "react"
 import { theme } from "../../constants/theme"
+import { useScrollableList } from "../../hooks/useScrollableList"
 import { shouldIgnoreTerminalInput } from "../../utils/input"
 
 interface UserApprovedCommandsPageProps {
 	commands: UserApprovedCommand[]
 	isActive: boolean
+	maxRows: number
 	onChange: (commands: UserApprovedCommand[]) => Promise<boolean>
 	onClose: () => void
 }
 
-export const UserApprovedCommandsPage = ({ commands, isActive, onChange, onClose }: UserApprovedCommandsPageProps) => {
+export const UserApprovedCommandsPage = ({ commands, isActive, maxRows, onChange, onClose }: UserApprovedCommandsPageProps) => {
 	const [selectedIndex, setSelectedIndex] = useState(0)
 	const [editingIndex, setEditingIndex] = useState<number | null>(null)
 	const [command, setCommand] = useState("")
 	const [match, setMatch] = useState<UserApprovedCommandMatch>("exact")
 	const [error, setError] = useState<string | null>(null)
 	const itemCount = commands.length + 1
+	const { visibleStart, visibleCount, showTopIndicator, showBottomIndicator } = useScrollableList(
+		itemCount,
+		selectedIndex,
+		Math.max(1, maxRows - 8),
+	)
+	const visibleCommands = commands.slice(visibleStart, Math.min(commands.length, visibleStart + visibleCount))
+	const showAddCommand = visibleStart + visibleCount > commands.length
+	const selectedCommand = commands[selectedIndex]
 
 	useEffect(() => {
 		setSelectedIndex((current) => Math.min(current, itemCount - 1))
@@ -117,12 +128,8 @@ export const UserApprovedCommandsPage = ({ commands, isActive, onChange, onClose
 						? "This entry approves only the complete command. Added arguments are not covered."
 						: "This entry also approves the same command with any additional arguments."}
 				</Text>
-				{match === "prefix" && (
-					<Text color={theme.warning}>Choose this only when you trust every possible argument.</Text>
-				)}
-				<Text color={theme.muted}>
-					Chained commands are checked one part at a time. File redirects are not covered; 2&gt;&amp;1 is ignored when matching.
-				</Text>
+				{match === "prefix" && <Text color={theme.warning}>{SETTINGS_HELP.approvedCommandPrefix}</Text>}
+				<Text color={theme.muted}>{SETTINGS_HELP.approvedCommandMatching}</Text>
 				{error && <Text color={theme.error}>{error}</Text>}
 				<Text color={theme.muted}>Type command · Tab change scope · Enter save · Esc cancel</Text>
 			</Box>
@@ -135,20 +142,32 @@ export const UserApprovedCommandsPage = ({ commands, isActive, onChange, onClose
 				Use care: Matching commands run without confirmation and bypass Dirac’s built-in command safety validation.
 				Configured permission rules still apply.
 			</Text>
-			{commands.map((entry, index) => (
-				<Text key={`${entry.match}:${entry.command}`}>
-					<Text bold={selectedIndex === index} color={selectedIndex === index ? theme.primary : theme.subtle}>
-						{selectedIndex === index ? "❯ " : "  "}
+			{showTopIndicator && <Text color={theme.muted}>… {visibleStart} more above</Text>}
+			{visibleCommands.map((entry, index) => {
+				const actualIndex = visibleStart + index
+				return (
+					<Text key={`${entry.match}:${entry.command}`}>
+						<Text
+							bold={selectedIndex === actualIndex}
+							color={selectedIndex === actualIndex ? theme.primary : theme.subtle}>
+							{selectedIndex === actualIndex ? "❯ " : "  "}
+						</Text>
+						<Text bold={selectedIndex === actualIndex}>{entry.command}</Text>
+						<Text color={theme.muted}> · {entry.match === "exact" ? "Exact only" : "Any arguments"}</Text>
 					</Text>
-					<Text bold={selectedIndex === index}>{entry.command}</Text>
-					<Text color={theme.muted}> · {entry.match === "exact" ? "Exact only" : "Any arguments"}</Text>
+				)
+			})}
+			{showAddCommand && (
+				<Text
+					bold={selectedIndex === commands.length}
+					color={selectedIndex === commands.length ? theme.primary : theme.text}>
+					{selectedIndex === commands.length ? "❯ " : "  "}Add command
 				</Text>
-			))}
-			<Text bold={selectedIndex === commands.length} color={selectedIndex === commands.length ? theme.primary : theme.text}>
-				{selectedIndex === commands.length ? "❯ " : "  "}Add command
-			</Text>
+			)}
+			{showBottomIndicator && <Text color={theme.muted}>… {itemCount - visibleStart - visibleCount} more below</Text>}
+			{selectedCommand?.match === "prefix" && <Text color={theme.warning}>{SETTINGS_HELP.approvedCommandPrefix}</Text>}
+			<Text color={theme.muted}>{SETTINGS_HELP.approvedCommandMatching}</Text>
 			{error && <Text color={theme.error}>{error}</Text>}
-			<Text color={theme.muted}>↑/↓ select · Enter edit/add · a add · d delete · Esc close</Text>
 		</Box>
 	)
 }

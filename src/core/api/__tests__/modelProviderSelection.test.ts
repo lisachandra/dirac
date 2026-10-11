@@ -45,6 +45,17 @@ describe("modelProviderSelectionUpdates", () => {
 		assert.equal(bedrock.actModeAwsBedrockCustomSelected, true)
 		assert.equal(bedrock.actModeAwsBedrockCustomModelBaseId, "anthropic.claude-base")
 	})
+
+	it("preserves Standard for speed-aware providers and clears invalid Fast selections", () => {
+		const standard = modelProviderSelectionUpdates("act", selection("anthropic", "claude-opus-4-6"), "standard")
+		assert.equal("actModeInferenceSpeed" in standard, false)
+
+		const fast = modelProviderSelectionUpdates("act", selection("anthropic", "claude-opus-4-6"), "fast")
+		assert.equal(fast.actModeInferenceSpeed, "default")
+
+		const unsupported = modelProviderSelectionUpdates("act", selection("openrouter", "openrouter/utility"), "standard")
+		assert.equal(unsupported.actModeInferenceSpeed, "default")
+	})
 })
 
 describe("createApiConfigurationForModelProviderSelection", () => {

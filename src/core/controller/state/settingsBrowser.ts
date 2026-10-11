@@ -2,12 +2,14 @@ import { UpdateSettingsRequest } from "@shared/proto/dirac/state"
 import { BrowserSettings as SharedBrowserSettings } from "../../../shared/BrowserSettings"
 import { Controller } from ".."
 
-/** Merge browser settings from webview request — uses `in` check for protobuf-es fields that always include the key */
-export function mergeBrowserSettingsWebview(controller: Controller, request: UpdateSettingsRequest): void {
-	if (request.browserSettings === undefined) return
-	const current = controller.stateManager.getGlobalSettingsKey("browserSettings")
+/** Merge one webview browser patch into an explicitly selected configuration base. */
+export function buildBrowserSettingsWebview(
+	current: SharedBrowserSettings,
+	request: UpdateSettingsRequest,
+): SharedBrowserSettings | undefined {
+	if (request.browserSettings === undefined) return undefined
 	const req = request.browserSettings
-	const merged: SharedBrowserSettings = {
+	return {
 		...current,
 		viewport: {
 			width: req.viewport?.width || current.viewport.width,
@@ -15,12 +17,18 @@ export function mergeBrowserSettingsWebview(controller: Controller, request: Upd
 		},
 		remoteBrowserEnabled: req.remoteBrowserEnabled === undefined ? current.remoteBrowserEnabled : req.remoteBrowserEnabled,
 		remoteBrowserHost: req.remoteBrowserHost === undefined ? current.remoteBrowserHost : req.remoteBrowserHost,
-		// Protobuf-es always includes the key (set to undefined), so `in` check is always true
+		// Protobuf-es always includes these keys (set to undefined), so preserve the
+		// established behavior of treating that owned undefined as an explicit clear.
 		chromeExecutablePath: "chromeExecutablePath" in req ? req.chromeExecutablePath : current.chromeExecutablePath,
 		disableToolUse: req.disableToolUse === undefined ? current.disableToolUse : req.disableToolUse,
 		customArgs: "customArgs" in req ? req.customArgs : current.customArgs,
 	}
-	controller.stateManager.setGlobalState("browserSettings", merged)
+}
+
+/** Merge and persist browser settings from a webview request. */
+export function mergeBrowserSettingsWebview(controller: Controller, request: UpdateSettingsRequest): void {
+	const merged = buildBrowserSettingsWebview(controller.stateManager.getGlobalSettingsKey("browserSettings"), request)
+	if (merged !== undefined) controller.stateManager.setGlobalState("browserSettings", merged)
 }
 
 /** Merge browser settings from CLI request — uses `!== undefined` check for explicitly set fields */

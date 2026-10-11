@@ -1,4 +1,4 @@
-import { BANNER_DATA, BannerAction, BannerActionType, BannerCardData } from "@shared/dirac/banner"
+import { BANNER_DATA, BannerCardData } from "@shared/dirac/banner"
 import { EmptyRequest } from "@shared/proto/dirac/common"
 import type { Worktree } from "@shared/proto/dirac/worktree"
 import { TrackWorktreeViewOpenedRequest } from "@shared/proto/dirac/worktree"
@@ -7,10 +7,10 @@ import React, { useCallback, useEffect, useMemo, useRef, useState, memo } from "
 import { useAppStore } from "@/app/store/appStore"
 import { useDiracAuth } from "@/context/DiracAuthContext"
 import HistoryPreview from "./HistoryPreview"
-import { useApiConfigurationHandlers } from "@/features/settings/components/utils/useApiConfigurationHandlers"
+import { useBannerAction } from "@/features/banners/hooks/useBannerAction"
 import { useSettingsStore } from "@/features/settings/store/settingsStore"
 import CreateWorktreeModal from "@/features/worktrees/components/CreateWorktreeModal"
-import { StateServiceClient, UiServiceClient, WorktreeServiceClient } from "@/shared/api/grpc-client"
+import { StateServiceClient, WorktreeServiceClient } from "@/shared/api/grpc-client"
 import { convertBannerData } from "@/shared/lib/bannerUtils"
 import { getCurrentPlatform } from "@/shared/lib/platformUtils"
 import BannerCarousel from "@/shared/ui/BannerCarousel"
@@ -60,11 +60,9 @@ const ModularWelcomeSection: React.FC<ModularWelcomeSectionProps> = ({
 	}, [])
 
 	const { diracUser } = useDiracAuth()
-	const { openRouterModels, worktreesEnabled, banners, welcomeBanners } = useSettingsStore()
-	const navigateToSettings = useAppStore((state) => state.navigateToSettings)
-	const navigateToSettingsModelPicker = useAppStore((state) => state.navigateToSettingsModelPicker)
+	const { worktreesEnabled, banners, welcomeBanners } = useSettingsStore()
 	const navigateToWorktrees = useAppStore((state) => state.navigateToWorktrees)
-	const { handleFieldsChange } = useApiConfigurationHandlers()
+	const handleBannerAction = useBannerAction()
 
 	// Show modal when there's a new announcement and we haven't shown it this session.
 	// We delay opening slightly to wait for welcome banners from the backend API,
@@ -164,65 +162,6 @@ const ModularWelcomeSection: React.FC<ModularWelcomeSectionProps> = ({
 			return true
 		})
 	}, [isBannerDismissed, diracUser])
-
-	/**
-	 * Action handler - maps action types to actual implementations
-	 */
-	const handleBannerAction = useCallback(
-		(action: BannerAction) => {
-			switch (action.action) {
-				case BannerActionType.Link:
-					if (action.arg) {
-						UiServiceClient.openUrl({ value: action.arg }).catch(console.error)
-					}
-					break
-
-				case BannerActionType.SetModel: {
-					if (!action.arg) {
-						break
-					}
-					const modelId = action.arg
-					handleFieldsChange({
-						planModeOpenRouterModelId: modelId,
-						actModeOpenRouterModelId: modelId,
-						planModeOpenRouterModelInfo: openRouterModels[modelId],
-						actModeOpenRouterModelInfo: openRouterModels[modelId],
-						planModeApiProvider: "openrouter",
-						actModeApiProvider: "openrouter",
-					})
-					navigateToSettingsModelPicker({ targetSection: "api-config" })
-					break
-				}
-
-				case BannerActionType.ShowAccount:
-					break
-
-				case BannerActionType.ShowApiSettings:
-					if (action.arg) {
-						handleFieldsChange({
-							planModeApiProvider: action.arg as any,
-							actModeApiProvider: action.arg as any,
-						})
-					}
-					navigateToSettings("api-config")
-					break
-
-				case BannerActionType.ShowFeatureSettings:
-					navigateToSettings("features")
-					break
-
-				case BannerActionType.InstallCli:
-					StateServiceClient.installDiracCli({}).catch((error) =>
-						console.error("Failed to initiate CLI installation:", error),
-					)
-					break
-
-				default:
-					console.warn("Unknown banner action:", action.action)
-			}
-		},
-		[handleFieldsChange, openRouterModels, navigateToSettings, navigateToSettingsModelPicker],
-	)
 
 	/**
 	 * Dismissal handler - updates version tracking

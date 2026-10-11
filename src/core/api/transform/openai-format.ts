@@ -218,8 +218,9 @@ function convertAssistantMessage(
 		role: "assistant",
 		content: finalContent,
 		tool_calls: tool_calls.length > 0 ? tool_calls : undefined,
-		// @ts-expect-error
-		reasoning_details: consolidatedReasoningDetails.length > 0 ? consolidatedReasoningDetails : undefined,
+		...(consolidatedReasoningDetails.length > 0
+			? { reasoning_details: consolidatedReasoningDetails }
+			: {}),
 	})
 }
 

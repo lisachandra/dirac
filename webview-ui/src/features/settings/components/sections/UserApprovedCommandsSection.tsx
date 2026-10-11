@@ -1,4 +1,5 @@
 import type { UserApprovedCommand, UserApprovedCommandMatch } from "@shared/UserApprovedCommand"
+import { SETTINGS_HELP } from "@shared/settings-presentation"
 import { VSCodeButton, VSCodeTextField } from "@vscode/webview-ui-toolkit/react"
 import { useEffect, useRef, useState } from "react"
 import { useSettingsStore } from "@/features/settings/store/settingsStore"
@@ -82,6 +83,7 @@ export const UserApprovedCommandsSection = ({ renderSectionHeader }: UserApprove
 	}
 
 	const edit = (entry: UserApprovedCommand, index: number) => {
+		if (editingIndex !== null) return
 		setCommand(entry.command)
 		setMatch(entry.match)
 		setEditingIndex(index)
@@ -89,17 +91,17 @@ export const UserApprovedCommandsSection = ({ renderSectionHeader }: UserApprove
 	}
 
 	const remove = async (index: number) => {
-		const saved = await persistCommands(userApprovedCommands.filter((_, candidateIndex) => candidateIndex !== index))
-		if (saved && editingIndex === index) cancelEdit()
+		if (editingIndex !== null) return
+		await persistCommands(userApprovedCommands.filter((_, candidateIndex) => candidateIndex !== index))
 	}
 
 	return (
-		<div>
+		<div id="user-approved-commands">
 			{renderSectionHeader("user-approved-commands")}
 			<Section>
 				<p className="m-0 text-sm text-(--vscode-descriptionForeground)">
-					Use care: Matching commands run without confirmation and bypass Dirac’s built-in command safety validation.
-					Configured permission rules still apply.
+					Matching commands bypass confirmation and built-in command safety validation; configured permission rules
+					still apply.
 				</p>
 
 				<div className="flex flex-col gap-2 rounded border border-(--vscode-widget-border) p-3">
@@ -124,11 +126,10 @@ export const UserApprovedCommandsSection = ({ renderSectionHeader }: UserApprove
 					<fieldset className="flex flex-col gap-2" disabled={isSaving}>
 						<legend className="mb-1 font-medium">Approval scope</legend>
 						<label
-							className={`flex cursor-pointer items-start gap-2 rounded border p-3 ${
-								match === "exact"
+							className={`flex cursor-pointer items-start gap-2 rounded border p-3 ${match === "exact"
 									? "border-(--vscode-focusBorder) bg-(--vscode-list-hoverBackground)"
 									: "border-(--vscode-widget-border)"
-							}`}>
+								}`}>
 							<input
 								checked={match === "exact"}
 								className="mt-0.5 shrink-0"
@@ -150,11 +151,10 @@ export const UserApprovedCommandsSection = ({ renderSectionHeader }: UserApprove
 							</span>
 						</label>
 						<label
-							className={`flex cursor-pointer items-start gap-2 rounded border p-3 ${
-								match === "prefix"
+							className={`flex cursor-pointer items-start gap-2 rounded border p-3 ${match === "prefix"
 									? "border-(--vscode-focusBorder) bg-(--vscode-list-hoverBackground)"
 									: "border-(--vscode-widget-border)"
-							}`}>
+								}`}>
 							<input
 								checked={match === "prefix"}
 								className="mt-0.5 shrink-0"
@@ -173,12 +173,10 @@ export const UserApprovedCommandsSection = ({ renderSectionHeader }: UserApprove
 					</fieldset>
 					{match === "prefix" && (
 						<p className="m-0 text-xs text-(--vscode-editorWarning-foreground)">
-							Choose this only when you trust this command with every possible argument.
+							{SETTINGS_HELP.approvedCommandPrefix}
 						</p>
 					)}
-					<p className="m-0 text-xs text-(--vscode-descriptionForeground)">
-						Each part of a chained command must be approved separately. File redirects are not covered; 2&gt;&amp;1 is ignored when matching.
-					</p>
+					<p className="m-0 text-xs text-(--vscode-descriptionForeground)">{SETTINGS_HELP.approvedCommandMatching}</p>
 					{error && <p className="m-0 text-xs text-(--vscode-errorForeground)">{error}</p>}
 					<div className="flex justify-end gap-2">
 						{editingIndex !== null && (
@@ -205,10 +203,16 @@ export const UserApprovedCommandsSection = ({ renderSectionHeader }: UserApprove
 								<span className="shrink-0 text-xs text-(--vscode-descriptionForeground)">
 									{entry.match === "exact" ? "Exact only" : "Any arguments"}
 								</span>
-								<VSCodeButton appearance="secondary" disabled={isSaving} onClick={() => edit(entry, index)}>
+								<VSCodeButton
+									appearance="secondary"
+									disabled={isSaving || editingIndex !== null}
+									onClick={() => edit(entry, index)}>
 									Edit
 								</VSCodeButton>
-								<VSCodeButton appearance="secondary" disabled={isSaving} onClick={() => void remove(index)}>
+								<VSCodeButton
+									appearance="secondary"
+									disabled={isSaving || editingIndex !== null}
+									onClick={() => void remove(index)}>
 									Delete
 								</VSCodeButton>
 							</div>

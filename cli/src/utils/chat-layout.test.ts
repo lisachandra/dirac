@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest"
-import { calculateChatLayoutRows, calculatePermissionModalLayout } from "./chat-layout"
+import {
+	calculateChatLayoutRows,
+	calculateGoalSummaryRows,
+	calculatePermissionModalLayout,
+	shouldShowGoalFooter,
+} from "./chat-layout"
 
 describe("calculateChatLayoutRows", () => {
 	it.each([1, 2, 6, 12, 24])("keeps allocations within a %i-row terminal", (terminalRows) => {
@@ -15,6 +20,36 @@ describe("calculateChatLayoutRows", () => {
 		expect(layout.activeContentRows).toBeLessThanOrEqual(layout.liveViewportRows)
 	})
 })
+describe("Goal summary allocation", () => {
+	it("reserves compact Goal and footer rows while preserving a short-terminal transcript", () => {
+		const goalSummaryRows = calculateGoalSummaryRows(12, false)
+		const layout = calculateChatLayoutRows({
+			terminalRows: 12,
+			hasConversationContent: true,
+			hasComposer: true,
+			hasFooter: true,
+			hasPanel: false,
+			footerRows: 2,
+			goalSummaryRows,
+		})
+
+		expect(goalSummaryRows).toBe(5)
+		expect(layout.liveViewportRows).toBe(1)
+	})
+
+	it("shrinks the summary and removes its footer reservation in very short terminals", () => {
+		expect(calculateGoalSummaryRows(8, false)).toBe(4)
+		expect(calculateGoalSummaryRows(6, false)).toBe(2)
+		expect(shouldShowGoalFooter(8)).toBe(false)
+		expect(shouldShowGoalFooter(10)).toBe(true)
+	})
+
+	it("bounds expanded details to leave transcript and composer space", () => {
+		expect(calculateGoalSummaryRows(24, true)).toBe(15)
+		expect(calculateGoalSummaryRows(40, true)).toBe(16)
+	})
+})
+
 describe("stable live viewport", () => {
 	it("keeps the same allocation while activity content changes", () => {
 		const layout = calculateChatLayoutRows({

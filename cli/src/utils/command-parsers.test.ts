@@ -1,11 +1,27 @@
 import { InvalidArgumentError } from "commander"
 import { describe, expect, it } from "vitest"
 import {
+	parseInferenceSpeed,
 	parseNonNegativeInteger,
 	parsePositiveInteger,
 	parseReasoningEffort,
 	parseThinkingBudget,
+	parseToolIdentifiers,
 } from "./command-parsers"
+
+describe("parseToolIdentifiers", () => {
+	it("parses CSV values, trims whitespace, deduplicates, and accumulates repeated options", () => {
+		expect(parseToolIdentifiers("read_file, edit_file,read_file", ["search_files"])).toEqual([
+			"search_files",
+			"read_file",
+			"edit_file",
+		])
+	})
+
+	it.each(["", " ", ",", "read_file,", ",read_file", "read_file,,edit_file"])("rejects %j", (value) => {
+		expect(() => parseToolIdentifiers(value)).toThrow(InvalidArgumentError)
+	})
+})
 
 describe("parsePositiveInteger", () => {
 	it.each(["1", "20", "9007199254740991"])("accepts %s", (value) => {
@@ -46,5 +62,18 @@ describe("parseReasoningEffort", () => {
 
 	it("rejects unknown reasoning efforts", () => {
 		expect(() => parseReasoningEffort("extreme")).toThrow("Reasoning effort must be one of")
+	})
+})
+
+
+describe("parseInferenceSpeed", () => {
+	it("accepts supported speeds case-insensitively", () => {
+		expect(parseInferenceSpeed("DEFAULT")).toBe("default")
+		expect(parseInferenceSpeed("STANDARD")).toBe("standard")
+		expect(parseInferenceSpeed("FAST")).toBe("fast")
+	})
+
+	it("rejects unknown speeds", () => {
+		expect(() => parseInferenceSpeed("turbo")).toThrow("Inference speed must be one of")
 	})
 })

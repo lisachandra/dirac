@@ -78,7 +78,7 @@ describe("ACP session runtime configuration", () => {
 			settings: {
 				mode: "act",
 				actModeApiProvider: "deepseek",
-				actModeApiModelId: "deepseek-v4-flash",
+				actModeApiModelId: "deepseek-flash",
 			},
 			cwd: "/workspace",
 			createdAt: 123,
@@ -91,13 +91,24 @@ describe("ACP session runtime configuration", () => {
 			settings: {
 				mode: "act",
 				actModeApiProvider: "deepseek",
-				actModeApiModelId: "deepseek-v4-flash",
+				actModeApiModelId: "deepseek-flash",
 			},
 		})
 		for (const key of TASK_RUNTIME_SETTINGS_KEYS) {
 			expect(Object.hasOwn(restored!.settings, key)).toBe(true)
 		}
 	})
+	it("migrates legacy Anthropic Fast runtime settings and malformed speed values", () => {
+		const copied = copyTaskRuntimeSettings({
+			actModeApiProvider: "anthropic",
+			actModeApiModelId: "claude-opus-4-8:1m:fast",
+			planModeInferenceSpeed: "invalid" as never,
+		})
+		expect(copied.actModeApiModelId).toBe("claude-opus-4-8")
+		expect(copied.actModeInferenceSpeed).toBe("fast")
+		expect(copied.planModeInferenceSpeed).toBe("default")
+	})
+
 	it("stores sessions independently and reads the legacy aggregate format", () => {
 		const dataDir = temporaryDirectory()
 		setSessionRuntimeConfig(dataDir, "session-a", { settings: { mode: "act" } })

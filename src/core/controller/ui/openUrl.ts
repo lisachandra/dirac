@@ -1,7 +1,7 @@
 import type { StringRequest } from "@shared/proto/dirac/common"
 import { Empty } from "@shared/proto/dirac/common"
 import { Logger } from "@/shared/services/Logger"
-import { openUrlInBrowser } from "../../../utils/github-url-utils"
+import { openExternal } from "@/utils/env"
 import type { Controller } from "../index"
 
 /**
@@ -12,7 +12,8 @@ import type { Controller } from "../index"
  */
 export async function openUrl(_controller: Controller, request: StringRequest): Promise<Empty> {
 	try {
-		await openUrlInBrowser(request.value)
+		// Opening a verification page must not overwrite a device code the user just copied.
+		await openExternal(request.value)
 		return Empty.create({})
 	} catch (error) {
 		Logger.error(`Failed to open URL: ${error}`)

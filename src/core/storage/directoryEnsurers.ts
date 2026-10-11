@@ -1,49 +1,79 @@
+import type { Dirent } from "fs"
 import fs from "fs/promises"
-import os from "os"
 import * as path from "path"
-import { getDocumentsPath } from "./paths"
+import { Logger } from "@/shared/services/Logger"
 import { getGlobalStorageDir } from "./globalStorageDir"
+import { getDiracHomePath, getDocumentsPath } from "./paths"
 
 // Ensures the per-task directory exists and returns its path.
 export async function ensureTaskDirectoryExists(taskId: string): Promise<string> {
 	return getGlobalStorageDir("tasks", taskId)
 }
 
-// Ensures the global Rules directory exists, falling back to ~/Documents/Dirac/Rules.
-export async function ensureRulesDirectoryExists(): Promise<string> {
-	const userDocumentsPath = await getDocumentsPath()
-	const diracRulesDir = path.join(userDocumentsPath, "Dirac", "Rules")
-	try {
-		await fs.mkdir(diracRulesDir, { recursive: true })
-	} catch (_error) {
-		return path.join(os.homedir(), "Documents", "Dirac", "Rules")
-	}
-	return diracRulesDir
+// Expected legacy-path errors: ENOENT (dir missing), EPERM/EACCES (TCC-protected ~/Documents).
+function isExpectedMigrationError(error: unknown): boolean {
+	const code = (error as NodeJS.ErrnoException).code
+	return code === "ENOENT" || code === "EPERM" || code === "EACCES"
 }
 
-// Ensures the global Workflows directory exists, falling back to ~/Documents/Dirac/Workflows.
-export async function ensureWorkflowsDirectoryExists(): Promise<string> {
-	const userDocumentsPath = await getDocumentsPath()
-	const diracWorkflowsDir = path.join(userDocumentsPath, "Dirac", "Workflows")
+// Copies a single file, skipping if dest exists. Per-file isolation — one failure doesn't block others.
+async function migrateFile(src: string, dest: string): Promise<void> {
 	try {
-		await fs.mkdir(diracWorkflowsDir, { recursive: true })
-	} catch (_error) {
-		return path.join(os.homedir(), "Documents", "Dirac", "Workflows")
+		await fs.copyFile(src, dest, fs.constants.COPYFILE_EXCL)
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "EEXIST") Logger.warn(`migration: skipping ${src}: ${error}`)
 	}
-	return diracWorkflowsDir
 }
 
-// Ensures the global Hooks directory exists, falling back to ~/Documents/Dirac/Hooks.
-export async function ensureHooksDirectoryExists(): Promise<string> {
-	const userDocumentsPath = await getDocumentsPath()
-	const diracHooksDir = path.join(userDocumentsPath, "Dirac", "Hooks")
+// Reads a legacy source directory, skipping only unavailable or inaccessible legacy paths.
+async function readLegacyDir(src: string): Promise<Dirent<string>[] | undefined> {
 	try {
-		await fs.mkdir(diracHooksDir, { recursive: true })
-	} catch (_error) {
-		return path.join(os.homedir(), "Documents", "Dirac", "Hooks")
+		return await fs.readdir(src, { withFileTypes: true })
+	} catch (error) {
+		if (isExpectedMigrationError(error)) return undefined
+		Logger.warn(`migration: failed ${src}: ${error}`)
+		throw error
 	}
-	return diracHooksDir
 }
+
+// Recursively migrates src → dest. Source access is checked before mutating the destination.
+async function migrateDir(src: string, dest: string): Promise<void> {
+	const entries = await readLegacyDir(src)
+	if (!entries) return
+
+	await fs.mkdir(dest, { recursive: true })
+	await Promise.all(
+		entries.map(async (entry) => {
+			const s = path.join(src, entry.name)
+			const d = path.join(dest, entry.name)
+			if (entry.isDirectory()) await migrateDir(s, d)
+			else await migrateFile(s, d)
+		}),
+	)
+}
+
+// Migrates legacy ~/Documents/Dirac/<subdir> → ~/.dirac/<subdir> recursively, skipping existing files.
+async function migrateFromDocumentsDir(subdir: string, destDir: string): Promise<void> {
+	const legacyDir = path.join(await getDocumentsPath(), "Dirac", subdir)
+	await migrateDir(legacyDir, destDir)
+}
+
+// Ensures a ~/.dirac/<subdir> directory exists and migrates from the legacy ~/Documents/Dirac/<subdir>.
+async function ensureDiracSubdir(subdir: string): Promise<string> {
+	const dir = path.join(getDiracHomePath(), subdir)
+	await fs.mkdir(dir, { recursive: true })
+	await migrateFromDocumentsDir(subdir, dir)
+	return dir
+}
+
+// Ensures the global Rules directory exists at ~/.dirac/Rules (non-TCC-protected).
+export const ensureRulesDirectoryExists = (): Promise<string> => ensureDiracSubdir("Rules")
+
+// Ensures the global Workflows directory exists at ~/.dirac/Workflows (non-TCC-protected).
+export const ensureWorkflowsDirectoryExists = (): Promise<string> => ensureDiracSubdir("Workflows")
+
+// Ensures the global Hooks directory exists at ~/.dirac/Hooks (non-TCC-protected).
+export const ensureHooksDirectoryExists = (): Promise<string> => ensureDiracSubdir("Hooks")
 
 // Ensures the global settings directory exists and returns its path.
 export async function ensureSettingsDirectoryExists(): Promise<string> {

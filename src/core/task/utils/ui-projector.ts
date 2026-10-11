@@ -2,6 +2,7 @@ import {
 	ActionButton,
 	DiracMessage,
 	DiracMessageType,
+	isFinalStatus,
 	TaskStatus,
 	UIActionButton,
 	UIActionButtonType,
@@ -13,7 +14,7 @@ import { TaskState } from "../TaskState"
 
 export function projectUIActionState(
 	state: TaskState | undefined,
-	messages: DiracMessage[],
+	messages: readonly DiracMessage[] | ((id: string) => DiracMessage | undefined),
 	maxConsecutiveMistakes: number,
 ): UIActionState {
 	const uiState: UIActionState = {
@@ -25,11 +26,21 @@ export function projectUIActionState(
 	// Active card interactions must take precedence over busy task states.
 	// Tools can create a waiting card before the task status is projected as AWAITING_USER_INPUT.
 	if (state?.waitingCardIds && state.waitingCardIds.length > 0) {
-		const activeCardId = state.waitingCardIds[0]
-		const cardMsg = messages.find((m) => m.id === activeCardId)
-		if (cardMsg?.content.type === DiracMessageType.CARD) {
-			const card = cardMsg.content.card
-			uiState.activeCardId = activeCardId
+		const activeCardMessage = state.waitingCardIds
+			.map((cardId) =>
+				typeof messages === "function" ? messages(cardId) : messages.find((message) => message.id === cardId),
+			)
+			.find(
+				(message) =>
+					message?.content.type === DiracMessageType.CARD &&
+					!isFinalStatus(message.content.card.status) &&
+					(message.content.card.requireApproval ||
+						message.content.card.requireFeedback ||
+						(message.content.card.actions?.length ?? 0) > 0),
+			)
+		if (activeCardMessage?.content.type === DiracMessageType.CARD) {
+			const card = activeCardMessage.content.card
+			uiState.activeCardId = activeCardMessage.id
 			uiState.cardButtons =
 				card.actions?.map(mapCardActionToUIButton) ||
 				(card.requireApproval

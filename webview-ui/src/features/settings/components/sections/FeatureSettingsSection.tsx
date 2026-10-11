@@ -32,6 +32,13 @@ interface FeatureToggle {
 
 const agentFeatures: FeatureToggle[] = [
 	{
+		id: "low-verbosity-responses",
+		label: "Low-verbosity responses",
+		description: "Keep responses concise while preserving important decisions, caveats, and verification.",
+		stateKey: "lowVerbosityEnabled",
+		settingKey: "lowVerbosityEnabled",
+	},
+	{
 		id: "subagents",
 		label: "Subagents",
 		description: "Let Dirac run focused subagents in parallel to explore the codebase for you.",
@@ -54,7 +61,7 @@ const agentFeatures: FeatureToggle[] = [
 	},
 	{
 		id: "auto-compact",
-		label: "Auto Compact",
+		label: "Auto-condense conversations",
 		description: "Automatically compress conversation history.",
 		stateKey: "useAutoCondense",
 		settingKey: "useAutoCondense",
@@ -95,7 +102,7 @@ const editorFeatures: FeatureToggle[] = [
 const experimentalFeatures: FeatureToggle[] = [
 	{
 		id: "yolo",
-		label: "Yolo Mode",
+		label: "YOLO Mode",
 		description:
 			"Execute tasks without user's confirmation. Auto-switches from Plan to Act mode and disables the ask question tool. Use with extreme caution.",
 		stateKey: "yoloModeToggled",
@@ -193,6 +200,7 @@ const FeatureSettingsSection = ({ renderSectionHeader }: FeatureSettingsSectionP
 		enableParallelToolCalling,
 		backgroundEditEnabled,
 		doubleCheckCompletionEnabled,
+		lowVerbosityEnabled,
 	} = useSettingsStore()
 
 	const isYoloRemoteLocked = remoteConfigSettings?.yoloModeToggled !== undefined
@@ -209,6 +217,7 @@ const FeatureSettingsSection = ({ renderSectionHeader }: FeatureSettingsSectionP
 		enableParallelToolCalling,
 		backgroundEditEnabled,
 		doubleCheckCompletionEnabled,
+		lowVerbosityEnabled,
 		yoloModeToggled: isYoloRemoteLocked ? remoteConfigSettings?.yoloModeToggled : yoloModeToggled,
 	}
 

@@ -15,6 +15,7 @@ export interface StronglyTypedUIHelpers {
 	// Approval methods
 	shouldAutoApproveTool: (toolName: DiracDefaultTool) => boolean | [boolean, boolean]
 	shouldAutoApproveToolWithPath: (toolName: DiracToolSpec["id"], path?: string) => Promise<boolean>
+	resolveToolPathPermission: TaskConfig["callbacks"]["resolveToolPathPermission"]
 
 	// Telemetry and notifications
 	captureTelemetry: (toolName: DiracDefaultTool, autoApproved: boolean, approved: boolean, isNativeToolCall?: boolean) => void
@@ -32,16 +33,14 @@ export function createUIHelpers(config: TaskConfig): StronglyTypedUIHelpers {
 		removeClosingTag: (block: ToolUse, tag: ToolParamName, text?: any) => removeClosingTag(block, tag, text),
 		shouldAutoApproveTool: (toolName: DiracDefaultTool) => config.autoApprover.shouldAutoApproveTool(toolName),
 		shouldAutoApproveToolWithPath: config.callbacks.shouldAutoApproveToolWithPath,
+		resolveToolPathPermission: config.callbacks.resolveToolPathPermission,
 		captureTelemetry: (toolName: DiracDefaultTool, autoApproved: boolean, approved: boolean, isNativeToolCall?: boolean) => {
-			// Extract provider information for telemetry
-			const apiConfig = config.services.stateManager.getApiConfiguration()
-			const currentMode = config.services.stateManager.getGlobalSettingsKey("mode")
-			const provider = (currentMode === "plan" ? apiConfig.planModeApiProvider : apiConfig.actModeApiProvider) as string
+			const provider = config.providerId
 
 			telemetryService.captureToolUsage(
 				config.ulid,
 				toolName,
-				config.api.getModel().id,
+				config.model.id,
 				provider,
 				autoApproved,
 				approved,

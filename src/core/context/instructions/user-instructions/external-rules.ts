@@ -20,19 +20,26 @@ import { Logger } from "@/shared/services/Logger"
 export async function refreshExternalRulesToggles(
 	stateManager: StateManager,
 	workingDirectory: string,
+	configuration?: {
+		localWindsurfRulesToggles: DiracRulesToggles
+		localCursorRulesToggles: DiracRulesToggles
+		localAgentsRulesToggles: DiracRulesToggles
+	},
 ): Promise<{
 	windsurfLocalToggles: DiracRulesToggles
 	cursorLocalToggles: DiracRulesToggles
 	agentsLocalToggles: DiracRulesToggles
 }> {
 	// local windsurf toggles
-	const localWindsurfRulesToggles = stateManager.getWorkspaceStateKey("localWindsurfRulesToggles")
+	const localWindsurfRulesToggles =
+		configuration?.localWindsurfRulesToggles ?? stateManager.getWorkspaceStateKey("localWindsurfRulesToggles")
 	const localWindsurfRulesFilePath = path.resolve(workingDirectory, GlobalFileNames.windsurfRules)
 	const updatedLocalWindsurfToggles = await synchronizeRuleToggles(localWindsurfRulesFilePath, localWindsurfRulesToggles)
-	stateManager.setWorkspaceState("localWindsurfRulesToggles", updatedLocalWindsurfToggles)
+	if (!configuration) stateManager.setWorkspaceState("localWindsurfRulesToggles", updatedLocalWindsurfToggles)
 
 	// local cursor toggles
-	const localCursorRulesToggles = stateManager.getWorkspaceStateKey("localCursorRulesToggles")
+	const localCursorRulesToggles =
+		configuration?.localCursorRulesToggles ?? stateManager.getWorkspaceStateKey("localCursorRulesToggles")
 
 	// cursor has two valid locations for rules files, so we need to check both and combine
 	// synchronizeRuleToggles will drop whichever rules files are not in each given path, but combining the results will result in no data loss
@@ -43,13 +50,14 @@ export async function refreshExternalRulesToggles(
 	const updatedLocalCursorToggles2 = await synchronizeRuleToggles(localCursorRulesFilePath, localCursorRulesToggles)
 
 	const updatedLocalCursorToggles = combineRuleToggles(updatedLocalCursorToggles1, updatedLocalCursorToggles2)
-	stateManager.setWorkspaceState("localCursorRulesToggles", updatedLocalCursorToggles)
+	if (!configuration) stateManager.setWorkspaceState("localCursorRulesToggles", updatedLocalCursorToggles)
 
 	// local agents toggles
-	const localAgentsRulesToggles = stateManager.getWorkspaceStateKey("localAgentsRulesToggles")
+	const localAgentsRulesToggles =
+		configuration?.localAgentsRulesToggles ?? stateManager.getWorkspaceStateKey("localAgentsRulesToggles")
 	const localAgentsRulesFilePath = path.resolve(workingDirectory, GlobalFileNames.agentsRulesFile)
 	const updatedLocalAgentsToggles = await synchronizeRuleToggles(localAgentsRulesFilePath, localAgentsRulesToggles)
-	stateManager.setWorkspaceState("localAgentsRulesToggles", updatedLocalAgentsToggles)
+	if (!configuration) stateManager.setWorkspaceState("localAgentsRulesToggles", updatedLocalAgentsToggles)
 
 	return {
 		windsurfLocalToggles: updatedLocalWindsurfToggles,

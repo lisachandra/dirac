@@ -1,8 +1,8 @@
 import { EmptyRequest, StringRequest } from "@shared/proto/dirac/common"
-import { ShowMessageType } from "@shared/proto/host/window"
 import { HostProvider } from "@/hosts/host-provider"
 import { getErrorMessage } from "@/shared/errors"
 import { Logger } from "@/shared/services/Logger"
+import { openBrowser } from "./open-browser"
 
 /**
  * Writes text to the system clipboard
@@ -41,31 +41,27 @@ export async function readTextFromClipboard(): Promise<string> {
  * @param url The URL to open
  * @returns Promise that resolves when the operation is complete
  */
+const ALLOWED_OPEN_SCHEMES = ["https:", "http:"]
+
 export async function openExternal(url: string): Promise<void> {
+	let parsed: URL
+	try {
+		parsed = new URL(url)
+	} catch {
+		throw new Error(`Invalid URL: ${url}`)
+	}
+	if (!ALLOWED_OPEN_SCHEMES.includes(parsed.protocol)) {
+		throw new Error(`Blocked URL with disallowed scheme '${parsed.protocol}'`)
+	}
+
 	Logger.log("Opening browser:", url)
 	try {
 		await HostProvider.env.openExternal(StringRequest.create({ value: url }))
+		return
 	} catch (error) {
-		// Fallback for hosts that don't implement openExternal (e.g., JetBrains plugin)
+		// Fallback for hosts that don't implement openExternal (e.g., JetBrains plugin).
 		Logger.warn(`Host openExternal RPC failed, falling back to 'open' package: ${error}`)
-		try {
-			const open = (await import("open")).default
-			const cp = await open(url)
-
-			// Handle potential errors from the child process
-			cp.on("error", (spawnError) => {
-				Logger.error(`Fallback 'open' child process error: ${spawnError}`)
-			})
-		} catch (fallbackError) {
-			Logger.error(`Fallback 'open' also failed: ${fallbackError}`)
-			// In CLI mode, we don't want to show a message box that might not be visible
-			// or might cause issues. The URL is already shown in the AuthView.
-			if (HostProvider.get().diracType !== "cli") {
-				HostProvider.window.showMessage({
-					type: ShowMessageType.ERROR,
-					message: `Failed to open URL: ${url}`,
-				})
-			}
-		}
 	}
+
+	await openBrowser(url)
 }

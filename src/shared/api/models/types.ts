@@ -1,8 +1,32 @@
 import { ApiFormat } from "../../proto/dirac/models"
+import type { OpenaiReasoningEffort } from "../../storage/types"
 
 export interface PriceTier {
 	tokenLimit: number
 	price: number
+}
+
+export interface ModelPricing {
+	inputPrice?: number
+	outputPrice?: number
+	cacheWritesPrice?: number
+	cacheReadsPrice?: number
+}
+
+export type UtcWeekday = "sunday" | "monday" | "tuesday" | "wednesday" | "thursday" | "friday" | "saturday"
+
+export interface PricingSchedulePeriod {
+	label: string
+	weekdays: readonly UtcWeekday[]
+	startMinuteUtc: number
+	endMinuteUtc: number
+	prices: ModelPricing
+}
+
+export interface ModelPricingSchedule {
+	timeZone: "UTC"
+	defaultLabel: string
+	periods: readonly PricingSchedulePeriod[]
 }
 
 /**
@@ -17,23 +41,24 @@ export interface ModelCapabilities {
 	supportsImages?: boolean
 	supportsReasoning?: boolean
 	supportsReasoningEffort?: boolean
+	reasoningEffortOptions?: OpenaiReasoningEffort[]
+	defaultReasoningEffort?: OpenaiReasoningEffort
 	supportsAdaptiveThinking?: boolean
 	supportsTools?: boolean
 	supportsStrictTools?: boolean
 	description?: string
 	thinkingConfig?: {
 		maxBudget?: number
-		geminiThinkingLevel?: "low" | "high"
+		geminiThinkingLevel?: "low" | "medium" | "high"
 		supportsThinkingLevel?: boolean
 	}
 }
 
-export interface ModelInfo extends ModelCapabilities {
+export interface ModelInfo extends ModelCapabilities, ModelPricing {
 	supportsPromptCache: boolean
-	inputPrice?: number
-	outputPrice?: number
-	cacheWritesPrice?: number
-	cacheReadsPrice?: number
+	supportsFastMode?: boolean
+	fastModePriceMultiplier?: number
+	pricingSchedule?: ModelPricingSchedule
 	supportsGlobalEndpoint?: boolean
 	tiers?: {
 		contextWindow: number
@@ -48,7 +73,7 @@ export interface ModelInfo extends ModelCapabilities {
 		maxBudget?: number
 		outputPrice?: number
 		outputPriceTiers?: PriceTier[]
-		geminiThinkingLevel?: "low" | "high"
+		geminiThinkingLevel?: "low" | "medium" | "high"
 		supportsThinkingLevel?: boolean
 	}
 }
@@ -119,7 +144,7 @@ export interface OcaModelInfo extends OpenAiCompatibleModelInfo {
 	banner?: string
 	surveyContent?: string
 	supportsReasoning?: boolean
-	reasoningEffortOptions: string[]
+	reasoningEffortOptions: OpenaiReasoningEffort[]
 }
 
 export interface LiteLLMModelInfo extends ModelInfo {
@@ -128,4 +153,47 @@ export interface LiteLLMModelInfo extends ModelInfo {
 
 export interface BasetenModelInfo extends ModelInfo {
 	supportedFeatures?: string[]
+}
+
+// True when the model has any pricing data (even $0); false when pricing is unknown.
+export function hasPricing(modelInfo: ModelInfo): boolean {
+	const prices = [
+		modelInfo.inputPrice,
+		modelInfo.outputPrice,
+		modelInfo.cacheWritesPrice,
+		modelInfo.cacheReadsPrice,
+		...(modelInfo.pricingSchedule?.periods.flatMap((period) => [
+			period.prices.inputPrice,
+			period.prices.outputPrice,
+			period.prices.cacheWritesPrice,
+			period.prices.cacheReadsPrice,
+		]) ?? []),
+	]
+	return prices.some((price) => price !== undefined)
+}
+
+// True only when base prices are explicitly zero and no pricing override can add a charge.
+export function isFreeModel(modelInfo: ModelInfo): boolean {
+	if (modelInfo.inputPrice !== 0 || modelInfo.outputPrice !== 0) return false
+
+	const overridePrices = [
+		modelInfo.cacheWritesPrice,
+		modelInfo.cacheReadsPrice,
+		modelInfo.thinkingConfig?.outputPrice,
+		...(modelInfo.pricingSchedule?.periods.flatMap((period) => [
+			period.prices.inputPrice,
+			period.prices.outputPrice,
+			period.prices.cacheWritesPrice,
+			period.prices.cacheReadsPrice,
+		]) ?? []),
+		...(modelInfo.tiers?.flatMap((tier) => [
+			tier.inputPrice,
+			tier.outputPrice,
+			tier.cacheWritesPrice,
+			tier.cacheReadsPrice,
+		]) ?? []),
+		...(modelInfo.thinkingConfig?.outputPriceTiers?.map((tier) => tier.price) ?? []),
+	]
+
+	return overridePrices.every((price) => price === undefined || price === 0)
 }

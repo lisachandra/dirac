@@ -18,6 +18,7 @@ const mockContext: SystemPromptContext = {
 	supportsBrowserUse: true,
 	diracWebToolsEnabled: true,
 	subagentsEnabled: true,
+	lowVerbosityEnabled: true,
 	providerInfo: { providerId: "test", model: { id: "test-model", info: { supportsPromptCache: false } }, mode: "act" },
 	isTesting: true,
 }
@@ -57,6 +58,7 @@ describe("respond provider schemas", () => {
 		expect(anthropicProperties.operation.enum).to.deep.equal(RESPONSE_OPERATIONS)
 		expect(anthropicProperties.operation.description).to.include("plan = Plan Mode response/proposal")
 		expect(anthropicProperties.operation.description).to.include("question = required user input")
+		expect(anthropicProperties.operation.description).to.include("complete = final Act Mode or subagent result")
 		expect(anthropicProperties.options).to.include({ type: "array", minItems: 2, maxItems: 5 })
 		expect(anthropicProperties.options.items).to.deep.equal({ type: "string" })
 		expect(openAIProperties.operation.enum).to.deep.equal(RESPONSE_OPERATIONS)
@@ -65,14 +67,67 @@ describe("respond provider schemas", () => {
 		expect(geminiProperties.operation.enum).to.deep.equal(RESPONSE_OPERATIONS)
 		expect(geminiProperties.options.items.type).to.equal("STRING")
 		expect((responses as any).name).to.equal("respond")
+
+		for (const description of [
+			anthropicProperties.text.description,
+			openAIProperties.text.description,
+			strictProperties.text.description,
+			(responses as any).parameters.properties.text.description,
+			geminiProperties.text.description,
+		]) {
+			expect(description).to.include("The user has explicitly asked for a low verbosity response")
+			expect(description).to.include("- progress:")
+			expect(description).to.include("- question:")
+			expect(description).to.include("- plan:")
+			expect(description).to.include("decisions requiring the user's input")
+			expect(description).to.include("- complete:")
+		}
+		expect((responses as any).description).to.include("The user has explicitly asked for a low verbosity response")
 	})
 
-	it("is at least sixty percent smaller than the recorded legacy aggregate", () => {
-		const anthropicBytes = JSON.stringify(toolSpecInputSchema(respondSpec, mockContext)).length
-		const openAIBytes = JSON.stringify(toolSpecFunctionDefinition(respondSpec, mockContext)).length
 
-		expect(anthropicBytes).to.be.at.most(Math.floor(1460 * 0.4))
-		expect(openAIBytes).to.be.at.most(Math.floor(1752 * 0.4))
+	it("uses the neutral fixed contract when low verbosity is disabled", () => {
+		const context = { ...mockContext, lowVerbosityEnabled: false }
+		const anthropic = toolSpecInputSchema(respondSpec, context)
+		const openAI = toolSpecFunctionDefinition(respondSpec, context)
+		const strictOpenAI = toolSpecFunctionDefinition(respondSpec, context, true)
+		const responses = toOpenAIResponsesAPITool(openAI)
+		const gemini = toolSpecFunctionDeclarations(respondSpec, context)
+		const descriptions = [
+			anthropic.description,
+			(anthropic.input_schema.properties as Record<string, any>).text.description,
+			(openAI as any).function.description,
+			(openAI as any).function.parameters.properties.text.description,
+			(strictOpenAI as any).function.parameters.properties.text.description,
+			(responses as any).description,
+			(responses as any).parameters.properties.text.description,
+			gemini.description,
+			(gemini.parameters?.properties as Record<string, any>).text.description,
+		]
+
+		expect(descriptions).to.deep.equal([
+			"Send a user-facing response.",
+			"Response text.",
+			"Send a user-facing response.",
+			"Response text.",
+			"Response text.",
+			"Send a user-facing response.",
+			"Response text.",
+			"Send a user-facing response.",
+			"Response text.",
+		])
+	})
+	it("keeps both fixed contracts within intentional schema-size bounds", () => {
+		const enabledAnthropicBytes = JSON.stringify(toolSpecInputSchema(respondSpec, mockContext)).length
+		const enabledOpenAIBytes = JSON.stringify(toolSpecFunctionDefinition(respondSpec, mockContext)).length
+		const disabledContext = { ...mockContext, lowVerbosityEnabled: false }
+		const disabledAnthropicBytes = JSON.stringify(toolSpecInputSchema(respondSpec, disabledContext)).length
+		const disabledOpenAIBytes = JSON.stringify(toolSpecFunctionDefinition(respondSpec, disabledContext)).length
+
+		expect(disabledAnthropicBytes).to.be.at.most(Math.floor(1460 * 0.4))
+		expect(disabledOpenAIBytes).to.be.at.most(Math.floor(1752 * 0.4))
+		expect(enabledAnthropicBytes).to.be.at.most(2100)
+		expect(enabledOpenAIBytes).to.be.at.most(2200)
 	})
 })
 

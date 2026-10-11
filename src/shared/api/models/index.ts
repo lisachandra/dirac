@@ -1,42 +1,55 @@
 // Barrel re-export — all model registries, types, and capabilities
 
-export {
-	type ModelCapabilities,
-	type ModelInfo,
-	type PriceTier,
-	type OpenAiCompatibleProfile,
-	type ModelProviderPreset,
-	type ModelProviderSelection,
-	type OpenAiCompatibleModelInfo,
-	type OcaModelInfo,
-	type LiteLLMModelInfo,
-	type BasetenModelInfo,
-} from "./types"
-export { createModelProviderSelection } from "./types"
-export { MODEL_CAPABILITIES } from "./capabilities"
-export { GPT_5_5_TIERS, GPT_5_4_TIERS, GPT_5_4_PRO_TIERS } from "./shared-tiers"
-
 // Anthropic
 export {
+	ANTHROPIC_MAX_THINKING_BUDGET,
+	ANTHROPIC_MIN_THINKING_BUDGET,
 	type AnthropicModelId,
 	anthropicDefaultModelId,
 	anthropicModels,
-	ANTHROPIC_FAST_MODE_SUFFIX,
-	ANTHROPIC_MIN_THINKING_BUDGET,
-	ANTHROPIC_MAX_THINKING_BUDGET,
 	isAnthropicAdaptiveThinkingSupported,
 } from "./anthropic"
-export { type ClaudeCodeModelId, claudeCodeDefaultModelId, claudeCodeModels } from "./claude-code"
-
+// Baseten
+export { type BasetenModelId, basetenDefaultModelId, basetenModels } from "./baseten"
 // AWS Bedrock
 export { type BedrockModelId, bedrockDefaultModelId, bedrockModels } from "./bedrock"
-
-// Google Vertex AI
-export { type VertexModelId, vertexDefaultModelId, vertexModels, vertexGlobalModels } from "./vertex"
-
+export { MODEL_CAPABILITIES } from "./capabilities"
+// Cerebras
+export { type CerebrasModelId, cerebrasDefaultModelId, cerebrasModels } from "./cerebras"
+export { type ClaudeCodeModelId, claudeCodeDefaultModelId, claudeCodeModels } from "./claude-code"
+// DeepSeek
+export { type DeepSeekModelId, deepSeekDefaultModelId, deepSeekModels } from "./deepseek"
+// Doubao
+export { type DoubaoModelId, doubaoDefaultModelId, doubaoModels } from "./doubao"
+// Fireworks
+export { type FireworksModelId, fireworksDefaultModelId, fireworksModels } from "./fireworks"
 // Google Gemini
 export { type GeminiModelId, geminiDefaultModelId, geminiModels } from "./gemini"
-
+// Groq
+export { type GroqModelId, groqDefaultModelId, groqModels } from "./groq"
+// Huawei Cloud MaaS
+export { type HuaweiCloudMaasModelId, huaweiCloudMaasDefaultModelId, huaweiCloudMaasModels } from "./huawei-cloud-maas"
+// HuggingFace
+export { type HuggingFaceModelId, huggingFaceDefaultModelId, huggingFaceModels } from "./huggingface"
+// LiteLLM
+export { type LiteLLMModelId, liteLlmDefaultModelId, liteLlmModelInfoSaneDefaults } from "./litellm"
+// Minimax
+export { type MinimaxModelId, minimaxDefaultModelId, minimaxModels } from "./minimax"
+// Mistral
+export { type MistralModelId, mistralDefaultModelId, mistralModels } from "./mistral"
+// Moonshot
+export { type MoonshotModelId, moonshotDefaultModelId, moonshotModels } from "./moonshot"
+// Nebius
+export { type NebiusModelId, nebiusDefaultModelId, nebiusModels } from "./nebius"
+// NousResearch
+export { type NousResearchModelId, nousResearchDefaultModelId, nousResearchModels } from "./nousresearch"
+export {
+	type OpenAiCodexModelId,
+	type OpenAiCodexModelInfo,
+	openAiCodexDefaultModelId,
+	openAiCodexModels,
+} from "./openai-codex"
+export { azureOpenAiDefaultApiVersion, openAiModelInfoSaneDefaults } from "./openai-defaults"
 // OpenAI Native
 export {
 	type OpenAiNativeModelId,
@@ -44,73 +57,40 @@ export {
 	openAiNativeDefaultModelId,
 	openAiNativeModels,
 } from "./openai-native"
-export {
-	type OpenAiCodexModelId,
-	type OpenAiCodexModelInfo,
-	openAiCodexDefaultModelId,
-	openAiCodexModels,
-} from "./openai-codex"
-export { openAiModelInfoSaneDefaults, azureOpenAiDefaultApiVersion } from "./openai-defaults"
-
-// DeepSeek
-export { type DeepSeekModelId, deepSeekDefaultModelId, deepSeekModels } from "./deepseek"
-
-// HuggingFace
-export { type HuggingFaceModelId, huggingFaceDefaultModelId, huggingFaceModels } from "./huggingface"
-
+export { type QwenCodeModelId, qwenCodeDefaultModelId, qwenCodeModels } from "./qwen-code"
 // Qwen
 export { type InternationalQwenModelId, internationalQwenDefaultModelId, internationalQwenModels } from "./qwen-international"
 export { type MainlandQwenModelId, mainlandQwenDefaultModelId, mainlandQwenModels, QwenApiRegions } from "./qwen-mainland"
-export { type QwenCodeModelId, qwenCodeDefaultModelId, qwenCodeModels } from "./qwen-code"
-
-// Doubao
-export { type DoubaoModelId, doubaoDefaultModelId, doubaoModels } from "./doubao"
-
-// Mistral
-export { type MistralModelId, mistralDefaultModelId, mistralModels } from "./mistral"
-
-// Nebius
-export { type NebiusModelId, nebiusDefaultModelId, nebiusModels } from "./nebius"
-
-// Wandb
-export { type WandbModelId, wandbDefaultModelId, wandbModels } from "./wandb"
-
-// XAI
-export { type XAIModelId, xaiDefaultModelId, xaiModels } from "./xai"
-
-// Sambanova
-export { type SambanovaModelId, sambanovaDefaultModelId, sambanovaModels } from "./sambanova"
-
-// Cerebras
-export { type CerebrasModelId, cerebrasDefaultModelId, cerebrasModels } from "./cerebras"
-
-// Groq
-export { type GroqModelId, groqDefaultModelId, groqModels } from "./groq"
-
-// Moonshot
-export { type MoonshotModelId, moonshotDefaultModelId, moonshotModels } from "./moonshot"
-
-// Huawei Cloud MaaS
-export { type HuaweiCloudMaasModelId, huaweiCloudMaasDefaultModelId, huaweiCloudMaasModels } from "./huawei-cloud-maas"
-
-// Baseten
-export { type BasetenModelId, basetenDefaultModelId, basetenModels } from "./baseten"
-
-// ZAI
-export { type internationalZAiModelId, internationalZAiDefaultModelId, internationalZAiModels } from "./zai-international"
-export { type mainlandZAiModelId, mainlandZAiDefaultModelId, mainlandZAiModels } from "./zai-mainland"
-
-// Fireworks
-export { type FireworksModelId, fireworksDefaultModelId, fireworksModels } from "./fireworks"
-
-// Minimax
-export { type MinimaxModelId, minimaxDefaultModelId, minimaxModels } from "./minimax"
-
-// NousResearch
-export { type NousResearchModelId, nousResearchDefaultModelId, nousResearchModels } from "./nousresearch"
-
-// LiteLLM
-export { type LiteLLMModelId, liteLlmDefaultModelId, liteLlmModelInfoSaneDefaults } from "./litellm"
-
 // Requesty
 export { requestyDefaultModelId, requestyDefaultModelInfo } from "./requesty"
+// Sambanova
+export { type SambanovaModelId, sambanovaDefaultModelId, sambanovaModels } from "./sambanova"
+export { GPT_5_4_PRO_TIERS, GPT_5_4_TIERS, GPT_5_5_TIERS } from "./shared-tiers"
+export {
+	type BasetenModelInfo,
+	createModelProviderSelection,
+	hasPricing,
+	isFreeModel,
+	type LiteLLMModelInfo,
+	type ModelCapabilities,
+	type ModelInfo,
+	type ModelPricing,
+	type ModelPricingSchedule,
+	type ModelProviderPreset,
+	type ModelProviderSelection,
+	type OcaModelInfo,
+	type OpenAiCompatibleModelInfo,
+	type OpenAiCompatibleProfile,
+	type PriceTier,
+	type PricingSchedulePeriod,
+	type UtcWeekday,
+} from "./types"
+// Google Vertex AI
+export { type VertexModelId, vertexDefaultModelId, vertexGlobalModels, vertexModels } from "./vertex"
+// Wandb
+export { type WandbModelId, wandbDefaultModelId, wandbModels } from "./wandb"
+// XAI
+export { type XAIModelId, xaiDefaultModelId, xaiModels } from "./xai"
+// ZAI
+export { internationalZAiDefaultModelId, type internationalZAiModelId, internationalZAiModels } from "./zai-international"
+export { mainlandZAiDefaultModelId, type mainlandZAiModelId, mainlandZAiModels } from "./zai-mainland"

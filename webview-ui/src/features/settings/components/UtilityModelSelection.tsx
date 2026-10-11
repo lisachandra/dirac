@@ -1,16 +1,17 @@
 import { ALL_MODEL_MAPS, ALL_PROVIDERS, type ApiProvider, type ModelInfo, type ModelProviderSelection } from "@shared/api"
 import PROVIDERS from "@shared/providers/providers.json"
 import { convertModelProviderSelectionToProto } from "@shared/proto-conversions/models/api-configuration-conversion"
+import { SETTINGS_HELP } from "@shared/settings-presentation"
 import { VSCodeCheckbox } from "@vscode/webview-ui-toolkit/react"
 import { useEffect, useMemo, useState } from "react"
 import { useSettingsStore } from "@/features/settings/store/settingsStore"
 import { ModelAutocomplete } from "./common/ModelAutocomplete"
-import { updateSetting } from "./utils/settingsHandlers"
+import { persistSetting, updateSetting } from "./utils/settingsHandlers"
 
 const USE_CASES = [
 	{
 		field: "utilityModelUseCondense" as const,
-		label: "Condense conversation",
+		label: "Condense conversations",
 		description: "Summarize long conversations before their context limit is reached.",
 	},
 	{
@@ -23,12 +24,18 @@ const USE_CASES = [
 		label: "Generate commit messages",
 		description: "Generate Git commit messages in VS Code.",
 	},
+	{
+		field: "utilityModelUsePermissionHandling" as const,
+		label: "Handle permission requests",
+		description: "Apply your policy to approve tool permission requests or escalate them to you.",
+	},
 ]
 
 function getProviderModels(provider: ApiProvider, dynamicModels: Record<string, unknown>): Record<string, ModelInfo> {
-	const staticModels = ALL_MODEL_MAPS
-		.filter(([candidate]) => candidate === provider)
-		.reduce<Record<string, ModelInfo>>((models, [, candidateModels]) => ({ ...models, ...candidateModels }), {})
+	const staticModels = ALL_MODEL_MAPS.filter(([candidate]) => candidate === provider).reduce<Record<string, ModelInfo>>(
+		(models, [, candidateModels]) => ({ ...models, ...candidateModels }),
+		{},
+	)
 	const providerModels = dynamicModels[provider]
 	return providerModels && typeof providerModels === "object"
 		? { ...staticModels, ...(providerModels as Record<string, ModelInfo>) }
@@ -45,6 +52,8 @@ const UtilityModelSelection = () => {
 		utilityModelUseCondense,
 		utilityModelUseNewTask,
 		utilityModelUseGenerateCommitMessage,
+		utilityModelUsePermissionHandling,
+		utilityModelPermissionPolicy,
 		openRouterModels,
 		openAiModels,
 		liteLlmModels,
@@ -78,11 +87,18 @@ const UtilityModelSelection = () => {
 	)
 	const [pendingSelection, setPendingSelection] = useState<ModelProviderSelection | undefined>()
 	useEffect(() => setPendingSelection(undefined), [utilityModelSelection])
+	const [permissionPolicy, setPermissionPolicy] = useState(utilityModelPermissionPolicy)
+	useEffect(() => setPermissionPolicy(utilityModelPermissionPolicy), [utilityModelPermissionPolicy])
+	const [permissionPolicySaving, setPermissionPolicySaving] = useState(false)
+	const [permissionPolicySaveError, setPermissionPolicySaveError] = useState(false)
 	const selection = pendingSelection ?? utilityModelSelection
 	const provider = selection?.provider ?? "openrouter"
 	const models = useMemo(() => getProviderModels(provider, dynamicModels), [dynamicModels, provider])
 	const anyUseCaseEnabled =
-		utilityModelUseCondense || utilityModelUseNewTask || utilityModelUseGenerateCommitMessage
+		utilityModelUseCondense ||
+		utilityModelUseNewTask ||
+		utilityModelUseGenerateCommitMessage ||
+		utilityModelUsePermissionHandling
 
 	const persistSelection = (nextSelection: ModelProviderSelection) => {
 		setPendingSelection(nextSelection)
@@ -107,13 +123,26 @@ const UtilityModelSelection = () => {
 		})
 	}
 
+	const persistPermissionPolicy = async () => {
+		if (permissionPolicy === utilityModelPermissionPolicy) return
+		setPermissionPolicySaving(true)
+		setPermissionPolicySaveError(false)
+		try {
+			await persistSetting("utilityModelPermissionPolicy", permissionPolicy)
+		} catch {
+			setPermissionPolicySaveError(true)
+		} finally {
+			setPermissionPolicySaving(false)
+		}
+	}
+
 	return (
 		<div className="space-y-5">
 			<div>
 				<div className="text-xs font-medium text-foreground/80 uppercase tracking-wider">Utility model</div>
 				<p className="mt-1 text-xs text-description">
-					Choose a separate, secret-free provider and model for background utility tasks. Its credentials and provider
-					settings are configured in API Configuration.
+					Choose a separate provider and model for supporting operations. It uses credentials already configured for
+					that provider; credentials are not copied into the Utility Model selection.
 				</p>
 			</div>
 
@@ -153,7 +182,9 @@ const UtilityModelSelection = () => {
 									? utilityModelUseCondense
 									: field === "utilityModelUseNewTask"
 										? utilityModelUseNewTask
-										: utilityModelUseGenerateCommitMessage
+										: field === "utilityModelUseGenerateCommitMessage"
+											? utilityModelUseGenerateCommitMessage
+											: utilityModelUsePermissionHandling
 							}
 							onChange={(event: any) => updateSetting(field, event.target.checked === true)}>
 							{label}
@@ -163,15 +194,42 @@ const UtilityModelSelection = () => {
 				))}
 			</div>
 
+			{utilityModelUsePermissionHandling && (
+				<div className="space-y-2 rounded border border-(--vscode-panel-border) p-3">
+					<label className="block text-sm font-medium" htmlFor="utility-permission-policy">
+						Permission policy
+					</label>
+					<textarea
+						aria-label="Permission policy"
+						className="min-h-24 w-full resize-y rounded-sm border border-(--vscode-input-border) bg-(--vscode-input-background) px-2 py-1 text-sm text-(--vscode-input-foreground)"
+						id="utility-permission-policy"
+						placeholder="Allow file edits in this repository. Ask before network calls. Never allow operations in secrets/."
+						value={permissionPolicy}
+						onChange={(event) => setPermissionPolicy(event.target.value)}
+						onBlur={() => void persistPermissionPolicy()}
+					/>
+					<p className="text-xs text-description">{SETTINGS_HELP.utilityPermissionFallback}</p>
+					{permissionPolicySaving && <p className="text-xs text-description">Saving permission policy...</p>}
+					{permissionPolicySaveError && (
+						<p className="text-xs text-(--vscode-errorForeground)">
+							Permission policy was not saved. Blur the field to retry.
+						</p>
+					)}
+					{permissionPolicy.trim() === "" && (
+						<p className="text-xs text-(--vscode-editorWarning-foreground)">
+							Add a policy before automatic permission handling can run.
+						</p>
+					)}
+				</div>
+			)}
+
 			{anyUseCaseEnabled && !selection?.modelId && (
 				<p className="rounded border border-(--vscode-inputValidation-warningBorder) px-2 py-1 text-xs text-(--vscode-editorWarning-foreground)">
-					Select a provider and model before enabling Utility model use cases.
+					Select a Utility Model provider and model before this use case can run.
 				</p>
 			)}
 
-			<p className="text-xs text-description">
-				Conversation source text and Git diffs may be sent to this provider, which can differ from the active task provider.
-			</p>
+			<p className="text-xs text-description">{SETTINGS_HELP.utilityDisclosure}</p>
 		</div>
 	)
 }

@@ -17,16 +17,8 @@ import { useTerminalSize } from "../hooks/useTerminalSize"
 import { shouldIgnoreTerminalInput } from "../utils/input"
 import { Panel } from "./Panel"
 import { Logger } from "@/shared/services/Logger"
-
-interface TaskHistoryItem {
-	id: string
-	ts: number
-	task: string
-	totalCost: number
-	tokensIn: number
-	tokensOut: number
-	isFavorited: boolean
-}
+import { isGoalHistoryItem, type HistoryItem } from "@shared/HistoryItem"
+import { historyItemFromProto } from "@shared/historyItemFromProto"
 
 interface HistoryPanelContentProps {
 	onClose: () => void
@@ -47,15 +39,15 @@ function formatRelativeDate(ts: number, now: number): string {
 	return new Date(ts).toLocaleDateString()
 }
 
-function formatCost(cost: number): string {
-	if (cost === 0) return ""
+function formatCost(cost: number | undefined): string {
+	if (cost === undefined) return "cost —"
 	return `$${cost.toFixed(2)}`
 }
 
 export const HistoryPanelContent: React.FC<HistoryPanelContentProps> = ({ onClose, onSelectTask, controller }) => {
 	const { isRawModeSupported } = useStdinContext()
 	const { rows: terminalRows } = useTerminalSize()
-	const [items, setItems] = useState<TaskHistoryItem[]>([])
+	const [items, setItems] = useState<HistoryItem[]>([])
 	const [searchQuery, setSearchQuery] = useState("")
 	const [selectedIndex, setSelectedIndex] = useState(0)
 	const [loading, setLoading] = useState(true)
@@ -83,17 +75,7 @@ export const HistoryPanelContent: React.FC<HistoryPanelContentProps> = ({ onClos
 				})
 				const result = await getTaskHistory(controller, request)
 				if (cancelled) return
-				setItems(
-					result.tasks.map((t) => ({
-						id: t.id,
-						ts: t.ts,
-						task: t.task,
-						totalCost: t.totalCost,
-						tokensIn: t.tokensIn,
-						tokensOut: t.tokensOut,
-						isFavorited: t.isFavorited,
-					})),
-				)
+				setItems(result.tasks.map(historyItemFromProto))
 			} catch (error) {
 				Logger.error("Failed to load task history:", error)
 				if (cancelled) return
@@ -124,7 +106,7 @@ export const HistoryPanelContent: React.FC<HistoryPanelContentProps> = ({ onClos
 	}, [items.length])
 
 	const handleSelect = useCallback(
-		async (item: TaskHistoryItem) => {
+		async (item: HistoryItem) => {
 			if (isOpeningTask) return
 			setIsOpeningTask(true)
 			setLoadError(null)
@@ -220,8 +202,14 @@ export const HistoryPanelContent: React.FC<HistoryPanelContentProps> = ({ onClos
 				{visibleItems.map((item, idx) => {
 					const actualIndex = scrollOffset + idx
 					const isSelected = actualIndex === selectedIndex
-					const taskText = item.task.replace(/\n/g, " ")
-					const meta = [formatRelativeDate(item.ts, now), formatCost(item.totalCost)].filter(Boolean).join(" · ")
+					const isGoal = isGoalHistoryItem(item)
+					const taskText = (isGoal ? item.objectivePreview : item.task).replace(/\n/g, " ")
+					const cost = isGoal ? item.accounting.cost : item.totalCost
+					const meta = [
+						formatRelativeDate(item.ts, now),
+						...(isGoal ? [`Goal · ${item.status}`] : []),
+						formatCost(cost),
+					].join(" · ")
 
 					return (
 						<Box flexDirection="column" key={item.id}>
@@ -254,7 +242,7 @@ export const HistoryPanelContent: React.FC<HistoryPanelContentProps> = ({ onClos
 			</Box>
 			<Box>
 				<Text color={theme.muted}>
-					{isOpeningTask ? "Opening task..." : searchQuery ? "Esc to clear" : "Enter to open · Esc to close"}
+					{isOpeningTask ? "Opening run..." : searchQuery ? "Esc to clear" : "Enter to open · Esc to close"}
 				</Text>
 			</Box>
 			{renderContent()}

@@ -78,6 +78,7 @@ export class TaskMessageBridge {
 
 	/** Track last sent content for partial messages to compute deltas */
 	private readonly partialMessageLastContent: Map<number, string> = new Map();
+	private readonly partialMessageContentLength: Map<number, number> = new Map();
 
 	/**
 	 * Accumulated streamed text for message subtypes whose final (non-partial)
@@ -95,6 +96,7 @@ export class TaskMessageBridge {
 	 * the delta computes correctly. Cleared at the start of each prompt cycle.
 	 */
 	private readonly tsUnstableStreamLastContent: Map<string, string> = new Map();
+	private readonly tsUnstableStreamContentLength: Map<string, number> = new Map();
 
 	/** Map message timestamps to toolCallIds to avoid creating duplicate tool calls during streaming */
 	private readonly messageToToolCallId: Map<number, string> = new Map();
@@ -107,6 +109,8 @@ export class TaskMessageBridge {
 	private interactionGeneration = 0;
 	/** Steering transcripts whose delivered status has already been reported to ACP. */
 	private readonly reportedSentSteeringMessages = new Set<string>();
+	/** Completion card IDs whose text has already been emitted to avoid duplicate streaming across card state transitions. */
+	private readonly emittedCompletionCardKeys = new Set<string>();
 
 	/** Latest cumulative snapshot for every model request observed in this ACP session. */
 	private readonly usageSnapshots = new Map<string, UsageSnapshot>();
@@ -144,7 +148,9 @@ export class TaskMessageBridge {
 
 	clearPromptState(): void {
 		this.partialMessageLastContent.clear();
+		this.partialMessageContentLength.clear();
 		this.tsUnstableStreamLastContent.clear();
+		this.tsUnstableStreamContentLength.clear();
 		this.messageToToolCallId.clear();
 		this.processedInteractionCardKeys.clear();
 	}
@@ -498,6 +504,10 @@ export class TaskMessageBridge {
 			return;
 		}
 		if (!change.message) return;
+		if (change.appendedText !== undefined && change.message.content.type === DiracMessageType.MARKDOWN) {
+			await this.emitAppendedMarkdown(sessionId, change.message, change.appendedText);
+			return;
+		}
 
 		const handledInlineInteraction = await this.processMessageWithDelta(
 			sessionId,
@@ -510,6 +520,22 @@ export class TaskMessageBridge {
 			promptResolved,
 			handledInlineInteraction,
 		);
+	}
+
+	private async emitAppendedMarkdown(sessionId: string, message: DiracMessage, text: string): Promise<void> {
+		if (!text || message.content.type !== DiracMessageType.MARKDOWN || message.content.role === "user") return;
+		const stableStreamKey = message.content.isCompletion === true ? "completion_result" : undefined;
+		if (stableStreamKey) {
+			const previousLength = this.tsUnstableStreamContentLength.get(stableStreamKey) ?? 0;
+			this.tsUnstableStreamContentLength.set(stableStreamKey, previousLength + text.length);
+		} else {
+			const previousLength = this.partialMessageContentLength.get(message.ts) ?? 0;
+			this.partialMessageContentLength.set(message.ts, previousLength + text.length);
+		}
+		await this.emitSessionUpdate(sessionId, {
+			sessionUpdate: message.content.isReasoning ? "agent_thought_chunk" : "agent_message_chunk",
+			content: { type: "text", text },
+		});
 	}
 
 	private formElicitationIsNegotiated(): boolean {
@@ -1017,11 +1043,17 @@ export class TaskMessageBridge {
 			const lastTextForDelta = stableStreamKey
 				? (this.tsUnstableStreamLastContent.get(stableStreamKey) ?? "")
 				: lastText;
+			const lastTextLength = stableStreamKey
+				? (this.tsUnstableStreamContentLength.get(stableStreamKey) ?? lastTextForDelta.length)
+				: (this.partialMessageContentLength.get(messageKey) ?? lastTextForDelta.length);
 
 			// For streaming text messages, compute delta to avoid sending duplicates
 			let textDelta: string;
-			if (textContent.startsWith(lastTextForDelta)) {
-				textDelta = textContent.slice(lastTextForDelta.length);
+			if (
+				textContent.length >= lastTextLength &&
+				(lastTextForDelta.length !== lastTextLength || textContent.startsWith(lastTextForDelta))
+			) {
+				textDelta = textContent.slice(lastTextLength);
 			} else {
 				// Content changed entirely (rare), send all
 				textDelta = textContent;
@@ -1041,8 +1073,10 @@ export class TaskMessageBridge {
 			// and re-send the full accumulated text instead of just the delta.
 			if (stableStreamKey) {
 				this.tsUnstableStreamLastContent.set(stableStreamKey, textContent);
+				this.tsUnstableStreamContentLength.set(stableStreamKey, textContent.length);
 			} else {
 				this.partialMessageLastContent.set(messageKey, textContent);
+				this.partialMessageContentLength.set(messageKey, textContent.length);
 			}
 
 			// Only send if there's new content
@@ -1068,6 +1102,13 @@ export class TaskMessageBridge {
 
 			// Send all updates produced by the translator
 			for (const update of result.updates) {
+				if (update.sessionUpdate === "agent_message_chunk" && message.content.type === DiracMessageType.CARD) {
+					const cardKey = `${sessionId}:${message.content.card.id}`;
+					if (this.emittedCompletionCardKeys.has(cardKey)) {
+						continue;
+					}
+					this.emittedCompletionCardKeys.add(cardKey);
+				}
 				await this.emitSessionUpdate(sessionId, update);
 			}
 
@@ -1157,6 +1198,7 @@ export class TaskMessageBridge {
 					messageKey,
 					message.content.card.body,
 				);
+				this.partialMessageContentLength.set(messageKey, message.content.card.body.length);
 			}
 
 			// NOTE: Do NOT delete messageToToolCallId here. A message can receive multiple

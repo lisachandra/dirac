@@ -1,47 +1,61 @@
 import { UpdateSettingsRequest } from "@shared/proto/dirac/state"
 import type { ToolMetadata } from "@shared/ExtensionMessage"
+import { TOOL_SOURCE_HELP } from "@shared/settings-presentation"
 import { memo, useCallback, useMemo, useState } from "react"
 import { useSettingsStore } from "@/features/settings/store/settingsStore"
 import { Switch } from "@/shared/ui/switch"
 import { cn } from "@/lib/utils"
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip"
 import Section from "../Section"
 import { StateServiceClient } from "@/shared/api/grpc-client"
 
-const SOURCE_LABELS: Record<string, string> = {
+const SOURCE_LABELS: Record<ToolMetadata["source"], string> = {
 	builtin: "Built-in",
 	global: "Global",
 	workspace: "Workspace",
+	task: "Task",
 }
 
-const SOURCE_ORDER: Array<ToolMetadata["source"]> = ["builtin", "global", "workspace"]
+const SOURCE_ORDER: Array<ToolMetadata["source"]> = ["builtin", "global", "workspace", "task"]
 
 interface ToolToggleRowProps {
 	tool: ToolMetadata
 	enabled: boolean
+	canToggle: boolean
 	onToggle: (toolId: string, enabled: boolean) => void
 }
 
-const ToolToggleRow = memo(({ tool, enabled, onToggle }: ToolToggleRowProps) => (
+const ToolToggleRow = memo(({ tool, enabled, canToggle, onToggle }: ToolToggleRowProps) => (
 	<div className="flex items-center justify-between py-2 px-1">
 		<div className="flex-1 min-w-0 mr-4">
 			<div className="flex items-center gap-2">
 				<span className="text-sm font-medium truncate">{tool.name}</span>
-				<span
-					className={cn(
-						"text-[10px] px-1.5 py-0.5 rounded font-medium shrink-0",
-						tool.source === "builtin"
-							? "bg-[var(--vscode-badge-background)] text-[var(--vscode-badge-foreground)]"
-							: tool.source === "global"
-								? "bg-[var(--vscode-terminal-ansiBlue)] text-[var(--vscode-editor-background)]"
-								: "bg-[var(--vscode-terminal-ansiGreen)] text-[var(--vscode-editor-background)]",
-					)}>
-					{SOURCE_LABELS[tool.source]}
-				</span>
+				<Tooltip>
+					<TooltipTrigger asChild>
+						<span
+							className={cn(
+								"text-[10px] px-1.5 py-0.5 rounded font-medium shrink-0",
+								tool.source === "builtin"
+									? "bg-[var(--vscode-badge-background)] text-[var(--vscode-badge-foreground)]"
+									: tool.source === "global"
+										? "bg-[var(--vscode-terminal-ansiBlue)] text-[var(--vscode-editor-background)]"
+										: "bg-[var(--vscode-terminal-ansiGreen)] text-[var(--vscode-editor-background)]",
+							)}
+							tabIndex={0}>
+							{SOURCE_LABELS[tool.source]}
+						</span>
+					</TooltipTrigger>
+					<TooltipContent>{TOOL_SOURCE_HELP[tool.source]}</TooltipContent>
+				</Tooltip>
 			</div>
 			<p className="text-xs text-description mt-0.5 mb-0 line-clamp-2">{tool.description}</p>
+			<p className="text-xs text-description mt-0.5 mb-0">
+				{canToggle ? "Changes are saved to global settings." : "Task-scoped tools are always enabled."}
+			</p>
 		</div>
 		<Switch
 			checked={enabled}
+			disabled={!canToggle}
 			className="shrink-0"
 			id={`tool-toggle-${tool.id}`}
 			onCheckedChange={(checked) => onToggle(tool.id, checked)}
@@ -92,6 +106,7 @@ const ToolTogglePanel = ({ renderSectionHeader }: ToolTogglePanelProps) => {
 
 	const isToolEnabled = useCallback(
 		(tool: ToolMetadata) => {
+			if (tool.source === "task") return true
 			const override = toolToggles[tool.id]
 			if (override !== undefined) return override
 			return tool.source === "builtin"
@@ -130,6 +145,7 @@ const ToolTogglePanel = ({ renderSectionHeader }: ToolTogglePanelProps) => {
 									<div className="relative rounded-md border border-[var(--vscode-widget-border)]">
 										{tools.map((tool) => (
 											<ToolToggleRow
+												canToggle={tool.source !== "task"}
 												enabled={isToolEnabled(tool)}
 												key={tool.id}
 												onToggle={handleToggle}

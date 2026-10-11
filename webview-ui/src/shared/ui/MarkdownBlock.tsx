@@ -10,6 +10,7 @@ import remarkGfm from "remark-gfm"
 import type { Node, Parent } from "unist"
 import { visit } from "unist-util-visit"
 import { useSettingsStore } from "@/features/settings/store/settingsStore"
+import { useChatStore } from "@/features/chat/store/chatStore"
 import { cn } from "@/lib/utils"
 import { FileServiceClient, StateServiceClient } from "@/shared/api/grpc-client"
 import MermaidBlock from "@/shared/ui/MermaidBlock"
@@ -175,16 +176,19 @@ const InlineCodeWithFileCheck: React.FC<ComponentProps<"code"> & { [key: string]
  */
 const ActModeHighlight: React.FC = () => {
 	const { mode } = useSettingsStore()
+	const goal = useChatStore((state) => state.goal)
+	const effectiveMode = goal?.mode ?? mode
+	const modeSwitchingDisabled = goal?.modeSwitchingDisabled === true
 
 	return (
 		<button
 			className={cn("text-link inline-flex items-center gap-1 p-0 border-none bg-transparent font-inherit cursor-pointer", {
-				"hover:opacity-90": mode === "plan",
-				"cursor-not-allowed opacity-60": mode !== "plan",
+				"hover:opacity-90": effectiveMode === "plan" && !modeSwitchingDisabled,
+				"cursor-not-allowed opacity-60": effectiveMode !== "plan" || modeSwitchingDisabled,
 			})}
 			onClick={() => {
 				// Only toggle to Act mode if we're currently in Plan mode
-				if (mode === "plan") {
+				if (effectiveMode === "plan" && !modeSwitchingDisabled) {
 					StateServiceClient.togglePlanActModeProto(
 						TogglePlanActModeRequest.create({
 							mode: PlanActMode.ACT,
@@ -192,7 +196,13 @@ const ActModeHighlight: React.FC = () => {
 					)
 				}
 			}}
-			title={mode === "plan" ? "Click to toggle to Act Mode" : "Already in Act Mode"}
+			title={
+				modeSwitchingDisabled
+					? goal.modeSwitchingExplanation
+					: effectiveMode === "plan"
+						? "Click to toggle to Act Mode"
+						: "Already in Act Mode"
+			}
 			type="button">
 			<div className="p-1 rounded-md bg-code flex items-center justify-end w-7 border border-input-border">
 				<div className="rounded-full bg-link w-2 h-2" />

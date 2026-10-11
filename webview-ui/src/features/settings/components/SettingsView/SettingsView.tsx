@@ -1,264 +1,226 @@
 import type { ExtensionMessage } from "@shared/ExtensionMessage"
 import { ResetStateRequest } from "@shared/proto/dirac/state"
+import { SETTINGS_DESTINATIONS, type SettingsDestinationId } from "@shared/settings-presentation"
 import {
-	CheckCheck,
-	FlaskConical,
-	Info,
+	Bot,
+	BrainCircuit,
+	Globe2,
+	ListChecks,
 	type LucideIcon,
+	MessageSquareText,
 	Puzzle,
+	Settings2,
 	ShieldCheck,
-	SlidersHorizontal,
-	Sparkles,
-	SquareMousePointer,
 	SquareTerminal,
-	Wrench,
 } from "lucide-react"
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { useEvent } from "react-use"
-import { useUserStore } from "@/entities/user/store/userStore"
 import { useSettingsStore } from "@/features/settings/store/settingsStore"
 import { cn } from "@/lib/utils"
 import { StateServiceClient } from "@/shared/api/grpc-client"
 import { Tab, TabContent, TabList, TabTrigger } from "@/shared/ui/Tab"
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip"
 import ViewHeader from "@/shared/ui/ViewHeader"
 import SectionHeader from "../SectionHeader"
-import AboutSection from "../sections/AboutSection"
 import ApiConfigurationSection from "../sections/ApiConfigurationSection"
-import UtilityModelSection from "../sections/UtilityModelSection"
+import ApprovalsSettingsSection from "../sections/ApprovalsSettingsSection"
 import BrowserSettingsSection from "../sections/BrowserSettingsSection"
-import DebugSection from "../sections/DebugSection"
-import FeatureSettingsSection from "../sections/FeatureSettingsSection"
 import GeneralSettingsSection from "../sections/GeneralSettingsSection"
+import ResponsesContextSection from "../sections/ResponsesContextSection"
+import RunningTasksSection from "../sections/RunningTasksSection"
 import TerminalSettingsSection from "../sections/TerminalSettingsSection"
-import UserApprovedCommandsSection from "../sections/UserApprovedCommandsSection"
-import ToolTogglePanel from "../sections/ToolTogglePanel"
+import ToolsSettingsSection from "../sections/ToolsSettingsSection"
+import UtilityModelSection from "../sections/UtilityModelSection"
 
-const IS_DEV = process.env.IS_DEV
+const IS_DEV = process.env.IS_DEV === '"true"'
 
-// Tab definitions
-type SettingsTabID =
-	| "api-config"
-	| "utility-model"
-	| "user-approved-commands"
-	| "features"
-	| "tools"
-	| "browser"
-	| "terminal"
-	| "general"
-	| "about"
-	| "debug"
+type SettingsTabID = SettingsDestinationId
 interface SettingsTab {
 	id: SettingsTabID
-	name: string
-	tooltipText: string
-	headerText: string
 	icon: LucideIcon
-	hidden?: (params?: { activeOrganization: any | null }) => boolean
 }
 
 export const SETTINGS_TABS: SettingsTab[] = [
-	{
-		id: "api-config",
-		name: "API Configuration",
-		tooltipText: "API Configuration",
-		headerText: "API Configuration",
-		icon: SlidersHorizontal,
-	},
-	{
-		id: "utility-model",
-		name: "Utility Model",
-		tooltipText: "Utility Model",
-		headerText: "Utility Model",
-		icon: Sparkles,
-	},
-	{
-		id: "user-approved-commands",
-		name: "User-approved commands",
-		tooltipText: "User-approved commands",
-		headerText: "User-approved commands",
-		icon: ShieldCheck,
-	},
-	{
-		id: "features",
-		name: "Features",
-		tooltipText: "Feature Settings",
-		headerText: "Feature Settings",
-		icon: CheckCheck,
-	},
-	{
-		id: "tools",
-		name: "Tools",
-		tooltipText: "Tool Settings",
-		headerText: "Tool Settings",
-		icon: Puzzle,
-	},
-	{
-		id: "browser",
-		name: "Browser",
-		tooltipText: "Browser Settings",
-		headerText: "Browser Settings",
-		icon: SquareMousePointer,
-	},
-	{
-		id: "terminal",
-		name: "Terminal",
-		tooltipText: "Terminal Settings",
-		headerText: "Terminal Settings",
-		icon: SquareTerminal,
-	},
-	{
-		id: "general",
-		name: "General",
-		tooltipText: "General Settings",
-		headerText: "General Settings",
-		icon: Wrench,
-	},
-	{
-		id: "about",
-		name: "About",
-		tooltipText: "About Dirac",
-		headerText: "About",
-		icon: Info,
-	},
-	// Only show in dev mode
-	{
-		id: "debug",
-		name: "Debug",
-		tooltipText: "Debug Tools",
-		headerText: "Debug",
-		icon: FlaskConical,
-		hidden: () => !IS_DEV,
-	},
+	{ id: "models-api", icon: BrainCircuit },
+	{ id: "utility-model", icon: Bot },
+	{ id: "approvals", icon: ShieldCheck },
+	{ id: "responses-context", icon: MessageSquareText },
+	{ id: "running-tasks", icon: ListChecks },
+	{ id: "tools", icon: Puzzle },
+	{ id: "terminal", icon: SquareTerminal },
+	{ id: "browser", icon: Globe2 },
+	{ id: "general", icon: Settings2 },
 ]
 
-type SettingsViewProps = {
-	onDone: () => void
-	targetSection?: string
+interface ResolvedTarget {
+	tab: SettingsTabID
+	focusId?: string
+}
+const TARGET_ALIASES: Record<string, ResolvedTarget> = {
+	"api-config": { tab: "models-api" },
+	"utility-model": { tab: "utility-model" },
+	"user-approved-commands": {
+		tab: "approvals",
+		focusId: "user-approved-commands",
+	},
+	features: { tab: "running-tasks" },
+	tools: { tab: "tools" },
+	browser: { tab: "browser" },
+	terminal: { tab: "terminal" },
+	general: { tab: "general" },
+	about: { tab: "general", focusId: "about" },
+	debug: { tab: "general", focusId: "advanced-diagnostics" },
+	"auto-approve": { tab: "approvals", focusId: "auto-approve-actions" },
+	"approved-command-rules": { tab: "approvals", focusId: "user-approved-commands" },
+	"strict-plan-mode": { tab: "approvals", focusId: "approval-policies" },
+	yolo: { tab: "approvals", focusId: "yolo-mode" },
+	"auto-compact": { tab: "responses-context", focusId: "auto-condense-conversations" },
+	"auto-condense-conversations": { tab: "responses-context", focusId: "auto-condense-conversations" },
+	"low-verbosity-responses": { tab: "responses-context", focusId: "low-verbosity-responses" },
+	subagents: { tab: "running-tasks", focusId: "subagents" },
+	"parallel-tool-calling": { tab: "running-tasks", focusId: "parallel-tool-calling" },
+	"double-check-completion": { tab: "running-tasks", focusId: "double-check-completion" },
+	"background-edit": { tab: "running-tasks", focusId: "background-edit" },
+	checkpoints: { tab: "running-tasks", focusId: "checkpoints" },
+	worktrees: { tab: "running-tasks", focusId: "worktrees" },
+	"dirac-web-tools": { tab: "tools", focusId: "web-search-fetch" },
+	hooks: { tab: "tools", focusId: "hooks" },
 }
 
-// Helper to render section header - moved outside component for better performance
-const renderSectionHeader = (tabId: string) => {
-	const tab = SETTINGS_TABS.find((t) => t.id === tabId)
-	if (!tab) {
-		return null
-	}
-
-	return (
-		<SectionHeader>
-			<div className="flex items-center gap-2">
-				<tab.icon className="w-4" />
-				<div>{tab.headerText}</div>
-			</div>
-		</SectionHeader>
-	)
+export function resolveSettingsTarget(target?: string): ResolvedTarget {
+	if (!target) return { tab: "models-api" }
+	if (SETTINGS_TABS.some((tab) => tab.id === target)) return { tab: target as SettingsTabID }
+	return TARGET_ALIASES[target] ?? { tab: "running-tasks", focusId: target }
 }
 
 const TAB_CONTENT_MAP: Record<SettingsTabID, React.FC<any>> = {
-	"api-config": ApiConfigurationSection,
+	"models-api": ApiConfigurationSection,
 	"utility-model": UtilityModelSection,
-	"user-approved-commands": UserApprovedCommandsSection,
-	features: FeatureSettingsSection,
-	tools: ToolTogglePanel,
-	browser: BrowserSettingsSection,
+	approvals: ApprovalsSettingsSection,
+	"responses-context": ResponsesContextSection,
+	"running-tasks": RunningTasksSection,
+	tools: ToolsSettingsSection,
 	terminal: TerminalSettingsSection,
+	browser: BrowserSettingsSection,
 	general: GeneralSettingsSection,
-	about: AboutSection,
-	debug: DebugSection,
+}
+
+interface SettingsViewProps {
+	onDone: () => void
+	targetSection?: string
 }
 
 const SettingsView = ({ onDone, targetSection }: SettingsViewProps) => {
 	const version = useSettingsStore((state) => state.version)
 	const environment = useSettingsStore((state) => state.environment)
-	const activeOrganization = useUserStore((state) => state.activeOrganization)
+	const initialTarget = resolveSettingsTarget(targetSection)
+	const [activeTab, setActiveTab] = useState<SettingsTabID>(initialTarget.tab)
+	const [focusTarget, setFocusTarget] = useState(initialTarget.focusId)
 
-	const visibleTabs = useMemo(() => SETTINGS_TABS.filter((tab) => !tab.hidden?.({ activeOrganization })), [activeOrganization])
-	const visibleTabIds = useMemo(() => new Set(visibleTabs.map((tab) => tab.id)), [visibleTabs])
-	const resolveTab = useCallback(
-		(tabId?: string): SettingsTabID =>
-			tabId && visibleTabIds.has(tabId as SettingsTabID) ? (tabId as SettingsTabID) : visibleTabs[0]?.id || "api-config",
-		[visibleTabIds, visibleTabs],
-	)
-	const [activeTab, setActiveTab] = useState<SettingsTabID>(() => resolveTab(targetSection))
-
+	const selectTarget = useCallback((target?: string) => {
+		const resolved = resolveSettingsTarget(target)
+		setActiveTab(resolved.tab)
+		setFocusTarget(resolved.focusId)
+	}, [])
+	useEffect(() => selectTarget(targetSection), [selectTarget, targetSection])
 	useEffect(() => {
-		setActiveTab((current) => resolveTab(targetSection || current))
-	}, [resolveTab, targetSection])
+		if (!focusTarget) return
+		requestAnimationFrame(() => {
+			const element = document.getElementById(focusTarget)
+			if (!element) return
+			element.scrollIntoView({ behavior: "smooth", block: "center" })
+			element.classList.add("settings-target-highlight")
+			window.setTimeout(() => element.classList.remove("settings-target-highlight"), 1200)
+			setFocusTarget(undefined)
+		})
+	}, [activeTab, focusTarget])
 
 	const handleMessage = useCallback(
 		(event: MessageEvent) => {
 			const message: ExtensionMessage = event.data
 			if (message.type !== "grpc_response") return
-
 			const grpcMessage = message.grpc_response?.message
-			if (grpcMessage?.key !== "scrollToSettings" || !grpcMessage.value) return
-
-			const tabId = grpcMessage.value
-			if (visibleTabIds.has(tabId as SettingsTabID)) {
-				setActiveTab(tabId as SettingsTabID)
-				return
-			}
-
-			requestAnimationFrame(() => {
-				const element = document.getElementById(tabId)
-				if (!element) return
-				element.scrollIntoView({ behavior: "smooth", block: "center" })
-				element.classList.add("settings-target-highlight")
-				window.setTimeout(() => element.classList.remove("settings-target-highlight"), 1200)
-			})
+			if (grpcMessage?.key === "scrollToSettings" && grpcMessage.value) selectTarget(grpcMessage.value)
 		},
-		[visibleTabIds],
+		[selectTarget],
 	)
-
 	useEvent("message", handleMessage)
 
 	const handleResetState = useCallback(async (resetGlobalState?: boolean) => {
 		try {
 			await StateServiceClient.resetState(ResetStateRequest.create({ global: resetGlobalState }))
-		} catch (error: any) {
+		} catch (error) {
 			console.error("Failed to reset state:", error)
 		}
 	}, [])
 
+	const renderSectionHeader = useCallback((tabId: string) => {
+		const tab = SETTINGS_TABS.find((candidate) => candidate.id === tabId)
+		if (!tab) return null
+		const presentation = SETTINGS_DESTINATIONS[tab.id]
+		return (
+			<SectionHeader description={presentation.question}>
+				<div className="flex items-center gap-2">
+					<tab.icon className="w-4" />
+					<div>{presentation.label}</div>
+				</div>
+			</SectionHeader>
+		)
+	}, [])
+
 	const ActiveContent = useMemo(() => {
 		const Component = TAB_CONTENT_MAP[activeTab]
-		if (!Component) return null
-
 		const props: any = { renderSectionHeader }
-		if (activeTab === "debug") props.onResetState = handleResetState
-		if (activeTab === "about") props.version = version
+		if (activeTab === "general") {
+			if (IS_DEV) props.onResetState = handleResetState
+			props.version = version
+		}
 		return <Component {...props} />
-	}, [activeTab, handleResetState, version])
+	}, [activeTab, handleResetState, renderSectionHeader, version])
 
 	return (
 		<Tab>
 			<ViewHeader environment={environment} onDone={onDone} title="Settings" />
-
 			<div className="flex flex-1 overflow-hidden">
 				<TabList
-					aria-label="Settings sections"
+					aria-label="Settings destinations"
 					aria-orientation="vertical"
 					className="settings-tab-list shrink-0 flex flex-col overflow-y-auto border-r border-sidebar-background"
-					onValueChange={(value) => setActiveTab(resolveTab(value))}
+					onValueChange={(value) => setActiveTab(value as SettingsTabID)}
 					value={activeTab}>
-					{visibleTabs.map((tab) => (
-						<TabTrigger
-							aria-controls={`settings-panel-${tab.id}`}
-							aria-label={tab.tooltipText}
-							className={cn(
-								"settings-tab-trigger whitespace-nowrap overflow-hidden h-12 box-border flex items-center border-l-2 border-transparent text-foreground opacity-70 bg-transparent hover:bg-list-hover px-4 cursor-pointer gap-2",
-								activeTab === tab.id && "opacity-100 border-l-foreground bg-selection",
-							)}
-							data-testid={`tab-${tab.id}`}
-							id={`settings-tab-${tab.id}`}
-							key={tab.id}
-							title={tab.tooltipText}
-							value={tab.id}>
-							<tab.icon aria-hidden="true" className="w-4 h-4" />
-							<span className="settings-tab-label">{tab.name}</span>
-						</TabTrigger>
-					))}
+					{SETTINGS_TABS.map((tab) => {
+						const presentation = SETTINGS_DESTINATIONS[tab.id]
+						return (
+							<Tooltip key={tab.id}>
+								<TooltipTrigger asChild>
+									<TabTrigger
+										aria-controls={`settings-panel-${tab.id}`}
+										aria-label={presentation.label}
+										className={cn(
+											"settings-tab-trigger w-full whitespace-nowrap overflow-hidden h-12 box-border flex items-center border-l-2 border-transparent text-left text-foreground opacity-70 bg-transparent hover:bg-list-hover px-4 cursor-pointer gap-2",
+											activeTab === tab.id && "opacity-100 border-l-foreground bg-selection",
+										)}
+										data-testid={`tab-${tab.id}`}
+										id={`settings-tab-${tab.id}`}
+										value={tab.id}>
+										<tab.icon aria-hidden="true" className="settings-tab-icon w-4 h-4" />
+										<span className="settings-tab-label">{presentation.label}</span>
+										<span aria-hidden="true" className="settings-tab-compact-label">
+											{presentation.compactLabel}
+										</span>
+									</TabTrigger>
+								</TooltipTrigger>
+								<TooltipContent
+									className="settings-nav-tooltip max-w-xs"
+									showArrow={false}
+									side="right"
+									sideOffset={6}>
+									{presentation.webviewTooltip}
+								</TooltipContent>
+							</Tooltip>
+						)
+					})}
 				</TabList>
-
 				<TabContent
 					aria-labelledby={`settings-tab-${activeTab}`}
 					className="flex-1 overflow-auto"

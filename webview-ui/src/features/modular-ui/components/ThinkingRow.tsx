@@ -3,6 +3,7 @@ import { memo, useCallback, useEffect, useRef, useState } from "react"
 import { cn } from "@/lib/utils"
 import { useAutoScroll } from "@/shared/hooks/useAutoScroll"
 import { ReasoningTimeline } from "../ReasoningTimeline"
+import { IncrementalText } from "./IncrementalText"
 
 interface ThinkingRowProps {
 	showTitle: boolean
@@ -12,6 +13,7 @@ interface ThinkingRowProps {
 	onToggle?: () => void
 	title?: string
 	isStreaming?: boolean
+	streamingMessageId?: string
 	showChevron?: boolean
 	onAskForUpdate?: () => void
 }
@@ -25,6 +27,7 @@ export const ThinkingRow = memo(
 		onToggle,
 		title = "Thinking",
 		isStreaming = false,
+		streamingMessageId,
 		showChevron = true,
 		onAskForUpdate,
 	}: ThinkingRowProps) => {
@@ -159,7 +162,15 @@ export const ThinkingRow = memo(
 							onScroll={checkScrollable}
 							ref={setScrollElement}>
 							<div className="flex-1 pr-2 pb-1">
-								<ReasoningTimeline content={reasoningContent || ""} />
+								{isStreaming && streamingMessageId ? (
+									<IncrementalText
+										className="wrap-anywhere whitespace-pre-wrap font-sans text-sm leading-relaxed text-description/90"
+										initialText={reasoningContent || ""}
+										messageId={streamingMessageId}
+									/>
+								) : (
+									<ReasoningTimeline content={reasoningContent || ""} />
+								)}
 							</div>
 						</div>
 						{canScrollUp && (

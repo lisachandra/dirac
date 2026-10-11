@@ -1,6 +1,8 @@
 import fs from "node:fs"
 import path from "node:path"
 import { ApiHandlerSettingsKeys, type Settings, type SettingsKey } from "@shared/storage/state-keys"
+import { buildLegacyModelIdStateUpdates } from "@shared/storage/legacy-model-id-migration"
+import { normalizeInferenceSpeed } from "@shared/storage/types"
 import { ApiConfigurationError, ApiConfigurationErrorCode } from "@core/api"
 
 const LEGACY_RUNTIME_CONFIG_FILE = "acp-session-runtime-config.json"
@@ -22,6 +24,7 @@ const SESSION_MODE_RUNTIME_KEYS = [
 	"mode",
 	"autoApproveAllToggled",
 	"yoloModeToggled",
+	"lowVerbosityEnabled",
 	"planActSeparateModelsSetting",
 ] as const satisfies readonly SettingsKey[]
 
@@ -105,9 +108,14 @@ function writePersistedRuntimeConfig(
 }
 
 export function copyTaskRuntimeSettings(settings: Partial<Settings>): Partial<Settings> {
+	const legacyUpdates = buildLegacyModelIdStateUpdates(settings)
+	const normalizedSettings: Partial<Settings> = { ...settings, ...legacyUpdates }
+	normalizedSettings.planModeInferenceSpeed = normalizeInferenceSpeed(normalizedSettings.planModeInferenceSpeed)
+	normalizedSettings.actModeInferenceSpeed = normalizeInferenceSpeed(normalizedSettings.actModeInferenceSpeed)
+
 	const copy: Partial<Settings> = {}
 	for (const key of TASK_RUNTIME_SETTINGS_KEYS) {
-		const value = settings[key]
+		const value = normalizedSettings[key]
 			; (copy as Record<SettingsKey, unknown>)[key] = value === undefined ? undefined : structuredClone(value)
 	}
 	return copy

@@ -2,7 +2,6 @@ import { DiracApiReqInfo, Mode } from "@shared/ExtensionMessage"
 import { VSCodeButton } from "@vscode/webview-ui-toolkit/react"
 import debounce from "debounce"
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { useChatStore } from "@/features/chat/store/chatStore"
 import { normalizeApiConfiguration } from "@/features/settings/components/utils/providerUtils"
 import { useSettingsStore } from "@/features/settings/store/settingsStore"
 import { formatLargeNumber as formatTokenNumber } from "@/shared/lib/format"
@@ -55,7 +54,6 @@ ConfirmationDialog.displayName = "ConfirmationDialog"
 
 const ContextWindow: React.FC<ContextWindowProgressProps> = ({ onSendMessage, lastApiReqInfo }) => {
 	const { apiConfiguration, mode } = useSettingsStore()
-	const { diracMessages } = useChatStore()
 
 	const { selectedModelInfo } = useMemo(
 		() => normalizeApiConfiguration(apiConfiguration, mode as Mode),

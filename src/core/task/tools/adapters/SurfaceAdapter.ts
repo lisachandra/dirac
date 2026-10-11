@@ -15,10 +15,11 @@ import {
 	ISystemTrait,
 	SystemCommandResult,
 	ITelemetryTrait,
-	IToolEnvironment,
 	IUITrait,
 	IWorkspaceTrait,
+	IResponseObserverTrait,
 } from "../interfaces/IToolEnvironment"
+import type { ToolExecutionEnvironment, ToolEnvironmentFactory } from "../interfaces/ToolEnvironmentFactory"
 import { TaskConfig } from "../types/TaskConfig"
 import { CardHandle } from "./CardHandle"
 import { buildDiagnosticsTrait } from "./traits/DiagnosticsTraitBuilder"
@@ -29,7 +30,12 @@ import { buildLoggingTrait } from "./traits/LoggingTraitBuilder"
 import { buildOrchestrationTrait } from "./traits/OrchestrationTraitBuilder"
 import { buildSkillsTrait } from "./traits/SkillsTraitBuilder"
 import { buildSystemTrait } from "./traits/SystemTraitBuilder"
-import { buildInteractionTrait, buildUiTrait, createCardFromMessenger } from "./traits/UiTraitBuilder"
+import {
+	buildInteractionTrait,
+	buildUiTrait,
+	createCardFromMessenger,
+	createManualInteractionCardFromMessenger,
+} from "./traits/UiTraitBuilder"
 import { buildTelemetryTrait } from "./traits/TelemetryTraitBuilder"
 import { buildWorkspaceTrait } from "./traits/WorkspaceTraitBuilder"
 import { buildConversationCondensationTrait } from "./traits/ConversationCondensationTraitBuilder"
@@ -40,11 +46,12 @@ import { AnchorStateManager } from "@utils/AnchorStateManager"
  * It connects modular tools to the core services and capabilities of the Dirac application.
  * Trait wiring is delegated to builder functions in ./traits/ for maintainability.
  */
-export class SurfaceAdapter implements IToolEnvironment {
+export class SurfaceAdapter implements ToolExecutionEnvironment {
 	public readonly ui: IUITrait
 	public readonly interaction: IInteractionTrait
 	public readonly system: ISystemTrait
 	public readonly orchestration: IOrchestrationTrait
+	public readonly responseObserver: IResponseObserverTrait
 	public readonly conversationCondensation?: IConversationCondensationTrait
 	public readonly telemetry: ITelemetryTrait
 	public readonly workspace: IWorkspaceTrait
@@ -65,7 +72,11 @@ export class SurfaceAdapter implements IToolEnvironment {
 		public readonly toolName: string = "",
 	) {
 		this.logging = buildLoggingTrait()
-		this.ui = buildUiTrait(config, this.createCard.bind(this))
+		this.ui = buildUiTrait(
+			config,
+			this.createCard.bind(this),
+			this.createManualInteractionCard.bind(this),
+		)
 		this.interaction = buildInteractionTrait(config, this.createCard.bind(this))
 		this.browser = buildBrowserTrait(config)
 		this.skills = buildSkillsTrait(config)
@@ -76,16 +87,21 @@ export class SurfaceAdapter implements IToolEnvironment {
 		this.anchors = {
 			reconcile: (absolutePath, lines) => {
 				const result = AnchorStateManager.reconcileWithChanges(absolutePath, lines, config.ulid)
-				if (result.changed) config.context.markAnchorStateDirty()
+				if (result.changed) config.context.markAnchorStateDirty(absolutePath)
 				return result.anchors
 			},
 			getDocumentFingerprint: (absolutePath) =>
 				AnchorStateManager.getDocumentFingerprint(absolutePath, config.ulid),
+			clear: (absolutePath) => {
+				AnchorStateManager.clearState(absolutePath, config.ulid)
+				config.context.markAnchorStateDirty(absolutePath)
+			},
 		}
 		this.diagnostics = buildDiagnosticsTrait()
 		this.editor = buildEditorTrait(config)
 		this.context = config.context
 		this.orchestration = buildOrchestrationTrait(config)
+		this.responseObserver = { recordResponse: async () => undefined }
 		this.conversationCondensation = config.isSubagentExecution
 			? undefined
 			: buildConversationCondensationTrait(config)
@@ -97,6 +113,18 @@ export class SurfaceAdapter implements IToolEnvironment {
 
 	public async createCard(params: CardParams): Promise<ICardHandle> {
 		return await createCardFromMessenger(
+			this.config,
+			{
+				...params,
+				toolName: params.toolName ?? (this.toolName || undefined),
+				locations: params.locations ?? this.locationsForTool(),
+			},
+			this.createdCards,
+		)
+	}
+
+	public async createManualInteractionCard(params: CardParams): Promise<ICardHandle> {
+		return await createManualInteractionCardFromMessenger(
 			this.config,
 			{
 				...params,
@@ -153,10 +181,17 @@ export class SurfaceAdapter implements IToolEnvironment {
 			exitCode: metadata?.exitCode,
 			signal: metadata?.signal,
 			logFilePath: metadata?.logFilePath,
+			backgroundCompletion: metadata?.backgroundCompletion,
 		}
 	}
 
 	public getCreatedCards(): CardHandle[] {
 		return this.createdCards
+	}
+}
+
+export class SurfaceToolEnvironmentFactory implements ToolEnvironmentFactory {
+	create(config: TaskConfig, toolName: string): SurfaceAdapter {
+		return new SurfaceAdapter(config, toolName)
 	}
 }

@@ -22,20 +22,15 @@
  *   if the user rolls back to an older extension version that doesn't know about
  *   file-backed stores, the old code path still works.
  *
- * - taskHistory is NOT migrated here. It uses its own file-based storage
- *   at {globalStorageFsPath}/state/taskHistory.json. Note that for VSCode,
- *   globalStorageFsPath is still the VSCode-managed path (not ~/.dirac/data/),
- *   so task history is NOT yet shared across clients.
- *
- *   TODO: Migrate taskHistory.json and task data files ({globalStorageFsPath}/tasks/)
- *   to ~/.dirac/data/ so that tasks created in VSCode are visible in CLI/JetBrains
- *   and vice versa. See also: checkpoints at {globalStorageFsPath}/checkpoints/.
+ * - taskHistory is excluded from key/value migration because it has a dedicated file.
+ *   The legacy history file is merged separately through the shared transactional index.
  */
 
 import fs from "node:fs/promises"
 import path from "node:path"
+import { commitTaskHistoryMutations } from "@/core/storage/taskHistory"
 import { fileExistsAtPath } from "@/utils/fs"
-import { HistoryItem } from "@/shared/HistoryItem"
+import type { HistoryItem } from "@/shared/HistoryItem"
 
 import type * as vscode from "vscode"
 import { Logger } from "@/shared/services/Logger"
@@ -43,7 +38,7 @@ import { GlobalStateAndSettingKeys, LocalStateKeys, SecretKeys } from "@/shared/
 import type { StorageContext } from "@/shared/storage/storage-context"
 
 /** Bump this when adding new migration steps. */
-export const CURRENT_MIGRATION_VERSION = 2
+export const CURRENT_MIGRATION_VERSION = 3
 
 /** Sentinel key written to both globalState and workspaceState to track migration independently. */
 export const MIGRATION_VERSION_KEY = "__vscodeMigrationVersion"
@@ -55,7 +50,7 @@ export const MIGRATION_VERSION_KEY = "__vscodeMigrationVersion"
  * - ephemeral/transient
  */
 const SKIP_GLOBAL_STATE_KEYS = new Set<string>([
-	"taskHistory", // Already file-based in tasks/taskHistory.json
+	"taskHistory", // Migrated separately from state/taskHistory.json
 ])
 
 export interface MigrationResult {
@@ -135,11 +130,8 @@ export async function exportVSCodeStorageToSharedFiles(
 				result.globalStateCount++
 			}
 
-			// Add sentinel to batch
-			globalStateBatch[MIGRATION_VERSION_KEY] = CURRENT_MIGRATION_VERSION
-
 			// Write all global state in one operation
-			storage.globalState.setBatch(globalStateBatch)
+			await storage.globalState.setBatch(globalStateBatch)
 
 			// Batch secrets
 			const secretsBatch: Record<string, string> = {}
@@ -164,7 +156,7 @@ export async function exportVSCodeStorageToSharedFiles(
 			}
 
 			// Write all secrets in one operation
-			storage.secrets.setBatch(secretsBatch)
+			await storage.secrets.setBatch(secretsBatch)
 		}
 
 		// ─── 2. Migrate workspace state (if needed) ────────────────────
@@ -187,17 +179,16 @@ export async function exportVSCodeStorageToSharedFiles(
 				result.workspaceStateCount++
 			}
 
-			// Add sentinel to batch
-			workspaceStateBatch[MIGRATION_VERSION_KEY] = CURRENT_MIGRATION_VERSION
-
 			// Write all workspace state in one operation
-			storage.workspaceState.setBatch(workspaceStateBatch)
+			await storage.workspaceState.setBatch(workspaceStateBatch)
 		}
 
 		result.migrated = true
 
 		// ─── 3. Migrate global storage folders (tasks, history, etc.) ───
 		await migrateGlobalStorageFolders(vscodeContext, storage)
+		if (needGlobalMigration) await storage.globalState.update(MIGRATION_VERSION_KEY, CURRENT_MIGRATION_VERSION)
+		if (needWorkspaceMigration) await storage.workspaceState.update(MIGRATION_VERSION_KEY, CURRENT_MIGRATION_VERSION)
 
 		Logger.info(
 			`[Migration] Complete: ${result.globalStateCount} global state keys, ` +
@@ -228,6 +219,7 @@ export async function migrateGlobalStorageFolders(
 	}
 
 	const foldersToMigrate = ["tasks", "checkpoints", "settings", "cache", "state"]
+	const failures: Error[] = []
 
 	for (const folder of foldersToMigrate) {
 		const source = path.join(oldPath, folder)
@@ -238,6 +230,20 @@ export async function migrateGlobalStorageFolders(
 		}
 
 		try {
+			if (folder === "state") {
+				const sourceHistory = path.join(source, "taskHistory.json")
+				await fs.mkdir(dest, { recursive: true })
+				await fs.cp(source, dest, {
+					recursive: true,
+					force: false,
+					filter: (sourcePath) => path.basename(sourcePath) !== "taskHistory.json",
+				})
+				if (await fileExistsAtPath(sourceHistory)) {
+					await mergeTaskHistory(sourceHistory)
+					Logger.info("[Migration] Merged task history from VSCode to shared storage.")
+				}
+				continue
+			}
 			if (!(await fileExistsAtPath(dest))) {
 				// Destination doesn't exist, safe to copy entire folder
 				await fs.mkdir(path.dirname(dest), { recursive: true })
@@ -245,55 +251,21 @@ export async function migrateGlobalStorageFolders(
 				Logger.info(`[Migration] Migrated ${folder} folder to shared storage.`)
 			} else {
 				// Destination exists, merge contents
-				if (folder === "state") {
-					const sourceHistory = path.join(source, "taskHistory.json")
-					const destHistory = path.join(dest, "taskHistory.json")
-					if (await fileExistsAtPath(sourceHistory)) {
-						if (await fileExistsAtPath(destHistory)) {
-							await mergeTaskHistory(sourceHistory, destHistory)
-							Logger.info("[Migration] Merged task history from VSCode to shared storage.")
-						} else {
-							await fs.mkdir(dest, { recursive: true })
-							await fs.copyFile(sourceHistory, destHistory)
-							Logger.info("[Migration] Copied task history to shared storage.")
-						}
-					}
-				} else {
-					// Generic merge: copy files that don't exist in destination
-					await fs.cp(source, dest, { recursive: true, force: false })
-					Logger.info(`[Migration] Merged ${folder} folder contents to shared storage.`)
-				}
+				// Generic merge: copy files that don't exist in destination
+				await fs.cp(source, dest, { recursive: true, force: false })
+				Logger.info(`[Migration] Merged ${folder} folder contents to shared storage.`)
 			}
 		} catch (error) {
 			Logger.error(`[Migration] Failed to migrate ${folder} folder:`, error)
+			failures.push(error instanceof Error ? error : new Error(String(error)))
 		}
 	}
+	if (failures.length > 0) throw new AggregateError(failures, "One or more VSCode storage folders failed to migrate")
 }
 
-async function mergeTaskHistory(sourceFile: string, destFile: string) {
-	try {
-		const sourceContent = await fs.readFile(sourceFile, "utf8")
-		const destContent = await fs.readFile(destFile, "utf8")
-
-		const sourceData = JSON.parse(sourceContent) as HistoryItem[]
-		const destData = JSON.parse(destContent) as HistoryItem[]
-
-		if (!Array.isArray(sourceData) || !Array.isArray(destData)) {
-			return
-		}
-
-		const combined = [...destData]
-		const destIds = new Set(destData.map((item) => item.id))
-
-		for (const item of sourceData) {
-			if (item && item.id && !destIds.has(item.id)) {
-				combined.push(item)
-			}
-		}
-
-		combined.sort((a, b) => (b.ts || 0) - (a.ts || 0))
-		await fs.writeFile(destFile, JSON.stringify(combined, null, 2))
-	} catch (error) {
-		Logger.error("[Migration] Error merging task history files:", error)
-	}
+async function mergeTaskHistory(sourceFile: string) {
+	const sourceContent = await fs.readFile(sourceFile, "utf8")
+	const sourceData = JSON.parse(sourceContent) as HistoryItem[]
+	if (!Array.isArray(sourceData)) throw new Error("Legacy task history root is not an array")
+	await commitTaskHistoryMutations([{ kind: "insertMissing", items: sourceData }])
 }

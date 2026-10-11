@@ -7,6 +7,8 @@ import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { DiracDefaultTool } from "@shared/tools"
+import { MAX_ANCHORED_FILE_LINES } from "@shared/anchor-limits"
+import { CardStatus } from "@shared/ExtensionMessage"
 import { DiracAskResponse } from "@shared/WebviewMessage"
 import { AnchorStateManager } from "@utils/AnchorStateManager"
 import { ANCHOR_DELIMITER } from "@utils/line-hashing"
@@ -21,6 +23,7 @@ import { SurfaceAdapter } from "../../../adapters/SurfaceAdapter"
 import { ToolValidator } from "../../../ToolValidator"
 import type { TaskConfig } from "../../../types/TaskConfig"
 import { EditFileTool } from "../EditFileTool"
+import { EditFileApplier } from "../EditFileApplier"
 
 class EditFileToolHandler {
 	private tool = new EditFileTool()
@@ -36,6 +39,7 @@ let tmpDir: string
 function createConfig(opts: { isSubagent?: boolean; diracIgnore?: any } = {}) {
 	const taskState = new TaskState()
 	const diffViewProvider = {
+		readText: sinon.stub().callsFake(async (filePath: string) => await fs.readFile(filePath, "utf8")),
 		open: sinon.stub().resolves(),
 		update: sinon.stub().resolves(),
 		reset: sinon.stub().resolves(),
@@ -60,12 +64,14 @@ function createConfig(opts: { isSubagent?: boolean; diracIgnore?: any } = {}) {
 	}
 
 	const callbacks = {
+		assertMutationAuthorized: sinon.stub(),
 		say: sinon.stub().resolves(undefined),
 		ask: sinon.stub().resolves({ response: DiracAskResponse.APPROVE }),
 		saveCheckpoint: sinon.stub().resolves(),
 		sayAndCreateMissingParamError: sinon.stub().resolves("missing"),
 		removeLastPartialMessageIfExistsWithType: sinon.stub().resolves(),
 		shouldAutoApproveToolWithPath: sinon.stub().resolves(true),
+		resolveToolPathPermission: sinon.stub().resolves("auto_approve"),
 		postStateToWebview: sinon.stub().resolves(),
 		cancelTask: sinon.stub().resolves(),
 		switchToActMode: sinon.stub().resolves(false),
@@ -80,6 +86,7 @@ function createConfig(opts: { isSubagent?: boolean; diracIgnore?: any } = {}) {
 		shouldAutoApproveTool: sinon.stub().returns([true, true]),
 		applyLatestBrowserSettings: sinon.stub().resolves(undefined),
 	}
+	const taskMessenger = createMockTaskMessenger()
 
 	const config = {
 		taskId: "task-1",
@@ -94,7 +101,8 @@ function createConfig(opts: { isSubagent?: boolean; diracIgnore?: any } = {}) {
 		isSubagentExecution: opts.isSubagent ?? true,
 		taskState,
 		messageState: { getApiConversationHistory: sinon.stub().returns([]) },
-		api: { getModel: () => ({ id: "test-model", info: { supportsImages: false } }) },
+		model: { id: "test-model", info: { supportsImages: false } },
+		supportsNativeWebSearch: false,
 		autoApprovalSettings: { enableNotifications: false, actions: { executeCommands: false } },
 		autoApprover: {
 			shouldAutoApproveTool: sinon.stub().returns([true, true]),
@@ -103,11 +111,6 @@ function createConfig(opts: { isSubagent?: boolean; diracIgnore?: any } = {}) {
 		browserSettings: {},
 		focusChainSettings: {},
 		services: {
-			stateManager: {
-				getGlobalStateKey: () => undefined,
-				getGlobalSettingsKey: (key: string) => (key === "mode" ? "act" : key === "hooksEnabled" ? false : undefined),
-				getApiConfiguration: () => ({ planModeApiProvider: "openai", actModeApiProvider: "openai" }),
-			},
 			fileContextTracker: { trackFileContext: sinon.stub().resolves(), markFileAsEditedByDirac: sinon.stub() },
 			browserSession: {},
 			urlContentFetcher: {},
@@ -119,11 +122,11 @@ function createConfig(opts: { isSubagent?: boolean; diracIgnore?: any } = {}) {
 		callbacks,
 		coordinator: { getHandler: sinon.stub() },
 		context: createMockContext(),
-		taskMessenger: createMockTaskMessenger(),
+		taskMessenger,
 	} as unknown as TaskConfig
 
 	const validator = new ToolValidator({ validateAccess: () => true } as any)
-	return { config, callbacks, taskState, validator, diffViewProvider }
+	return { config, callbacks, taskState, validator, diffViewProvider, taskMessenger }
 }
 
 function makeBlock(files: any[]) {
@@ -168,6 +171,124 @@ describe("EditFileTool – characterization edge cases", () => {
 		HostProvider.reset()
 		await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => { })
 	})
+
+	it("rejects every edit for a file above the hash-anchoring line limit", async () => {
+		const { config, validator, diffViewProvider } = createConfig()
+		const handler = new EditFileToolHandler(validator, false)
+		const fileName = "oversized.log"
+		const filePath = path.join(tmpDir, fileName)
+		const content = Array.from({ length: MAX_ANCHORED_FILE_LINES + 1 }, (_, index) => `line ${index + 1}`).join("\n")
+		await fs.writeFile(filePath, content)
+
+		const result = await handler.execute(config, {
+			files: [{
+				path: fileName,
+				edits: [{ edit_type: "replace", anchor: "Apple§line 1", end_anchor: "Apple§line 1", text: "changed" }],
+			}],
+		})
+
+		assert.ok(typeof result === "string")
+		assert.ok(result.includes(`${MAX_ANCHORED_FILE_LINES + 1} lines`))
+		assert.ok(result.includes("use execute_command"))
+		assert.equal(await fs.readFile(filePath, "utf8"), content)
+		sinon.assert.notCalled(diffViewProvider.readText)
+		sinon.assert.notCalled(diffViewProvider.applyAndSaveBatchSilently)
+	})
+
+	it("counts the saved editor buffer before rejecting an oversized disk file", async () => {
+		const { config, validator } = createConfig()
+		const handler = new EditFileToolHandler(validator, false)
+		const fileName = "dirty-buffer.txt"
+		const filePath = path.join(tmpDir, fileName)
+		const editorContent = "current line 1\ncurrent line 2"
+		await fs.writeFile(
+			filePath,
+			Array.from({ length: MAX_ANCHORED_FILE_LINES + 1 }, (_, index) => `stale ${index}`).join("\n"),
+		)
+		const saveDirtyDocument = sandbox.stub().callsFake(async () => {
+			await fs.writeFile(filePath, editorContent)
+			return { wasSaved: true }
+		})
+		setVscodeHostProviderMock({
+			hostBridgeClient: {
+				workspaceClient: {
+					getDiagnostics: sandbox.stub().resolves({ fileDiagnostics: [] }),
+					prepareDiagnostics: sandbox.stub().resolves({}),
+					getWorkspacePaths: sandbox.stub().resolves({ paths: [tmpDir] }),
+					saveOpenDocumentIfDirty: saveDirtyDocument,
+				},
+			} as any,
+		})
+		const anchors = makeAnchors(filePath, editorContent, config.ulid)
+
+		const result = await handler.execute(config, {
+			files: [{
+				path: fileName,
+				edits: [{ edit_type: "replace", anchor: anchors[1], end_anchor: anchors[1], text: "updated line 2" }],
+			}],
+		})
+
+		sinon.assert.called(saveDirtyDocument)
+		assert.equal(await fs.readFile(filePath, "utf8"), "current line 1\nupdated line 2")
+		assert.ok(typeof result === "string" && result.includes("Applied 1 edit(s) successfully"))
+	})
+
+	it("rejects oversized approval-time content before writing", async () => {
+		const { config, diffViewProvider } = createConfig()
+		const fileName = "manual-review.txt"
+		const filePath = path.join(tmpDir, fileName)
+		await fs.writeFile(filePath, "original")
+		const env = new SurfaceAdapter(config)
+		const applier = new EditFileApplier({} as any)
+		const oversizedContent = Array.from(
+			{ length: MAX_ANCHORED_FILE_LINES + 1 },
+			(_, index) => `user line ${index}`,
+		).join("\n")
+
+		await assert.rejects(
+			applier.applyAndSave(
+				env,
+				[{ absolutePath: filePath, displayPath: fileName, blocks: [], prepared: { finalContent: "model edit" } as any }],
+				{},
+				{ [fileName]: oversizedContent },
+			),
+			/Cannot save manual-review\.txt.*hash-anchoring limit/,
+		)
+
+		assert.equal(await fs.readFile(filePath, "utf8"), "original")
+		sinon.assert.notCalled(diffViewProvider.applyAndSaveBatchSilently)
+	})
+
+	it("keeps formatter-expanded oversized output saved and clears its anchors", async () => {
+		const { config, validator, diffViewProvider } = createConfig()
+		const handler = new EditFileToolHandler(validator, false)
+		const fileName = "formatter-expanded.txt"
+		const filePath = path.join(tmpDir, fileName)
+		const content = "line 1\nline 2"
+		await fs.writeFile(filePath, content)
+		const anchors = makeAnchors(filePath, content, config.ulid)
+		const formattedContent = Array.from(
+			{ length: MAX_ANCHORED_FILE_LINES + 1 },
+			(_, index) => `formatted ${index}`,
+		).join("\n")
+		diffViewProvider.format.callsFake(async () => {
+			await fs.writeFile(filePath, formattedContent)
+			return formattedContent
+		})
+
+		const result = await handler.execute(config, {
+			files: [{
+				path: fileName,
+				edits: [{ edit_type: "replace", anchor: anchors[1], end_anchor: anchors[1], text: "changed" }],
+			}],
+		})
+
+		assert.equal(await fs.readFile(filePath, "utf8"), formattedContent)
+		assert.equal(AnchorStateManager.isTracking(filePath, config.ulid), false)
+		assert.ok(typeof result === "string" && result.includes("Warning after saving"))
+		assert.ok(typeof result === "string" && result.includes("use execute_command"))
+	})
+
 
 	describe("parameter validation edge cases", () => {
 		it("increments consecutiveMistakeCount on invalid JSON files string", async () => {
@@ -231,6 +352,35 @@ describe("EditFileTool – characterization edge cases", () => {
 			assert.equal(finalContent, "line 1\nnew line 2\nline 3")
 			assert.ok(typeof result === "string")
 			assert.ok(result.includes("Applied 1 edit(s) successfully"))
+		})
+
+		it("does not apply a prepared edit when mutation consent is revoked after approval", async () => {
+			const { config, callbacks, validator, diffViewProvider } = createConfig()
+			const handler = new EditFileToolHandler(validator, false)
+			const fileName = "revoked.txt"
+			const filePath = path.join(tmpDir, fileName)
+			const content = "line 1\nline 2"
+			await fs.writeFile(filePath, content)
+			const anchors = makeAnchors(filePath, content, config.ulid)
+			callbacks.assertMutationAuthorized.throws(new Error("Plan Mode revoked mutation"))
+
+			await assert.rejects(
+				handler.execute(config, {
+					files: [
+						{
+							path: fileName,
+							edits: [
+								{ edit_type: "replace", anchor: anchors[1], end_anchor: anchors[1], text: "changed" },
+							],
+						},
+					],
+				}),
+				/Plan Mode revoked mutation/,
+			)
+
+			assert.equal(await fs.readFile(filePath, "utf8"), content)
+			sinon.assert.calledOnceWithExactly(callbacks.assertMutationAuthorized, "edit_file")
+			sinon.assert.notCalled(diffViewProvider.applyAndSaveBatchSilently)
 		})
 
 		it("handles empty files array gracefully", async () => {
@@ -406,8 +556,9 @@ describe("EditFileTool – characterization edge cases", () => {
 			assert.ok(result.includes("formatted line 1"), "formatted context should reflect final disk content")
 			assert.ok(result.includes("new line 2"), "edited line should reflect final disk content")
 			assert.ok(!/^[A-Z][a-zA-Z]*§/m.test(result), "edit results should not expose reusable coordinates")
-			assert.ok(result.includes("presentation-only"), "result should require a fresh anchored read before another edit")
-			assert.ok(!result.includes("auto-formatting"), "formatter changes should not add model-facing noise")
+			assert.ok(result.includes("(unanchored):"), "result should label plain content without reusable coordinates")
+			assert.ok(!result.includes("reread"), "successful edits should not repeat tool instructions")
+			assert.ok(!/auto-formatting/i.test(result), "formatter changes should not add model-facing noise")
 		})
 	})
 
@@ -438,6 +589,33 @@ describe("EditFileTool – characterization edge cases", () => {
 			assert.ok(result.includes("new a2") || result.includes("new b2"), `Should include edited content. Result: ${result}`)
 		})
 
+		it("finalizes every progress card when a batch save fails", async () => {
+			const { config, taskState, validator, diffViewProvider, taskMessenger } = createConfig({ isSubagent: false })
+			const handler = new EditFileToolHandler(validator, false)
+			const files = ["failed-a.txt", "failed-b.txt"]
+			const blocks = []
+			for (const [index, file] of files.entries()) {
+				const filePath = path.join(tmpDir, file)
+				const content = `line ${index}\noriginal`
+				await fs.writeFile(filePath, content)
+				const anchors = makeAnchors(filePath, content, config.ulid)
+				blocks.push({
+					path: file,
+					edits: [{ edit_type: "replace", anchor: anchors[1], end_anchor: anchors[1], text: "changed" }],
+				})
+			}
+			const block = makeBlock(blocks)
+			taskState.assistantMessageContent = [block]
+				; (diffViewProvider.applyAndSaveBatchSilently as sinon.SinonStub).rejects(new Error("batch save failed"))
+
+			await assert.rejects(handler.execute(config, block.params), /batch save failed/)
+
+			assert.equal(taskMessenger.createCard.callCount, 2)
+			const protocolCard = await taskMessenger.createCard.firstCall.returnValue
+			assert.equal(protocolCard.finalize.callCount, 2)
+			sinon.assert.alwaysCalledWith(protocolCard.finalize, CardStatus.ERROR)
+		})
+
 		it("continues processing other files when one is diracignored", async () => {
 			const { config, taskState, validator } = createConfig({
 				diracIgnore: { validateAccess: (p: string) => !p.includes("denied") },
@@ -462,6 +640,29 @@ describe("EditFileTool – characterization edge cases", () => {
 			assert.equal(await fs.readFile(path2, "utf8"), "a1\nnew a2\na3", "allowed file edited")
 			assert.ok(typeof result === "string")
 		})
+
+		it("resolves anchors against the editor transport's authoritative content", async () => {
+			const { config, taskState, validator, diffViewProvider } = createConfig()
+			const handler = new EditFileToolHandler(validator, false)
+			const fileName = "authoritative.txt"
+			const filePath = path.join(tmpDir, fileName)
+			const localContent = "stale 1\nstale 2"
+			const authoritativeContent = "current 1\ncurrent 2"
+			await fs.writeFile(filePath, localContent)
+				; (diffViewProvider.readText as sinon.SinonStub).resolves(authoritativeContent)
+			const anchors = makeAnchors(filePath, authoritativeContent, config.ulid)
+			const block = makeBlock([
+				{ path: fileName, edits: [{ edit_type: "replace", anchor: anchors[1], end_anchor: anchors[1], text: "updated 2" }] },
+			])
+			taskState.assistantMessageContent = [block]
+
+			const result = await handler.execute(config, block.params)
+
+			sinon.assert.calledWith(diffViewProvider.readText as sinon.SinonStub, filePath)
+			assert.equal(await fs.readFile(filePath, "utf8"), "current 1\nupdated 2")
+			assert.ok(typeof result === "string" && result.includes("Applied 1 edit(s) successfully"))
+		})
+
 	})
 
 	describe("telemetry", () => {

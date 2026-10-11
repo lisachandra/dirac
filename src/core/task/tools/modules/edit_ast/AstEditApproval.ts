@@ -6,6 +6,7 @@ import { DiracDefaultTool } from "@shared/tools"
 import { DiracAskResponse } from "@shared/WebviewMessage"
 import { getErrorMessage } from "@/shared/errors"
 import type { ICardHandle, IToolEnvironment } from "../../interfaces/IToolEnvironment"
+import type { ToolPermissionDisposition } from "../../autoApprove"
 import type { AstEditFormatter } from "./AstEditFormatter"
 import type { EditAstArgs } from "./EditAstValidator"
 
@@ -26,13 +27,14 @@ export class AstEditApproval {
 		plan: SourceMutationPlan,
 		progressCards: Map<string, ICardHandle>,
 	): Promise<AstEditApprovalResult> {
-		const autoApproved = await this.shouldAutoApprove(env, plan)
-		if (autoApproved) {
+		const utilityPermissionHandlingEnabled = env.config.permissionDecisionBinding !== undefined
+		const permissionDisposition = await this.resolvePermissionDisposition(env, plan)
+		if (permissionDisposition === "auto_approve") {
 			await this.updateProgressCards(progressCards, "Plan validated. Auto-approved; applying changes...")
 			return { approved: true, autoApproved: true }
 		}
 
-		if (env.config.isSubagentExecution) {
+		if (!utilityPermissionHandlingEnabled && env.config.isSubagentExecution) {
 			return {
 				approved: false,
 				autoApproved: false,
@@ -43,19 +45,32 @@ export class AstEditApproval {
 		}
 
 		const diffs = this.formatter.diffs(plan)
-		await env.editor.showReview(
-			plan.files.map((file) => ({
-				absolutePath: file.absolutePath,
-				displayPath: file.displayPath,
-				content: file.content,
-				originalContent: file.originalContent,
-			})),
-		)
-		await env.editor.scrollToFirstDiff()
+		let reviewShown = false
 		await this.updateProgressCards(progressCards, "Plan validated. Waiting for approval...")
 
 		while (true) {
-			const approvalCard = await this.createApprovalCard(env, args, plan, diffs)
+			const approvalCard = await this.createApprovalCard(
+				env,
+				args,
+				plan,
+				diffs,
+				permissionDisposition,
+				utilityPermissionHandlingEnabled,
+			)
+			// Card creation resolves utility approval before any manual review opens.
+			if (!reviewShown && approvalCard.requiresUserInteraction !== false) {
+				await env.editor.showReview(
+					plan.files.map((file) => ({
+						absolutePath: file.absolutePath,
+						displayPath: file.displayPath,
+						content: file.content,
+						originalContent: file.originalContent,
+					})),
+				)
+				await env.editor.scrollToFirstDiff()
+				reviewShown = true
+			}
+
 			let result: Awaited<ReturnType<ICardHandle["waitForInteraction"]>>
 			try {
 				result = await approvalCard.waitForInteraction()
@@ -89,6 +104,7 @@ export class AstEditApproval {
 					})),
 				)
 				await env.editor.scrollToFirstDiff()
+				reviewShown = true
 				continue
 			}
 
@@ -121,37 +137,52 @@ export class AstEditApproval {
 			}
 
 			if (result.action !== DiracAskResponse.APPROVE) {
-				await this.finalizeApprovalCard(
-					approvalCard,
-					CardStatus.CANCELLED,
-					"Operation denied by user.",
-					{ status: "denied", reason: result.value || "rejected" },
-				)
+				await this.finalizeApprovalCard(approvalCard, CardStatus.CANCELLED, "Operation denied by user.", {
+					status: "denied",
+					reason: result.value || "rejected",
+				})
 				await env.editor.hideReview()
 				await this.finalizeProgressCards(progressCards, CardStatus.CANCELLED, "Operation denied by user.")
-				return { approved: false, autoApproved: false, feedback: formatResponse.toolDenied() }
+				return {
+					approved: false,
+					autoApproved: false,
+					feedback: formatResponse.toolDenied(),
+				}
 			}
 
-			await this.finalizeApprovalCard(
-				approvalCard,
-				CardStatus.SUCCESS,
-				this.formatter.approvalBody(args, plan),
-				{ status: "approved" },
-			)
+			await this.finalizeApprovalCard(approvalCard, CardStatus.SUCCESS, this.formatter.approvalBody(args, plan), {
+				status: "approved",
+			})
 			return { approved: true, autoApproved: false, userEdits: result.userEdits }
 		}
 	}
 
-	private async shouldAutoApprove(env: IToolEnvironment, plan: SourceMutationPlan): Promise<boolean> {
-		if (env.config.autoApprover.isUnrestrictedAutoApprove()) return true
+	private async resolvePermissionDisposition(
+		env: IToolEnvironment,
+		plan: SourceMutationPlan,
+	): Promise<ToolPermissionDisposition> {
+		if (env.config.permissionDecisionBinding === undefined) {
+			if (env.config.autoApprover.isUnrestrictedAutoApprove()) return "auto_approve"
+			for (const file of plan.files) {
+				const autoApproved = await env.config.callbacks.shouldAutoApproveToolWithPath(
+					DiracDefaultTool.EDIT_AST,
+					file.displayPath,
+				)
+				if (!autoApproved) return "manual_only"
+			}
+			return "auto_approve"
+		}
+
+		let disposition: ToolPermissionDisposition = "auto_approve"
 		for (const file of plan.files) {
-			const allowed = await env.config.callbacks.shouldAutoApproveToolWithPath(
+			const pathDisposition = await env.config.callbacks.resolveToolPathPermission(
 				DiracDefaultTool.EDIT_AST,
 				file.displayPath,
 			)
-			if (!allowed) return false
+			if (pathDisposition === "manual_only") return "manual_only"
+			if (pathDisposition === "utility_eligible") disposition = "utility_eligible"
 		}
-		return true
+		return disposition
 	}
 
 	private createApprovalCard(
@@ -159,12 +190,16 @@ export class AstEditApproval {
 		args: EditAstArgs,
 		plan: SourceMutationPlan,
 		diffs: CardDiff[],
+		permissionDisposition: ToolPermissionDisposition,
+		utilityPermissionHandlingEnabled: boolean,
 	): Promise<ICardHandle> {
 		return env.ui.createCard({
 			header: this.formatter.approvalHeader(args, plan),
 			icon: args.operation === "rename" ? DiracIcon.SYMBOL_RENAME : DiracIcon.SYMBOL_REPLACE,
 			status: CardStatus.WAITING_FOR_INPUT,
 			requireApproval: true,
+			permissionRequestKind:
+				utilityPermissionHandlingEnabled && permissionDisposition === "manual_only" ? "manual_tool" : "tool",
 			collapsed: false,
 			renderType: "diff",
 			body: this.formatter.approvalBody(args, plan),
@@ -213,11 +248,7 @@ export class AstEditApproval {
 		for (const card of cards.values()) await card.update({ body })
 	}
 
-	private async finalizeProgressCards(
-		cards: Map<string, ICardHandle>,
-		status: CardStatus,
-		body: string,
-	): Promise<void> {
+	private async finalizeProgressCards(cards: Map<string, ICardHandle>, status: CardStatus, body: string): Promise<void> {
 		for (const card of cards.values()) {
 			await card.update({ body, rawOutput: { status } })
 			await card.finalize(status)

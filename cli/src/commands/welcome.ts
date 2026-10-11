@@ -23,11 +23,12 @@ export async function showWelcome(options: TaskOptions) {
 
 	// Apply CLI task options in interactive startup too, so flags like
 	// --auto-approve-all and --yolo affect the initial TUI state.
-	await applyTaskOptions(options)
+	await applyTaskOptions(options, ctx.workspacePath, ctx.controller)
 	await StateManager.get().flushPendingState()
 
 	let hadError = false
 
+	ctx.controller.enableInteractiveGoals()
 	await runInkApp(
 		React.createElement(App, {
 			// Start with auth view if not configured, otherwise welcome

@@ -9,6 +9,7 @@
  */
 
 import type * as acp from "@agentclientprotocol/sdk"
+import { isSuccessfulTaskCompletionCard } from "@shared/cardIdentity"
 import type { DiracMessage } from "@shared/ExtensionMessage"
 import { CardStatus, DiracMessageType, isFinalStatus } from "@shared/ExtensionMessage"
 import { isPlanResponseCard } from "@shared/responseTool"
@@ -123,12 +124,7 @@ function toolKindForCard(card: {
 	if (card.header.startsWith("Listed files in")) return "read"
 	if (card.header.startsWith("Searching ")) return "search"
 	if (card.header.startsWith("Writing ")) return "edit"
-	if (
-		card.header.startsWith("Editing ") ||
-		card.header.startsWith("Edited ") ||
-		(card.header.startsWith("Apply ") && card.header.includes("edit(s)"))
-	)
-		return "edit"
+	if (card.header.startsWith("Editing ") || card.header.startsWith("Edited ") || (card.header.startsWith("Apply ") && card.header.includes("edit(s)"))) return "edit"
 	if (card.header.startsWith("Hook:")) return "other"
 	return TOOL_KIND_MAP[toolName] ?? TOOL_KIND_MAP[card.header] ?? getBrowserActionKind(card.header) ?? "other"
 }
@@ -329,8 +325,12 @@ function translateCardMessage(
 	// the question text and options inline instead of a bare tool block. When
 	// the client negotiates `elicitation.form` the bridge answers through a
 	// first-class form, so this fallback is gated on the capability being absent.
-	const formElicitationNegotiated = options?.clientCapabilities?.elicitation?.form != null
-	if (!formElicitationNegotiated && isFollowupQuestionCard(message)) {
+	const formElicitationNegotiated =
+		options?.clientCapabilities?.elicitation?.form != null
+	if (
+		!formElicitationNegotiated &&
+		isFollowupQuestionCard(message)
+	) {
 		const lines: string[] = []
 		const bodyText = typeof card.body === "string" ? card.body.trim() : ""
 		if (bodyText) lines.push(bodyText)
@@ -342,7 +342,9 @@ function translateCardMessage(
 			}
 		}
 		lines.push("")
-		lines.push("*(This client does not support inline forms — provide your answer in the next prompt.)*")
+		lines.push(
+			"*(This client does not support inline forms — provide your answer in the next prompt.)*",
+		)
 		return {
 			updates: [
 				{
@@ -354,7 +356,11 @@ function translateCardMessage(
 			requiresPermission: false,
 		}
 	}
-	if (card.header === CardHeader.TASK_COMPLETED || card.header === CardHeader.LEGACY_TASK_COMPLETION || isProposedPlanBody) {
+	if (
+		card.header === CardHeader.TASK_COMPLETED ||
+		card.header === CardHeader.LEGACY_TASK_COMPLETION ||
+		isProposedPlanBody
+	) {
 		const bodyText = typeof card.body === "string" ? card.body.trim() : ""
 		let taskText = bodyText
 		if (bodyText.startsWith("{")) {
@@ -370,7 +376,8 @@ function translateCardMessage(
 		// submitCardResponse, but Paseo should show the plan inline immediately.
 		if (taskText) {
 			const isCompletionBody =
-				card.header === CardHeader.TASK_COMPLETED || card.header === CardHeader.LEGACY_TASK_COMPLETION
+				card.header === CardHeader.TASK_COMPLETED ||
+				card.header === CardHeader.LEGACY_TASK_COMPLETION
 			if (isCompletionBody) {
 				if (sessionState.emittedCompletionCardIds.has(card.id)) {
 					return { updates: [], requiresPermission: false }
@@ -401,8 +408,7 @@ function translateCardMessage(
 	// noisy running/completed (hasJsonResponse) markers. Block advisories
 	// are surfaced as separate hook_feedback/hook_block cards instead.
 	if (isHookHeader(card.header)) {
-		const isPending =
-			card.status === CardStatus.RUNNING || card.status === CardStatus.BUILDING || card.status === CardStatus.PENDING
+		const isPending = card.status === CardStatus.RUNNING || card.status === CardStatus.BUILDING || card.status === CardStatus.PENDING
 		if (isPending) return { updates: [], requiresPermission: false }
 		// Completed hooks that are just JSON bookkeeping (hasJsonResponse) are hidden;
 		// feedback/blocks are visible via their own cards.
@@ -460,11 +466,7 @@ function translateCardMessage(
 	// Inline bodies so Paseo renders without expanding Other. Include edit so approval/batched
 	// cards without diffs[] still reach buildEditToolDetail as unifiedDiff.
 	let content = card.diffs?.map((diff) => ({ type: "diff" as const, ...diff }))
-	if (
-		!content &&
-		bodyText &&
-		(kind === "read" || kind === "search" || kind === "other" || kind === "think" || kind === "edit")
-	) {
+	if (!content && bodyText && (kind === "read" || kind === "search" || kind === "other" || kind === "think" || kind === "edit")) {
 		// body is e.g. "✓ Successfully read X", plan markdown, or "Task Completed" result
 		if (bodyText.trim()) {
 			content = [{ type: "content" as const, content: { type: "text" as const, text: bodyText } } as any]
@@ -507,6 +509,13 @@ function translateCardMessage(
 		if (!isFinalStatus(card.status)) {
 			sessionState.pendingToolCalls.set(toolCallId, toolCall)
 		}
+	}
+
+	if (isSuccessfulTaskCompletionCard(card) && card.body) {
+		updates.push({
+			sessionUpdate: "agent_message_chunk",
+			content: { type: "text", text: card.body },
+		})
 	}
 
 	// Permission requests are exclusively for real approval decisions.

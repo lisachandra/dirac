@@ -19,6 +19,7 @@ vi.mock("@/features/settings/store/settingsStore", () => ({
 		enableParallelToolCalling: false,
 		backgroundEditEnabled: false,
 		doubleCheckCompletionEnabled: false,
+		lowVerbosityEnabled: true,
 	})),
 }))
 
@@ -47,6 +48,14 @@ describe("FeatureSettingsSection", () => {
 		fireEvent.click(screen.getByRole("switch", { name: "Hooks" }))
 
 		expect(mockUpdateSetting).toHaveBeenCalledWith("hooksEnabled", true)
+	})
+
+	it("calls updateSetting with lowVerbosityEnabled when toggled", () => {
+		render(<FeatureSettingsSection renderSectionHeader={() => null} />)
+
+		fireEvent.click(screen.getByRole("switch", { name: "Low-verbosity responses" }))
+
+		expect(mockUpdateSetting).toHaveBeenCalledWith("lowVerbosityEnabled", false)
 	})
 
 	it("does not render the Utility Model toggle", () => {

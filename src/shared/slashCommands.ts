@@ -47,8 +47,14 @@ export const BASE_SLASH_COMMANDS: SlashCommand[] = [
 // VS Code-only slash commands
 export const VSCODE_ONLY_COMMANDS: SlashCommand[] = []
 
-// CLI-only slash commands (handled locally, not sent to backend)
+// CLI-only slash commands. Most are handled locally; /goal routes through the interactive Controller.
 export const CLI_ONLY_COMMANDS: SlashCommand[] = [
+	{
+		name: "goal",
+		description: "Start a fresh interactive Goal",
+		section: "default",
+		cliCompatible: true,
+	},
 	{
 		name: "settings",
 		description: "Change API provider, auto-approve, and feature settings",
@@ -112,6 +118,12 @@ export const CLI_ONLY_COMMANDS: SlashCommand[] = [
 	{
 		name: "quiet",
 		description: "Toggle card bodies for future tool output",
+		section: "default",
+		cliCompatible: true,
+	},
+	{
+		name: "fast",
+		description: "Enable Fast Mode for the current provider and model",
 		section: "default",
 		cliCompatible: true,
 	},

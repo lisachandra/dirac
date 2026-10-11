@@ -74,48 +74,54 @@ export class EditFormatter {
 	createResultsResponse(
 		prepared: PreparedEdits,
 		finalLines: string[],
-		newLineHashes: string[],
+		newLineHashes: string[] | undefined,
 		diagnosticsResult: { newProblemsMessage: string; fixedCount: number },
 		diffMode: "full" | "additions-only",
-		autoFormattingEdits?: string,
-		userEdits?: string,
-		wasStringified?: boolean,
+		autoFormatting?: boolean,
+		userModified?: boolean,
+		postSaveWarning?: string,
 	): ToolResponse {
 		const { resolvedEdits, failedEdits, appliedEdits, lines, lineHashes } = prepared
-		const appliedDiffs: string[] = []
-
+		const results: string[] = []
 		let totalAdded = 0
 		let totalRemoved = 0
 
-		for (const applied of appliedEdits) {
-			const { originalStartIdx, originalEndIdx, startIdx, endIdx } = applied
-			const originalHashesSet = new Set(lineHashes.slice(originalStartIdx, originalEndIdx + 1))
-			const finalHashesSet = new Set(newLineHashes.slice(startIdx, endIdx + 1))
+		if (newLineHashes) {
+			const appliedDiffs: string[] = []
+			for (const applied of appliedEdits) {
+				const { originalStartIdx, originalEndIdx, startIdx, endIdx } = applied
+				const originalHashesSet = new Set(lineHashes.slice(originalStartIdx, originalEndIdx + 1))
+				const finalHashesSet = new Set(newLineHashes.slice(startIdx, endIdx + 1))
 
-			for (let i = originalStartIdx; i <= originalEndIdx; i++) {
-				if (!finalHashesSet.has(lineHashes[i])) totalRemoved++
+				for (let i = originalStartIdx; i <= originalEndIdx; i++) {
+					if (!finalHashesSet.has(lineHashes[i])) totalRemoved++
+				}
+				for (let i = startIdx; i <= endIdx; i++) {
+					if (!originalHashesSet.has(newLineHashes[i])) totalAdded++
+				}
+
+				const diffBlock =
+					diffMode === "additions-only"
+						? this.getAdditionOnlyDiffBlock(lines, lineHashes, finalLines, newLineHashes, applied)
+						: this.getDiffBlock(lines, lineHashes, finalLines, newLineHashes, applied)
+				appliedDiffs.push(diffBlock)
 			}
-			for (let i = startIdx; i <= endIdx; i++) {
-				if (!originalHashesSet.has(newLineHashes[i])) totalAdded++
+
+			const totalDiffLines = appliedDiffs.reduce((acc, diff) => acc + diff.split("\n").length, 0)
+			const useFullFile = totalDiffLines > finalLines.length * 0.7 && finalLines.length > 0
+			if (useFullFile) {
+				results.push(`Updated file content (unanchored):\n\n${finalLines.join("\n")}`)
+			} else {
+				results.push(`Diff (unanchored):\n\n${appliedDiffs.join("\n\n")}`)
 			}
-
-			const diffBlock =
-				diffMode === "additions-only"
-					? this.getAdditionOnlyDiffBlock(lines, lineHashes, finalLines, newLineHashes, applied)
-					: this.getDiffBlock(lines, lineHashes, finalLines, newLineHashes, applied)
-			appliedDiffs.push(diffBlock)
-		}
-
-		const totalDiffLines = appliedDiffs.reduce((acc, diff) => acc + diff.split("\n").length, 0)
-		const useFullFile = totalDiffLines > finalLines.length * 0.7 && finalLines.length > 0
-		const results: string[] = []
-
-		if (useFullFile) {
-			results.push(
-				`Because the changes were extensive, the full updated file content is provided below for review. This plain output is not an edit_file coordinate; reread with include_anchors: true before another edit:\n\n${finalLines.join("\n")}`,
-			)
 		} else {
-			results.push(...appliedDiffs)
+			for (const applied of appliedEdits) {
+				totalAdded += applied.linesAdded
+				totalRemoved += applied.linesDeleted
+			}
+			results.push(
+				`Warning after saving: ${postSaveWarning ?? "Hash anchors are unavailable for the saved file."} Anchored edit_file calls are unavailable; use execute_command for further changes.`,
+			)
 		}
 
 		for (const failed of failedEdits) {
@@ -127,39 +133,17 @@ export class EditFormatter {
 			)
 		}
 
-		for (const applied of appliedEdits) {
-			if (applied.edit.text.includes("\\n")) {
-				results.push(
-					`Your edit inserted a '\\n' literal in the code because you supplied double backslash '\\\\n'. If you meant to add a newline character instead, use '\\n' in the next call. Replacement text does not require escaping newline characters.`,
-				)
-			}
-		}
-
 		if (diagnosticsResult.fixedCount > 0) results.push(`Fixed ${diagnosticsResult.fixedCount} linter error(s).`)
 		if (diagnosticsResult.newProblemsMessage.trim()) {
-			results.push(`New problems detected after saving the file:\n${diagnosticsResult.newProblemsMessage.trim()}`)
+			results.push(`Diagnostics:\n${diagnosticsResult.newProblemsMessage.trim()}`)
 		}
-		if (userEdits) {
-			results.push(
-				`*** User Modified File CRITICAL: The user manually modified the file during review. You MUST NOT revert these changes. If you need to fix syntax errors in the same area, you MUST incorporate the user's changes into your new edits.): ${prepared.displayPath}\n\n${userEdits}`,
-			)
-		}
-		if (autoFormattingEdits) {
-			results.push(
-				`The user's editor also applied the following auto-formatting to your content:\n\n${autoFormattingEdits}\n\n(Note: Pay close attention to changes such as single quotes being converted to double quotes, semicolons being removed or added, long lines being broken into multiple lines, adjusting indentation style, adding/removing trailing commas, etc. This will help you ensure future edit_file operations to this file are accurate.)`,
-			)
-		}
+		if (userModified) results.push("User modified this file during review; preserve their changes.")
+		if (autoFormatting) results.push("Auto-formatting applied.")
 
 		const lineChanges = ` (+${totalAdded}, -${totalRemoved} lines)`
-		const summary =
-			failedEdits.length > 0
-				? `Partial success in files[${prepared.fileIndex}] (${prepared.displayPath}): ${resolvedEdits.length} edit(s) applied${lineChanges}; ${failedEdits.length} failed. Do not retry the applied edits; retry only the indexed failures below. Diff lines are presentation-only, not edit_file coordinates; reread the smallest relevant range with include_anchors: true before retrying.`
-				: `Applied ${resolvedEdits.length} edit(s) successfully${lineChanges}. Diff lines are presentation-only, not edit_file coordinates; reread with include_anchors: true before another edit.`
-		if (wasStringified) {
-			results.push(
-				`Note: You provided the 'files' parameter as a stringified JSON array. While this was successfully parsed and applied, you should provide it as a native JSON array in the future.`,
-			)
-		}
+		const summary = failedEdits.length > 0
+			? `Partial success in files[${prepared.fileIndex}] (${prepared.displayPath}): ${resolvedEdits.length} edit(s) applied${lineChanges}; ${failedEdits.length} failed.`
+			: `Applied ${resolvedEdits.length} edit(s) successfully${lineChanges}.`
 
 		return formatResponse.toolResult(`${summary}\n\n${results.join("\n\n---\n\n")}`)
 	}

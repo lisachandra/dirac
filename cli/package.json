@@ -1,6 +1,6 @@
 {
 	"name": "dirac-cli",
-	"version": "0.4.35",
+	"version": "0.5.12",
 	"description": "Autonomous coding agent CLI - capable of creating/editing files, running commands, using the browser, and more",
 	"files": [
 		"dist",
@@ -36,7 +36,7 @@
 	"scripts": {
 		"package:brew": "npx tsx ./scripts/update-brew-formula.mts",
 		"package": "npm pack --pack-destination ./dist",
-		"prepare": "npm run build",
+		"prepack": "npm run build",
 		"build": "npm run typecheck && npx tsx esbuild.mts && npm run build:types",
 		"build:production": "npm run typecheck && npx tsx esbuild.mts --production && npm run build:types",
 		"build:types": "node scripts/build-types.mjs",

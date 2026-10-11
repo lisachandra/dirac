@@ -26,9 +26,9 @@ function isExpectedHookError(error: unknown): boolean {
  * Windows PowerShell scripts) and expected filesystem errors gracefully.
  */
 export class HookRegistry {
-	/** Checks if a hooks directory is a global hooks directory (contains Dirac/Hooks path). */
+	/** Checks if a hooks directory is a global hooks directory (legacy Dirac/Hooks or new .dirac/Hooks). */
 	static isGlobalHooksDir(dir: string): boolean {
-		return /[/\\][Dd]irac[/\\][Hh]ooks/i.test(dir)
+		return /[/\\](?:\.dirac|[Dd]irac)[/\\][Hh]ooks/i.test(dir)
 	}
 
 	/** Finds all hook scripts for the given hook name across all hooks directories. */

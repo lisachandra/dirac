@@ -11,6 +11,7 @@ import { useTerminalSize } from "../hooks/useTerminalSize"
 interface ChatFooterProps {
 	mode: "act" | "plan"
 	modelId: string
+	fastModeEnabled: boolean
 	provider: string
 	lastApiReqTotalTokens: number
 	contextWindowSize: number
@@ -24,11 +25,13 @@ interface ChatFooterProps {
 	quietMode: boolean
 	taskStatus?: TaskStatus
 	show?: boolean
+	isGoalActive?: boolean
 }
 
 export const ChatFooter: React.FC<ChatFooterProps> = ({
 	mode,
 	modelId,
+	fastModeEnabled,
 	provider,
 	lastApiReqTotalTokens,
 	contextWindowSize,
@@ -42,6 +45,7 @@ export const ChatFooter: React.FC<ChatFooterProps> = ({
 	quietMode,
 	taskStatus,
 	show = true,
+	isGoalActive = false,
 }) => {
 	const { columns } = useTerminalSize()
 	if (!show) return null
@@ -49,41 +53,84 @@ export const ChatFooter: React.FC<ChatFooterProps> = ({
 	const boundedCacheHitRate = Math.max(0, Math.min(1, cacheHitRate))
 	const workspaceName = workspacePath.includes("\\") ? path.win32.basename(workspacePath) : path.basename(workspacePath)
 
+	if (isGoalActive) {
+		return (
+			<Box flexDirection="column" width="100%">
+				<Box paddingLeft={1} paddingRight={1} width="100%">
+					<Text color={theme.muted} wrap="truncate-end">
+						<Text bold color={theme.primary}>
+							{theme.symbols.active} Act (Goal)
+						</Text>
+						{" · / commands · @ files · Ctrl+G details · Shift+↓ newline"}
+					</Text>
+				</Box>
+				<Box paddingLeft={1} paddingRight={1} width="100%">
+					<Text color={theme.muted} wrap="truncate-end">
+						<Text color={theme.text}>
+							{provider}: {modelId}
+							{fastModeEnabled ? " fast" : ""}
+						</Text>
+						{` ${theme.symbols.separator} ${workspaceName || workspacePath}${gitBranch ? ` (${gitBranch})` : ""}`}
+						{gitDiffStats && gitDiffStats.files > 0 && (
+							<Text>
+								{" "}
+								{theme.symbols.separator} {gitDiffStats.files} files{" "}
+								<Text color={theme.success}>+{gitDiffStats.additions}</Text>{" "}
+								<Text color={theme.error}>-{gitDiffStats.deletions}</Text>
+							</Text>
+						)}
+						{` ${theme.symbols.separator} Auto ${autoApproveAll ? "on" : "off"} ${theme.symbols.separator} YOLO ${yoloMode ? "on" : "off"} ${theme.symbols.separator} Quiet ${quietMode ? "on" : "off"}`}
+					</Text>
+				</Box>
+			</Box>
+		)
+	}
+
 	return (
 		<Box flexDirection="column" width="100%">
 			{/* Row 1: Instructions (left, can wrap) | Plan/Act toggle (right, no wrap) */}
 			<Box justifyContent="space-between" paddingLeft={1} paddingRight={1} width="100%">
 				{compact ? (
 					<Text color={theme.muted} wrap="truncate-end">
-						<Text bold color={mode === "plan" ? theme.plan : theme.primary}>{mode === "plan" ? "Plan" : "Act"}</Text>
+						<Text bold color={mode === "plan" ? theme.plan : theme.primary}>
+							{mode === "plan" ? "Plan" : "Act"}
+						</Text>
 						{" · / commands · @ files · Tab mode"}
 					</Text>
 				) : (
 					<Box flexShrink={1} flexWrap="wrap">
-						<Text color={theme.muted}>/ commands · @ files · v details · Shift+↓ newline · Tab mode</Text>
+						<Text color={theme.muted}>/ commands · @ files · Shift+↓ newline · Tab mode</Text>
 					</Box>
 				)}
-				{!compact && <Box flexShrink={0} gap={1}>
-					<Box>
-						<Text bold={mode === "plan"} color={mode === "plan" ? theme.plan : undefined}>
-							{mode === "plan" ? "●" : "○"} Plan
-						</Text>
+				{!compact && (
+					<Box flexShrink={0} gap={1}>
+						<Box>
+							<Text bold={mode === "plan"} color={mode === "plan" ? theme.plan : undefined}>
+								{mode === "plan" ? theme.symbols.active : theme.symbols.inactive} Plan
+							</Text>
+						</Box>
+						<Box>
+							<Text bold={mode === "act"} color={mode === "act" ? theme.primary : theme.muted}>
+								{mode === "act" ? theme.symbols.active : theme.symbols.inactive} Act
+							</Text>
+						</Box>
+						<Text color={theme.muted}>(Tab)</Text>
 					</Box>
-					<Box>
-						<Text bold={mode === "act"} color={mode === "act" ? theme.primary : theme.muted}>
-							{mode === "act" ? "●" : "○"} Act
-						</Text>
-					</Box>
-					<Text color={theme.muted}>(Tab)</Text>
-				</Box>}
+				)}
 			</Box>
 
 			{/* Row 2: Model/context/tokens/cost/status */}
 			<Box paddingLeft={1} paddingRight={1}>
 				<Text wrap="truncate-end">
-					{provider}: {modelId} {(() => {
+					{provider}: {modelId}
+					{fastModeEnabled ? " fast" : ""} {(() => {
 						const ratio = contextWindowSize > 0 ? lastApiReqTotalTokens / contextWindowSize : 0
-						const barColor = ratio > theme.contextDanger ? theme.error : ratio > theme.contextWarning ? theme.warning : theme.success
+						const barColor =
+							ratio > theme.contextDanger
+								? theme.error
+								: ratio > theme.contextWarning
+									? theme.warning
+									: theme.success
 						const bar = createContextBar(lastApiReqTotalTokens, contextWindowSize)
 						return (
 							<Text>
@@ -93,13 +140,25 @@ export const ChatFooter: React.FC<ChatFooterProps> = ({
 						)
 					})()} <Text color={theme.muted}>
 						({lastApiReqTotalTokens.toLocaleString()}) · {(() => {
-							const costColor = totalCost > theme.costDanger ? theme.error : totalCost > theme.costWarning ? theme.warning : theme.success
+							const costColor =
+								totalCost > theme.costDanger
+									? theme.error
+									: totalCost > theme.costWarning
+										? theme.warning
+										: theme.success
 							return <Text color={costColor}>${totalCost.toFixed(3)}</Text>
 						})()}
 					</Text>{" "}
 					{boundedCacheHitRate > 0 && (
 						<React.Fragment>
-							<Text color={boundedCacheHitRate >= 0.7 ? theme.success : boundedCacheHitRate >= 0.35 ? theme.info : theme.muted}>
+							<Text
+								color={
+									boundedCacheHitRate >= 0.7
+										? theme.success
+										: boundedCacheHitRate >= 0.35
+											? theme.info
+											: theme.muted
+								}>
 								{(boundedCacheHitRate * 100).toFixed(0)}% cache
 							</Text>{" "}
 						</React.Fragment>
@@ -115,7 +174,8 @@ export const ChatFooter: React.FC<ChatFooterProps> = ({
 					{gitBranch && <Text color={theme.subtle}> ({gitBranch})</Text>}
 					{gitDiffStats && gitDiffStats.files > 0 && (
 						<Text>
-							{" "}· {gitDiffStats.files} file{gitDiffStats.files !== 1 ? "s" : ""}{" "}
+							{" "}
+							· {gitDiffStats.files} file{gitDiffStats.files !== 1 ? "s" : ""}{" "}
 							<Text color={theme.success}>+{gitDiffStats.additions}</Text>{" "}
 							<Text color={theme.error}>-{gitDiffStats.deletions}</Text>
 						</Text>
@@ -136,7 +196,9 @@ export const ChatFooter: React.FC<ChatFooterProps> = ({
 					)}
 					<Text color={theme.muted}> · </Text>
 					{yoloMode ? (
-						<Text bold color={theme.warning}>⚠ YOLO mode enabled</Text>
+						<Text bold color={theme.warning}>
+							⚠ YOLO mode enabled
+						</Text>
 					) : (
 						<Text color={theme.muted}>YOLO mode disabled</Text>
 					)}

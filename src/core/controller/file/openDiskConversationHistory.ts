@@ -1,7 +1,6 @@
 import { openFile as openFileIntegration } from "@integrations/misc/open-file"
+import { getSavedApiConversationHistory, writeConversationHistoryJson } from "@core/storage/disk"
 import { Empty, StringRequest } from "@shared/proto/dirac/common"
-import path from "path"
-import { HostProvider } from "@/hosts/host-provider"
 import { Controller } from ".."
 /**
  * Opens a file in the editor
@@ -10,10 +9,9 @@ import { Controller } from ".."
  * @returns Empty response
  */
 export async function openDiskConversationHistory(_controller: Controller, request: StringRequest): Promise<Empty> {
-	const globalStoragePath = HostProvider.get().globalStorageFsPath
-	const taskConversationHistoryPath = path.join(globalStoragePath, "tasks", request.value, "api_conversation_history.json")
 	if (request.value) {
-		openFileIntegration(taskConversationHistoryPath)
+		const history = await getSavedApiConversationHistory(request.value)
+		openFileIntegration(await writeConversationHistoryJson(request.value, history))
 	}
 	return Empty.create()
 }

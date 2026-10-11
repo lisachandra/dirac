@@ -12,13 +12,20 @@ import { Logger } from "@/shared/services/Logger"
 import { StringRequest } from "@/shared/proto/dirac/common"
 import { useStdinContext } from "../context/StdinContext"
 import { useTerminalSize } from "../hooks/useTerminalSize"
+import type { GoalHistoryItem, HistoryItem } from "@shared/HistoryItem"
 
-interface TaskHistoryItem {
+interface LegacyHistoryDisplayItem {
 	id: string
 	ts: number
 	task?: string
 	totalCost?: number
 	modelId?: string
+}
+
+export type HistoryDisplayItem = HistoryItem | LegacyHistoryDisplayItem
+
+function isGoalDisplayItem(item: HistoryDisplayItem): item is GoalHistoryItem {
+	return "runKind" in item && item.runKind === "goal"
 }
 
 interface HistoryPagination {
@@ -29,14 +36,14 @@ interface HistoryPagination {
 }
 
 interface HistoryViewProps {
-	items: TaskHistoryItem[]
+	items: HistoryDisplayItem[]
 	visibleCount?: number
 	controller: Controller
 	onSelectTask?: (taskId: string) => void
 	pagination?: HistoryPagination
 	onPageChange?: (page: number) => void
 	/** If provided, all items for internal pagination management */
-	allItems?: TaskHistoryItem[]
+	allItems?: HistoryDisplayItem[]
 }
 
 /**
@@ -74,7 +81,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
 	const effectiveVisibleCount = Math.min(dynamicVisibleCount, Math.max(1, visibleCount ?? dynamicVisibleCount))
 
 	const onSelect = useCallback(
-		async (item: TaskHistoryItem) => {
+		async (item: HistoryDisplayItem) => {
 			if (isOpeningTask) return
 			setIsOpeningTask(true)
 			setInteractionError(null)
@@ -171,7 +178,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
 	return (
 		<Box flexDirection="column">
 			<Text bold color={theme.text}>
-				{"📜 Task History (" + totalCount + " total)"}
+				{"📜 Run History (" + totalCount + " total)"}
 			</Text>
 			<Text color={theme.muted}>Use ↑↓/j/k to navigate, Enter to select</Text>
 
@@ -186,7 +193,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
 			)}
 			<Text>{formatSeparator(terminalColumns)}</Text>
 
-			{interactionError && <Text color={theme.error}>Failed to open task: {interactionError}</Text>}
+			{interactionError && <Text color={theme.error}>Failed to open run: {interactionError}</Text>}
 
 			{pageItems.length === 0 ? (
 				<Text>No task history available.</Text>
@@ -197,8 +204,11 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
 						const actualIndex = startIndex + index
 						const isSelected = actualIndex === selectedIndex
 						const date = new Date(task.ts).toLocaleString()
-						const taskText = task.task?.substring(0, 60) || "Unknown task"
-						const truncated = (task.task?.length || 0) > 60 ? "..." : ""
+						const isGoal = isGoalDisplayItem(task)
+						const displayText = isGoal ? task.objectivePreview : (task.task ?? "")
+						const taskText = displayText.substring(0, 60) || "Unknown run"
+						const truncated = displayText.length > 60 ? "..." : ""
+						const cost = isGoal ? task.accounting.cost : task.totalCost
 
 						return (
 							<Box flexDirection="column" key={`${task.id}-${actualIndex}`} marginBottom={1}>
@@ -207,7 +217,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
 									<Text color={theme.muted}>{date}</Text>
 								</Box>
 								<Box marginLeft={4}>
-									<Text color={theme.info}>{task.id}</Text>
+									<Text color={theme.info}>{isGoal ? `[Goal · ${task.status}] ` : ""}{task.id}</Text>
 								</Box>
 								<Box marginLeft={4}>
 									<Text bold={isSelected} color={isSelected ? theme.strongText : undefined}>
@@ -215,11 +225,15 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
 										{truncated}
 									</Text>
 								</Box>
-								{typeof task.totalCost === "number" && (
+								{isGoal ? (
 									<Box marginLeft={4}>
-									<Text color={theme.muted}>Cost: ${task.totalCost.toFixed(4)}</Text>
+										<Text color={theme.muted}>Cost: {cost === undefined ? "—" : `$${cost.toFixed(4)}`}</Text>
 									</Box>
-								)}
+								) : typeof cost === "number" ? (
+									<Box marginLeft={4}>
+										<Text color={theme.muted}>Cost: ${cost.toFixed(4)}</Text>
+									</Box>
+								) : null}
 								{task.modelId && (
 									<Box marginLeft={4}>
 										<Text color={theme.muted}>Model: {task.modelId}</Text>

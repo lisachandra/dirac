@@ -17,8 +17,14 @@ function createSteerableTask() {
 	task.messageStateHandler = {
 		addToDiracMessages: sinon.stub().callsFake(async (message) => messages.push(message)),
 		findMessageIndexById: sinon.stub().callsFake((id: string) => messages.findIndex((message) => message.id === id)),
+		getMessageById: sinon.stub().callsFake((id: string) => messages.find((message) => message.id === id)),
 		getDiracMessages: sinon.stub().callsFake(() => messages),
 		updateDiracMessage: sinon.stub().callsFake(async (index: number, update: any) => Object.assign(messages[index], update)),
+		patchMarkdownById: sinon.stub().callsFake(async (id: string, patch: any) => {
+			const message = messages.find((candidate) => candidate.id === id)
+			if (!message || message.content.type !== DiracMessageType.MARKDOWN) throw new Error(`Markdown ${id} not found`)
+			Object.assign(message.content, patch)
+		}),
 	}
 	task.messageStateHandler.getApiConversationHistory = sinon.stub().callsFake(() => task.apiConversationHistory)
 	task.messageStateHandler.getApiConversationProviderState = sinon.stub().returns({})
@@ -174,7 +180,10 @@ describe("Task steering inbox", () => {
 		task.taskState.didAttemptCompletion = true
 		await task.enqueueSteeringMessage("Continue before completing")
 
-		assert.equal(await task.commitAttemptCompletion(), false)
+		assert.deepEqual(await task.commitAttemptCompletion("Done"), {
+			committed: false,
+			error: "Completion was superseded by queued user steering.",
+		})
 		assert.equal(task.taskState.didAttemptCompletion, false)
 		assert.equal(task.taskState.status, TaskStatus.EXECUTING_TOOL)
 	})
@@ -183,20 +192,23 @@ describe("Task steering inbox", () => {
 		const { task } = createSteerableTask()
 		task.taskState.didAttemptCompletion = true
 
-		assert.equal(await task.commitAttemptCompletion(), true)
+		assert.deepEqual(await task.commitAttemptCompletion("Done"), { committed: true })
 		assert.equal(task.taskState.completionCommitted, true)
+		assert.equal(task.taskState.completionResponse, "Done")
 		assert.equal(task.taskState.askResponse, undefined)
 		assert.equal(task.taskState.askResponseText, undefined)
 		assert.equal(task.taskState.status, TaskStatus.EXECUTING_TOOL)
 	})
 
-	it("preserves a follow-up submitted after completion was sealed", async () => {
+	it("preserves completed status while accepting a follow-up after completion was sealed", async () => {
 		const { task } = createSteerableTask()
+		task.taskState.status = TaskStatus.COMPLETED
 		task.taskState.askResponse = "message"
 		task.taskState.askResponseText = "Immediate follow-up"
 
 		const followUp = await task.waitForFollowUp()
 
+		assert.equal(task.taskState.status, TaskStatus.COMPLETED)
 		assert.deepEqual(followUp, [
 			{ type: "text", text: "<feedback>\nImmediate follow-up\n</feedback>", isUserInput: true },
 		])
@@ -310,7 +322,7 @@ describe("Task steering inbox", () => {
 		const outboundUserMessage = { role: "user", content: [toolResult] }
 		task.apiConversationHistory.push(persistedUserMessage)
 		await task.enqueueSteeringMessage("Persist exactly once")
-		task.messageStateHandler.updateDiracMessage.rejects(new Error("transcript update failed"))
+		task.messageStateHandler.patchMarkdownById.rejects(new Error("transcript update failed"))
 
 		await assert.rejects(task.appendQueuedSteeringToNextApiRequest([outboundUserMessage]), /transcript update failed/)
 

@@ -3,15 +3,15 @@ import "./utils/path" // necessary to have access to String.prototype.toPosix
 
 import { createRotatingFileLogger, type RotatingFileLogger, resolveLogDirectory } from "@shared/services/file-logger"
 import { HostProvider } from "@/hosts/host-provider"
-import { getErrorMessage } from "@/shared/errors"
+import { recordVersionUpgrade } from "./services/release-notes/recordVersionUpgrade"
 import { Logger } from "@/shared/services/Logger"
 import type { StorageContext } from "@/shared/storage/storage-context"
 import { FileContextTracker } from "./core/context/context-tracking/FileContextTracker"
 import { HookDiscoveryCache } from "./core/hooks/HookDiscoveryCache"
 import { HookProcessRegistry } from "./core/hooks/HookProcessRegistry"
 import { StateManager } from "./core/storage/StateManager"
+import { repairMissingTaskHistory } from "./core/commands/repairMissingTaskHistory"
 import { AgentConfigLoader } from "./core/task/tools/subagent/AgentConfigLoader"
-import { ExtensionRegistryInfo } from "./registry"
 import { ErrorService } from "./services/error"
 import { featureFlagsService } from "./services/feature-flags"
 import { getDistinctId } from "./services/logging/distinctId"
@@ -23,7 +23,6 @@ import { cleanupTestMode } from "./services/test/TestMode"
 import { ShowMessageType } from "./shared/proto/host/window"
 import { syncWorker } from "./shared/services/worker/sync"
 import { getBlobStoreSettingsFromEnv } from "./shared/services/worker/worker"
-import { getLatestAnnouncementId } from "./utils/announcements"
 import { arePathsEqual } from "./utils/path"
 
 let persistentFileLogger: RotatingFileLogger | undefined
@@ -85,12 +84,21 @@ async function initializeServices(storageContext: StorageContext): Promise<Dirac
 	await ErrorService.initialize()
 	// Legacy telemetry removed
 
+	const stateManager = StateManager.get()
+	// Record an exact-version upgrade before constructing a webview/controller that can publish state.
+	await recordVersionUpgrade(stateManager)
+
 	// =============== Webview services ===============
 	const webview = HostProvider.get().createDiracWebviewProvider()
-
-	const stateManager = StateManager.get()
-	// Non-blocking announcement check and display
-	showVersionUpdateAnnouncement(stateManager)
+	void webview.controller
+		.waitForGoalStartupReconciliation()
+		.then(() => repairMissingTaskHistory(stateManager))
+		.then(async (result) => {
+			if (result.recovered > 0) await stateManager.onSyncExternalChange?.()
+		})
+		.catch((error) => {
+			Logger.error("[Task History Repair] Background repair failed:", error)
+		})
 	// Check if this workspace was opened from worktree quick launch
 	await checkWorktreeAutoOpen(stateManager)
 
@@ -123,45 +131,6 @@ async function initializeServices(storageContext: StorageContext): Promise<Dirac
 	}, INITIALIZATION_DELAY_MS)
 
 	return webview
-}
-
-async function showVersionUpdateAnnouncement(stateManager: StateManager) {
-	// Version checking for autoupdate notification
-
-	const currentVersion = ExtensionRegistryInfo.version
-	const previousVersion = stateManager.getGlobalStateKey("diracVersion")
-	// Perform post-update actions if necessary
-	try {
-		if (!previousVersion || currentVersion !== previousVersion) {
-			Logger.log(`Dirac version changed: ${previousVersion} -> ${currentVersion}. First run or update detected.`)
-
-			// Check if there's a new announcement to show
-			// Update version key name if needed
-			const previousDiracVersion = stateManager.getGlobalStateKey("diracVersion" as any)
-			if (previousDiracVersion && !previousVersion) {
-				// This is handled by migrateDiracToDirac but as a safety measure
-			}
-
-			const lastShownAnnouncementId = stateManager.getGlobalStateKey("lastShownAnnouncementId")
-			const latestAnnouncementId = getLatestAnnouncementId()
-
-			if (lastShownAnnouncementId !== latestAnnouncementId) {
-				// Show notification when there's a new announcement (major/minor updates or fresh installs)
-				const message = previousVersion
-					? `Dirac has been updated to v${currentVersion}`
-					: `Welcome to Dirac v${currentVersion}`
-				HostProvider.window.showMessage({
-					type: ShowMessageType.INFORMATION,
-					message,
-				})
-			}
-			// Always update the main version tracker for the next launch.
-			await stateManager.setGlobalState("diracVersion", currentVersion)
-		}
-	} catch (error) {
-		const errorMessage = getErrorMessage(error)
-		Logger.error(`Error during post-update actions: ${errorMessage}, Stack trace: ${error.stack}`)
-	}
 }
 
 /**
@@ -216,6 +185,7 @@ async function tearDownServices(): Promise<void> {
 	featureFlagsService.dispose()
 	// Dispose all webview instances
 	await DiracWebviewProvider.disposeAllInstances()
+	if (StateManager.isInitialized()) await StateManager.get().flushPendingState()
 	syncWorker().dispose()
 
 	// Kill any running hook processes to prevent zombies

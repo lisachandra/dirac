@@ -1,4 +1,4 @@
-import { Card as CardType } from "@shared/ExtensionMessage"
+import { Card as CardType, isFinalStatus } from "@shared/ExtensionMessage"
 import { Box } from "ink"
 import React from "react"
 import { getIconCategoryColor } from "../../utils/icon-mapping"
@@ -38,11 +38,13 @@ export const ModularCard: React.FC<ModularCardProps> = ({
 					<CardBody body={body} maxLines={maxBodyLines} renderType={renderType} scrollOffset={scrollOffset} />
 				</Box>
 			)}
-			<CardInteractions
-				actions={actions}
-				feedbackPlaceholder={card.feedbackPlaceholder}
-				requireFeedback={requireFeedback}
-			/>
+			{!isFinalStatus(status) && (
+				<CardInteractions
+					actions={actions}
+					feedbackPlaceholder={card.feedbackPlaceholder}
+					requireFeedback={requireFeedback}
+				/>
+			)}
 		</Box>
 	)
 }

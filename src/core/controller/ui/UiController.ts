@@ -4,7 +4,9 @@ import { projectUIActionState } from "@core/task/utils/ui-projector"
 import { detectWorkspaceRoots } from "@core/workspace/detection"
 import { setupWorkspaceManager } from "@core/workspace/setup"
 import type { WorkspaceRootManager } from "@core/workspace/WorkspaceRootManager"
+import type { DiracMessage } from "@shared/ExtensionMessage"
 import { type ExtensionState, TaskStatus } from "@shared/ExtensionMessage"
+import type { GoalViewState } from "@shared/goal"
 import { assembleAuthState } from "./assembleAuthState"
 import { assembleModelState } from "./assembleModelState"
 import { assembleRuntimeState } from "./assembleRuntimeState"
@@ -18,18 +20,38 @@ export async function getStateToPostToWebview(deps: {
 	workspaceManager?: WorkspaceRootManager | undefined
 	backgroundCommandRunning: boolean
 	backgroundCommandTaskId?: string | undefined
+	goal?: GoalViewState
+	goalMessages?: DiracMessage[]
+	presentationOffset?: number
+	presentationSurfaceId?: string
+	includeMessages?: boolean
 }): Promise<ExtensionState> {
-	const { stateManager, task, workspaceManager, backgroundCommandRunning, backgroundCommandTaskId } = deps
+	const {
+		stateManager,
+		task,
+		workspaceManager,
+		backgroundCommandRunning,
+		backgroundCommandTaskId,
+		goal,
+		goalMessages,
+		presentationOffset,
+		presentationSurfaceId,
+		includeMessages = true,
+	} = deps
 
 	const resolvedWorkspaceManager =
-		workspaceManager ?? (await setupWorkspaceManager({ stateManager, detectRoots: detectWorkspaceRoots }))
+		workspaceManager ??
+		(await setupWorkspaceManager({
+			stateManager,
+			detectRoots: detectWorkspaceRoots,
+		}))
 	const primaryRootPath = resolvedWorkspaceManager?.getPrimaryRoot()?.path
 	const cwd = task?.cwd || primaryRootPath || process.cwd()
 
 	const modelState = assembleModelState(stateManager)
 	const authState = await assembleAuthState(stateManager)
-	const { latestAnnouncementId, ...runtimeState } = await assembleRuntimeState()
-	const toolState = await assembleToolState(stateManager, primaryRootPath)
+	const { latestAnnouncementId, ...runtimeState } = await assembleRuntimeState(stateManager)
+	const toolState = await assembleToolState(stateManager, primaryRootPath, task?.taskId)
 	const apiConfiguration = stateManager.getApiConfiguration()
 	const mode = stateManager.getGlobalSettingsKey("mode")
 	const configuredProviderId =
@@ -45,20 +67,30 @@ export async function getStateToPostToWebview(deps: {
 	const taskHistory = stateManager.getGlobalStateKey("taskHistory")
 	const lastShownAnnouncementId = stateManager.getGlobalStateKey("lastShownAnnouncementId")
 	const maxConsecutiveMistakes = stateManager.getGlobalSettingsKey("maxConsecutiveMistakes")
-	const diracMessages = [...(task?.messageStateHandler.getDiracMessages() || [])]
-	const currentTaskItem = task?.taskId ? (taskHistory || []).find((item) => item.id === task.taskId) : undefined
+	const capturedPresentation =
+		includeMessages && goalMessages === undefined && task
+			? await task.messageStateHandler.capturePresentationSnapshot()
+			: undefined
+	const diracMessages = includeMessages ? (goalMessages ?? capturedPresentation?.messages ?? []) : undefined
+	const selectedPresentationOffset = presentationOffset ?? capturedPresentation?.offset
+	const selectedRunId = presentationSurfaceId ?? goal?.id ?? task?.taskId
+	const currentTaskItem = selectedRunId ? (taskHistory || []).find((item) => item.id === selectedRunId) : undefined
 
 	return {
 		...modelState,
 		...authState,
 		...runtimeState,
 		...toolState,
+		goal: goal ?? null,
+		...(goal ? { mode: "act" as const } : {}),
 		availableSkills,
 		currentTaskItem,
-		diracMessages,
+		...(diracMessages ? { diracMessages } : {}),
+		presentationSurfaceId: selectedRunId,
+		presentationOffset: selectedPresentationOffset,
 		checkpointManagerErrorMessage: task?.taskState?.checkpointManagerErrorMessage,
 		taskHistory: processTaskHistory(taskHistory, primaryRootPath),
-		shouldShowAnnouncement: lastShownAnnouncementId !== latestAnnouncementId,
+		shouldShowAnnouncement: runtimeState.releaseNotes !== undefined || lastShownAnnouncementId !== latestAnnouncementId,
 		backgroundCommandRunning,
 		backgroundCommandTaskId,
 		workspaceRoots: resolvedWorkspaceManager?.getRoots() ?? [],
@@ -67,6 +99,10 @@ export async function getStateToPostToWebview(deps: {
 		activeVoiceStreamId: task?.taskState.activeVoiceStreamId,
 		taskStatus: task?.taskState.status || TaskStatus.IDLE,
 		isApiRequestActive: task?.taskState.isApiRequestActive || false,
-		uiActionState: projectUIActionState(task?.taskState, diracMessages, maxConsecutiveMistakes),
-	}
+		uiActionState: projectUIActionState(
+			task?.taskState,
+			diracMessages ?? ((id) => task?.messageStateHandler.getMessageById(id)),
+			maxConsecutiveMistakes,
+		),
+	} as ExtensionState
 }

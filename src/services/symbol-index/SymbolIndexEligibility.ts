@@ -1,6 +1,8 @@
 import { spawn } from "node:child_process"
 import * as fs from "node:fs/promises"
+import os from "node:os"
 import * as path from "node:path"
+import { DiracIgnorePolicy } from "@/shared/ignore/DiracIgnorePolicy"
 
 const SUPPORTED_EXTENSIONS = new Set([
 	"js",
@@ -80,29 +82,35 @@ interface GitResult {
 	stderr: string
 }
 
-interface GitPaths {
-	eligiblePaths: Set<string>
-	watchDirectories: Set<string>
-}
-
-export interface SymbolIndexEligibilityResult {
-	paths: Set<string>
-	watchDirectories: Set<string>
+export interface SymbolIndexControlPaths {
 	isGitWorkspace: boolean
 	gitDirectory: string | null
+	externalControlPaths: Set<string>
+}
+
+export interface SymbolIndexEligibilityResult extends SymbolIndexControlPaths {
+	paths: Set<string>
 }
 
 export class SymbolIndexEligibility {
-	public constructor(private readonly projectRoot: string) {}
+	private readonly diracIgnorePolicy: DiracIgnorePolicy
+	private gitWorkspace: boolean | null = null
+	private gitDirectory: string | null = null
+	private controlPaths = new Set<string>()
+
+	public constructor(private readonly projectRoot: string) {
+		this.diracIgnorePolicy = new DiracIgnorePolicy(projectRoot)
+		this.controlPaths.add(path.join(projectRoot, ".diracignore"))
+	}
 
 	public admitsRelativePath(relativePath: string): boolean {
 		const normalizedPath = path.normalize(relativePath)
-		if (!normalizedPath || normalizedPath === ".." || normalizedPath.startsWith(`..${path.sep}`)) return false
-		if (path.isAbsolute(normalizedPath)) return false
+		if (!this.isRelativePathWithinRoot(normalizedPath)) return false
 
 		const segments = normalizedPath.split(path.sep)
 		if (segments.some((segment) => EXCLUDED_DIRECTORY_NAMES.has(segment))) return false
 		if (EXCLUDED_FILE_NAMES.has(path.basename(normalizedPath))) return false
+		if (!this.diracIgnorePolicy.allowsRelativePath(normalizedPath)) return false
 
 		const extension = path.extname(normalizedPath).toLowerCase().slice(1)
 		return SUPPORTED_EXTENSIONS.has(extension)
@@ -112,22 +120,58 @@ export class SymbolIndexEligibility {
 		return this.admitsRelativePath(path.relative(this.projectRoot, absolutePath))
 	}
 
-	public async enumerate(): Promise<SymbolIndexEligibilityResult> {
-		if (await this.isGitWorkspace()) {
-			const gitPaths = await this.enumerateGitPaths()
+	public excludesAbsolutePath(absolutePath: string): boolean {
+		const relativePath = path.normalize(path.relative(this.projectRoot, absolutePath))
+		if (!this.isRelativePathWithinRoot(relativePath)) return true
+		if (relativePath.split(path.sep).some((segment) => EXCLUDED_DIRECTORY_NAMES.has(segment))) return true
+		return !this.diracIgnorePolicy.allowsRelativePath(relativePath)
+	}
+
+	public isControlPath(absolutePath: string): boolean {
+		const normalizedPath = path.normalize(absolutePath)
+		const relativePath = path.normalize(path.relative(this.projectRoot, normalizedPath))
+		if (this.isRelativePathWithinRoot(relativePath) && path.basename(relativePath) === ".gitignore") return true
+		if (normalizedPath === path.join(this.projectRoot, ".git")) return true
+		const rootGitRelativePath = path.normalize(path.relative(path.join(this.projectRoot, ".git"), normalizedPath))
+		if (
+			rootGitRelativePath === "config" ||
+			rootGitRelativePath === "index" ||
+			rootGitRelativePath === path.join("info", "exclude")
+		)
+			return true
+		if (this.diracIgnorePolicy.isControlPath(normalizedPath)) return true
+		return this.controlPaths.has(normalizedPath)
+	}
+
+	public async prepareControlPaths(): Promise<SymbolIndexControlPaths> {
+		await this.diracIgnorePolicy.reload()
+		this.controlPaths = new Set(this.diracIgnorePolicy.getControlPaths())
+		this.gitWorkspace = await this.isGitWorkspace()
+
+		if (!this.gitWorkspace) {
+			this.gitDirectory = null
 			return {
-				paths: gitPaths.eligiblePaths,
-				watchDirectories: gitPaths.watchDirectories,
-				isGitWorkspace: true,
-				gitDirectory: await this.resolveGitDirectory(),
+				isGitWorkspace: false,
+				gitDirectory: null,
+				externalControlPaths: this.getExternalControlPaths(),
 			}
 		}
-		const nonGitPaths = await this.enumerateNonGitPaths()
+
+		this.gitDirectory = await this.resolveGitDirectory()
+		for (const controlPath of await this.resolveGitControlPaths()) this.controlPaths.add(controlPath)
+		for (const controlPath of await this.resolveConfiguredGitControlPaths()) this.controlPaths.add(controlPath)
 		return {
-			paths: nonGitPaths.eligiblePaths,
-			watchDirectories: nonGitPaths.watchDirectories,
-			isGitWorkspace: false,
-			gitDirectory: null,
+			isGitWorkspace: true,
+			gitDirectory: this.gitDirectory,
+			externalControlPaths: this.getExternalControlPaths(),
+		}
+	}
+
+	public async enumerate(): Promise<SymbolIndexEligibilityResult> {
+		const controlPaths = await this.prepareControlPaths()
+		return {
+			...controlPaths,
+			paths: controlPaths.isGitWorkspace ? await this.enumerateGitPaths() : await this.enumerateNonGitPaths(),
 		}
 	}
 
@@ -139,16 +183,35 @@ export class SymbolIndexEligibility {
 	}
 
 	public async filterAbsolutePaths(absolutePaths: Iterable<string>): Promise<Set<string>> {
-		const { paths: eligiblePaths } = await this.enumerate()
-		const eligibleAbsolutePaths = new Set<string>()
+		const candidates = new Map<string, string>()
 		for (const absolutePath of absolutePaths) {
 			const relativePath = path.normalize(path.relative(this.projectRoot, absolutePath))
-			if (eligiblePaths.has(relativePath)) eligibleAbsolutePaths.add(absolutePath)
+			if (this.admitsRelativePath(relativePath)) candidates.set(relativePath, absolutePath)
 		}
-		return eligibleAbsolutePaths
+		if (candidates.size === 0) return new Set()
+
+		const isGitWorkspace = this.gitWorkspace ?? (await this.isGitWorkspace())
+		if (!isGitWorkspace) return new Set(candidates.values())
+
+		const input = `${[...candidates.keys()].map((relativePath) => relativePath.split(path.sep).join("/")).join("\0")}\0`
+		const result = await this.runGit(["check-ignore", "-z", "--stdin"], input)
+		if (result.code !== 0 && result.code !== 1) {
+			throw new Error(`Git eligibility check failed: ${result.stderr.trim()}`)
+		}
+
+		const ignoredPaths = new Set(
+			result.stdout
+				.toString("utf8")
+				.split("\0")
+				.filter(Boolean)
+				.map((relativePath) => path.normalize(relativePath)),
+		)
+		return new Set(
+			[...candidates].filter(([relativePath]) => !ignoredPaths.has(relativePath)).map(([, absolutePath]) => absolutePath),
+		)
 	}
 
-	private async enumerateGitPaths(): Promise<GitPaths> {
+	private async enumerateGitPaths(): Promise<Set<string>> {
 		const result = await this.runGit(["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
 		if (result.code !== 0) throw new Error(`Git eligibility enumeration failed: ${result.stderr.trim()}`)
 
@@ -158,7 +221,7 @@ export class SymbolIndexEligibility {
 			const relativePath = path.normalize(gitPath)
 			if (this.admitsRelativePath(relativePath)) eligiblePaths.add(relativePath)
 		}
-		return { eligiblePaths, watchDirectories: await this.enumerateWatchDirectories() }
+		return eligiblePaths
 	}
 
 	private async resolveGitDirectory(): Promise<string> {
@@ -167,60 +230,113 @@ export class SymbolIndexEligibility {
 		return path.normalize(result.stdout.toString("utf8").trim())
 	}
 
-	private async enumerateNonGitPaths(): Promise<GitPaths> {
+	private async resolveGitControlPaths(): Promise<Set<string>> {
+		const result = await this.runGit([
+			"rev-parse",
+			"--path-format=absolute",
+			"--git-path",
+			"config",
+			"--git-path",
+			"index",
+			"--git-path",
+			"info/exclude",
+			"--git-path",
+			"config.worktree",
+		])
+		if (result.code !== 0) throw new Error(`Unable to resolve Git control paths: ${result.stderr.trim()}`)
+		return new Set(
+			result.stdout
+				.toString("utf8")
+				.split(/\r?\n/)
+				.filter(Boolean)
+				.map((controlPath) => path.normalize(controlPath)),
+		)
+	}
+
+	private async resolveConfiguredGitControlPaths(): Promise<Set<string>> {
+		const controls = await this.resolveStandardGlobalGitControlPaths()
+		const result = await this.runGit(["config", "--show-origin", "--path", "--get", "core.excludesFile"])
+		if (result.code === 1) return controls
+		if (result.code !== 0) throw new Error(`Unable to resolve Git excludes controls: ${result.stderr.trim()}`)
+
+		const output = result.stdout.toString("utf8").trim()
+		const separatorIndex = output.indexOf("\t")
+		const origin = separatorIndex >= 0 ? output.slice(0, separatorIndex) : ""
+		const excludesFile = separatorIndex >= 0 ? output.slice(separatorIndex + 1) : output
+		if (origin.startsWith("file:")) controls.add(this.resolveControlPath(origin.slice("file:".length)))
+		if (excludesFile) controls.add(this.resolveControlPath(excludesFile))
+		return controls
+	}
+
+	private async resolveStandardGlobalGitControlPaths(): Promise<Set<string>> {
+		const homeDirectory = os.homedir()
+		const xdgConfigDirectory = process.env.XDG_CONFIG_HOME || path.join(homeDirectory, ".config")
+		const candidates = process.env.GIT_CONFIG_GLOBAL
+			? [this.resolveControlPath(process.env.GIT_CONFIG_GLOBAL)]
+			: [path.join(homeDirectory, ".gitconfig"), path.join(xdgConfigDirectory, "git", "config")]
+		candidates.push(path.join(xdgConfigDirectory, "git", "ignore"))
+		if (process.env.GIT_CONFIG_SYSTEM) candidates.push(this.resolveControlPath(process.env.GIT_CONFIG_SYSTEM))
+
+		const controls = new Set<string>()
+		for (const candidate of candidates) {
+			try {
+				await fs.access(path.dirname(candidate))
+				controls.add(path.normalize(candidate))
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+			}
+		}
+		return controls
+	}
+
+	private async enumerateNonGitPaths(): Promise<Set<string>> {
 		const eligiblePaths = new Set<string>()
-		const watchDirectories = new Set<string>()
 		const directories = [this.projectRoot]
 
 		while (directories.length > 0) {
 			const directory = directories.pop()!
-			const relativeDirectory = path.normalize(path.relative(this.projectRoot, directory))
-			if (relativeDirectory !== ".") watchDirectories.add(relativeDirectory)
 			const entries = await fs.readdir(directory, { withFileTypes: true })
 			for (const entry of entries) {
+				const absolutePath = path.join(directory, entry.name)
+				const relativePath = path.normalize(path.relative(this.projectRoot, absolutePath))
 				if (entry.isDirectory()) {
-					if (!EXCLUDED_DIRECTORY_NAMES.has(entry.name)) directories.push(path.join(directory, entry.name))
+					if (!this.excludesAbsolutePath(absolutePath)) directories.push(absolutePath)
 					continue
 				}
-				if (!entry.isFile()) continue
-				const relativePath = path.normalize(path.relative(this.projectRoot, path.join(directory, entry.name)))
-				if (this.admitsRelativePath(relativePath)) eligiblePaths.add(relativePath)
+				if (entry.isFile() && this.admitsRelativePath(relativePath)) eligiblePaths.add(relativePath)
 			}
 		}
-		return { eligiblePaths, watchDirectories }
+		return eligiblePaths
 	}
 
-	private async enumerateWatchDirectories(): Promise<Set<string>> {
-		const watchDirectories = new Set<string>()
-		const directories = [this.projectRoot]
-		while (directories.length > 0) {
-			const directory = directories.pop()!
-			const relativeDirectory = path.normalize(path.relative(this.projectRoot, directory))
-			if (relativeDirectory !== ".") watchDirectories.add(relativeDirectory)
-			for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
-				if (!entry.isDirectory() || EXCLUDED_DIRECTORY_NAMES.has(entry.name)) continue
-				directories.push(path.join(directory, entry.name))
-			}
-		}
-		return watchDirectories
+	private getExternalControlPaths(): Set<string> {
+		return new Set([...this.controlPaths].filter((controlPath) => !this.isInsideProjectRoot(controlPath)))
 	}
 
-	private addAncestorDirectories(directories: Set<string>, relativePath: string): void {
-		let relativeDirectory = path.dirname(relativePath)
-		while (relativeDirectory !== ".") {
-			directories.add(relativeDirectory)
-			const parent = path.dirname(relativeDirectory)
-			if (parent === relativeDirectory) return
-			relativeDirectory = parent
-		}
+	private isInsideProjectRoot(absolutePath: string): boolean {
+		const relativePath = path.normalize(path.relative(this.projectRoot, absolutePath))
+		return relativePath === "." || this.isRelativePathWithinRoot(relativePath)
 	}
 
-	private runGit(args: string[]): Promise<GitResult> {
+	private isRelativePathWithinRoot(relativePath: string): boolean {
+		return (
+			Boolean(relativePath) &&
+			relativePath !== ".." &&
+			!relativePath.startsWith(`..${path.sep}`) &&
+			!path.isAbsolute(relativePath)
+		)
+	}
+
+	private resolveControlPath(controlPath: string): string {
+		return path.normalize(path.isAbsolute(controlPath) ? controlPath : path.resolve(this.projectRoot, controlPath))
+	}
+
+	private runGit(args: string[], input?: string): Promise<GitResult> {
 		return new Promise((resolve, reject) => {
 			const child = spawn("git", args, {
 				cwd: this.projectRoot,
 				env: { ...process.env, LC_ALL: "C" },
-				stdio: ["ignore", "pipe", "pipe"],
+				stdio: ["pipe", "pipe", "pipe"],
 			})
 			const stdoutChunks: Buffer[] = []
 			const stderrChunks: Buffer[] = []
@@ -260,6 +376,8 @@ export class SymbolIndexEligibility {
 					stderr: Buffer.concat(stderrChunks).toString("utf8"),
 				}),
 			)
+			child.stdin.on("error", (error) => finish(error))
+			child.stdin.end(input)
 		})
 	}
 }

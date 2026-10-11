@@ -1,12 +1,11 @@
-import type { ModelProviderSelection } from "@shared/api"
 import { ConversationCondensationService } from "@core/text-condensation/ConversationCondensationService"
-import { UtilityModelTextCondenser } from "@core/text-condensation/UtilityModelTextCondenser"
 import { createDefaultTextCondensationTemplateRegistry } from "@core/text-condensation/templates"
+import { UtilityModelTextCondenser } from "@core/text-condensation/UtilityModelTextCondenser"
 import {
 	getConfiguredUtilityModelSelection,
 	isUtilityTextCondensationAvailable,
 } from "@core/text-condensation/UtilityTextCondensationAvailability"
-import * as utilityModel from "@core/utility-model/UtilityModelRunner"
+import type { ModelProviderSelection } from "@shared/api"
 import type { IConversationCondensationTrait } from "../../interfaces/IToolEnvironment"
 import type { TaskConfig } from "../../types/TaskConfig"
 
@@ -24,20 +23,20 @@ export function buildConversationCondensationTrait(config: TaskConfig): IConvers
 		isAvailable: (template) =>
 			isUtilityTextCondensationAvailable(
 				{
-					utilityModelEnabled: config.services.stateManager.getGlobalSettingsKey("utilityModelEnabled"),
-					utilityModelUseCondense: config.services.stateManager.getGlobalSettingsKey("utilityModelUseCondense"),
-					utilityModelUseNewTask: config.services.stateManager.getGlobalSettingsKey("utilityModelUseNewTask"),
-					utilityModelSelection: config.services.stateManager.getGlobalSettingsKey("utilityModelSelection"),
+					utilityModelEnabled: config.utilityModelEnabled,
+					utilityModelUseCondense: config.utilityModelUseCondense,
+					utilityModelUseNewTask: config.utilityModelUseNewTask,
+					utilityModelSelection: config.utilityModelSelection,
 				},
 				template,
 				templates,
 			),
 		condenseConversation: async (template, options) => {
 			const settings = {
-				utilityModelEnabled: config.services.stateManager.getGlobalSettingsKey("utilityModelEnabled"),
-				utilityModelUseCondense: config.services.stateManager.getGlobalSettingsKey("utilityModelUseCondense"),
-				utilityModelUseNewTask: config.services.stateManager.getGlobalSettingsKey("utilityModelUseNewTask"),
-				utilityModelSelection: config.services.stateManager.getGlobalSettingsKey("utilityModelSelection"),
+				utilityModelEnabled: config.utilityModelEnabled,
+				utilityModelUseCondense: config.utilityModelUseCondense,
+				utilityModelUseNewTask: config.utilityModelUseNewTask,
+				utilityModelSelection: config.utilityModelSelection,
 			}
 			const selection = getConfiguredUtilityModelSelection(settings.utilityModelSelection)
 			if (!isUtilityTextCondensationAvailable(settings, template, templates) || !selection) {
@@ -61,14 +60,13 @@ export function buildConversationCondensationTrait(config: TaskConfig): IConvers
 	}
 }
 
-
 function createConversationCondensationService(
 	config: TaskConfig,
 	selection: ModelProviderSelection,
 	templates: ReturnType<typeof createDefaultTextCondensationTemplateRegistry>,
 	onModelResolved: (modelId: string) => void,
 ): ConversationCondensationService {
-	const runner = utilityModel.createUtilityModelRunner(config.services.stateManager.getApiConfiguration(), selection, {
+	const runner = config.callbacks.createUtilityModelRunner(selection, {
 		ulid: config.ulid,
 		onModelResolved: ({ modelId }) => onModelResolved(modelId),
 	})

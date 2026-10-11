@@ -1,7 +1,6 @@
-import { DiracMessage } from "@shared/ExtensionMessage"
+import type { DiracMessage } from "@shared/ExtensionMessage"
 import { HostProvider } from "@/hosts/host-provider"
 import type { DiracStorageMessage } from "@/shared/messages/content"
-import { Logger } from "@/shared/services/Logger"
 import { extractPathLikeStrings, RuleEvaluationContext, toWorkspaceRelativePosixPath } from "./rule-conditionals"
 
 type WorkspaceRoot = { path: string }
@@ -11,11 +10,6 @@ type DiracMessageLike = DiracMessage
 
 type MessageStateHandlerLike = {
 	getDiracMessages(): DiracMessageLike[]
-	addToDiracMessages(message: DiracMessage): Promise<void>
-	updateDiracMessage(index: number, updates: Partial<DiracMessage>): Promise<void>
-	findMessageIndexById(id: string): number
-	saveDiracMessagesAndUpdateHistory(): Promise<void>
-	overwriteApiConversationHistory(history: DiracStorageMessage[]): Promise<void>
 	getApiConversationHistory(): DiracStorageMessage[]
 }
 
@@ -30,11 +24,11 @@ export type RuleContextBuilderDeps = {
  *
  * Kept in the user-instructions domain so Task remains orchestration-focused.
  *
- * Path context is gathered from multiple sources in diracMessages:
- * - User messages (task, user_feedback)
+ * Path context is gathered from structured sources:
+ * - The latest user-authored message
  * - Visible/open tabs
- * - Tool results (say="tool") - completed operations
- * - Tool requests (ask="tool") - pending operations (captures intent before execution)
+ * - Tool call inputs from API conversation history
+ * - File locations and diffs attached to tool cards
  */
 export class RuleContextBuilder {
 	/**
@@ -53,82 +47,79 @@ export class RuleContextBuilder {
 		const candidates: string[] = []
 		const diracMessages = deps.messageStateHandler.getDiracMessages()
 
-		// (1) Current-turn user message evidence:
-		// Use the most recent user-authored text (initial task or subsequent feedback).
-		// NOTE: We intentionally prefer the latest user_feedback over the original task to
-		// support first-turn activation on later turns.
-		const lastUserMsg = [...diracMessages]
+		const lastUserMessage = [...diracMessages]
 			.reverse()
-			.find((m) => m.content.type === "markdown" && typeof m.content.content === "string")
-		if (lastUserMsg && lastUserMsg.content.type === "markdown") {
-			candidates.push(...extractPathLikeStrings(lastUserMsg.content.content))
+			.find((message) => message.content.type === "markdown" && message.content.role === "user")
+		if (lastUserMessage?.content.type === "markdown") {
+			candidates.push(...extractPathLikeStrings(lastUserMessage.content.content))
 		}
 
-		// (2) Visible + open tabs
-		const roots = deps.workspaceManager?.getRoots().map((r) => r.path) ?? [deps.cwd]
-		const rawVisiblePaths = (await HostProvider.window.getVisibleTabs({}))?.paths ?? []
-		const rawOpenTabPaths = (await HostProvider.window.getOpenTabs({}))?.paths ?? []
-		for (const abs of [...rawVisiblePaths, ...rawOpenTabPaths]) {
+		const roots = deps.workspaceManager?.getRoots().map((root) => root.path) ?? [deps.cwd]
+		const visiblePaths = (await HostProvider.window.getVisibleTabs({}))?.paths ?? []
+		const openPaths = (await HostProvider.window.getOpenTabs({}))?.paths ?? []
+		for (const absolutePath of [...visiblePaths, ...openPaths]) {
 			for (const root of roots) {
-				const rel = toWorkspaceRelativePosixPath(abs, root)
-				if (rel) {
-					candidates.push(rel)
-					break
-				}
+				const relativePath = toWorkspaceRelativePosixPath(absolutePath, root)
+				if (!relativePath) continue
+				candidates.push(relativePath)
+				break
 			}
 		}
 
-		// (3) Files edited by Dirac during this task (completed operations):
-		// Parse say="tool" messages for tool results indicating file operations.
-		for (const msg of diracMessages) {
-			if (msg.content.type !== "card" || !msg.content.card.body) continue
-			try {
-				const tool = JSON.parse(msg.content.card.body) as { tool?: string; path?: string }
-				if (
-					(tool.tool === "editedExistingFile" || tool.tool === "newFileCreated" || tool.tool === "fileDeleted") &&
-					tool.path
-				) {
-					candidates.push(tool.path)
-				}
-			} catch (error) {
-				// Intentional: malformed tool card bodies are not fatal.
-				Logger.debug("Failed to parse tool card body for rule context:", error)
+		for (const message of deps.messageStateHandler.getApiConversationHistory()) {
+			if (message.role !== "assistant" || !Array.isArray(message.content)) continue
+			for (const block of message.content) {
+				if (block.type !== "tool_use") continue
+				candidates.push(...this.pathsFromToolInput(block.input))
 			}
 		}
 
-		// (4) Tool requests (pending operations):
-		// Parse ask="tool" messages to capture the assistant's intent BEFORE tool execution.
-		// This enables rule activation even when:
-		// - The tool hasn't completed yet
-		// - The tool fails (intent was still expressed)
-		// - Files don't exist yet (new file creation)
-		for (const msg of diracMessages) {
-			if (msg.content.type !== "card" || !msg.content.card.body) continue
-			try {
-				const tool = JSON.parse(msg.content.card.body) as {
-					tool?: string
-					path?: string
-				}
+		for (const message of diracMessages) {
+			if (message.content.type !== "card") continue
+			for (const location of message.content.card.locations ?? []) candidates.push(location.path)
+			for (const diff of message.content.card.diffs ?? []) candidates.push(diff.path)
+		}
 
-				// Extract path from standard file tools
-				if (tool.path) {
-					candidates.push(tool.path)
-				}
-			} catch (error) {
-				// Intentional: malformed tool card bodies are not fatal.
-				Logger.debug("Failed to parse tool card body for rule context:", error)
+		return this.normalizePaths(candidates)
+	}
+
+	private pathsFromToolInput(input: unknown): string[] {
+		if (!this.isRecord(input)) return []
+
+		const paths: string[] = []
+		for (const key of ["path", "file_path", "filePath"]) {
+			const value = input[key]
+			if (typeof value === "string") paths.push(value)
+		}
+
+		const pathList = input.paths
+		if (Array.isArray(pathList)) {
+			for (const value of pathList) {
+				if (typeof value === "string") paths.push(value)
 			}
 		}
 
-		// Normalize/dedupe/cap
+		for (const key of ["files", "targets"]) {
+			const entries = input[key]
+			if (!Array.isArray(entries)) continue
+			for (const entry of entries) paths.push(...this.pathsFromToolInput(entry))
+		}
+
+		return paths
+	}
+
+	private isRecord(value: unknown): value is Record<string, unknown> {
+		return typeof value === "object" && value !== null && !Array.isArray(value)
+	}
+
+	private normalizePaths(candidates: string[]): string[] {
 		const seen = new Set<string>()
 		const normalized: string[] = []
-		for (const c of candidates) {
-			const posix = c.replace(/\\/g, "/").replace(/^\//, "")
-			if (!posix || posix === "/") continue
-			if (seen.has(posix)) continue
-			seen.add(posix)
-			normalized.push(posix)
+		for (const candidate of candidates) {
+			const posixPath = candidate.replace(/\\/g, "/").replace(/^\//, "")
+			if (!posixPath || posixPath === "/" || seen.has(posixPath)) continue
+			seen.add(posixPath)
+			normalized.push(posixPath)
 			if (normalized.length >= this.MAX_RULE_PATH_CANDIDATES) break
 		}
 		return normalized.sort()

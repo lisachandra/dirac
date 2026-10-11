@@ -3,11 +3,12 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { VirtuosoHandle } from "react-virtuoso"
 import { CHAT_CONSTANTS } from "../constants"
 import { ScrollBehavior } from "../types/chatTypes"
+import { useChatStore } from "@/features/chat/store/chatStore"
 
 export function useScrollBehavior(
 	messages: DiracMessage[],
-	visibleMessages: DiracMessage[],
-	renderedMessages: DiracMessage[],
+	visibleMessageIds: string[],
+	renderedMessageIds: string[],
 	expandedRows: Record<string, boolean>,
 	setExpandedRows: React.Dispatch<React.SetStateAction<Record<string, boolean>>>,
 ): ScrollBehavior {
@@ -23,10 +24,10 @@ export function useScrollBehavior(
 	const touchYRef = useRef<number | null>(null)
 	const messagesRef = useRef(messages)
 	messagesRef.current = messages
-	const visibleMessagesRef = useRef(visibleMessages)
-	visibleMessagesRef.current = visibleMessages
-	const renderedMessagesRef = useRef(renderedMessages)
-	renderedMessagesRef.current = renderedMessages
+	const visibleMessageIdsRef = useRef(visibleMessageIds)
+	visibleMessageIdsRef.current = visibleMessageIds
+	const renderedMessageIdsRef = useRef(renderedMessageIds)
+	renderedMessageIdsRef.current = renderedMessageIds
 	const expandedRowsRef = useRef(expandedRows)
 	expandedRowsRef.current = expandedRows
 
@@ -97,15 +98,15 @@ export function useScrollBehavior(
 	const scrollToMessage = useCallback(
 		(messageIndex: number) => {
 			const msgs = messagesRef.current
-			const rendered = renderedMessagesRef.current
+			const rendered = renderedMessageIdsRef.current
 			const targetMessage = msgs[messageIndex]
 			if (!targetMessage) return
 
-			const visMsgs = visibleMessagesRef.current
-			const visibleIndex = visMsgs.findIndex((msg) => msg.id === targetMessage.id)
+			const visMsgs = visibleMessageIdsRef.current
+			const visibleIndex = visMsgs.indexOf(targetMessage.id)
 			if (visibleIndex === -1) return
 
-			const renderedIndex = rendered.findIndex((msg) => msg.id === targetMessage.id)
+			const renderedIndex = rendered.indexOf(targetMessage.id)
 			if (renderedIndex === -1) return
 
 			stopFollowing()
@@ -125,12 +126,19 @@ export function useScrollBehavior(
 	const toggleRowExpansion = useCallback(
 		(id: string) => {
 			const currentExpandedRows = expandedRowsRef.current
-			const currentRenderedMessages = renderedMessagesRef.current
+			const currentRenderedMessages = renderedMessageIdsRef.current
 			const isCollapsing = currentExpandedRows[id] ?? false
-			const lastMessage = currentRenderedMessages.at(-1)
-			const isLast = lastMessage?.id === id
-			const secondToLastMessage = currentRenderedMessages.at(-2)
-			const isSecondToLast = secondToLastMessage?.id === id
+			const lastMessageId = currentRenderedMessages.at(-1)
+			const isLast = lastMessageId === id
+			const secondToLastMessageId = currentRenderedMessages.at(-2)
+			const isSecondToLast = secondToLastMessageId === id
+			const lastMessage = lastMessageId
+				? (() => {
+					const state = useChatStore.getState()
+					const index = state.messageIndexById.get(lastMessageId)
+					return index === undefined ? undefined : state.diracMessages[index]
+				})()
+				: undefined
 
 			const isLastCollapsedApiReq =
 				isLast && lastMessage?.content.type === "api_status" && !currentExpandedRows[lastMessage.id]
@@ -162,16 +170,17 @@ export function useScrollBehavior(
 	}, [messages.length])
 
 	// Scroll to bottom when a card requires user input (approval buttons appear)
+	const lastRenderedMessage = useChatStore((state) => state.lastMessage)
 	const lastCardStatusRef = useRef<string | undefined>()
 	useEffect(() => {
-		const lastMessage = renderedMessages.at(-1)
+		const lastMessage = lastRenderedMessage
 		if (!lastMessage) return
 		const currentStatus = lastMessage.content.type === "card" ? lastMessage.content.card.status : undefined
 		if (currentStatus === CardStatus.WAITING_FOR_INPUT && lastCardStatusRef.current !== CardStatus.WAITING_FOR_INPUT) {
 			scrollToBottomAuto()
 		}
 		lastCardStatusRef.current = currentStatus
-	}, [renderedMessages, scrollToBottomAuto])
+	}, [lastRenderedMessage, scrollToBottomAuto])
 
 	const handleAtBottomStateChange = useCallback((isAtBottom: boolean) => {
 		isAtBottomRef.current = isAtBottom

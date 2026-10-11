@@ -1,4 +1,7 @@
-import { applyApiConfigurationTransaction } from "@core/controller/models/apiConfigurationTransaction"
+import {
+	applyApiConfigurationTransaction,
+	type ApiConfigurationTransactionTask,
+} from "@core/controller/models/apiConfigurationTransaction"
 import type { StateManager } from "@core/storage/StateManager"
 import type { ApiProvider } from "@shared/api"
 import { ShowMessageType } from "@shared/proto/host/window"
@@ -13,12 +16,7 @@ import { Logger } from "@/shared/services/Logger"
 export interface AuthControllerDependencies {
 	stateManager: StateManager
 	postStateToWebview(): Promise<void>
-	task?: {
-		api: any
-		ulid: string
-
-		setApiHandler(api: any): void
-	}
+	task?: ApiConfigurationTransactionTask
 }
 
 export class AuthController {
@@ -46,7 +44,11 @@ export class AuthController {
 			...(currentApiConfiguration.planModeOpenRouterModelId ? { planModeApiProvider: openrouter } : {}),
 			...(currentApiConfiguration.actModeOpenRouterModelId ? { actModeApiProvider: openrouter } : {}),
 		}
-		applyApiConfigurationTransaction(this.deps, updatedConfig)
+		await applyApiConfigurationTransaction(this.deps, updatedConfig, undefined, undefined, {
+			openRouterApiKey: apiKey,
+			...(currentApiConfiguration.planModeOpenRouterModelId ? { planModeApiProvider: openrouter } : {}),
+			...(currentApiConfiguration.actModeOpenRouterModelId ? { actModeApiProvider: openrouter } : {}),
+		})
 		await this.deps.postStateToWebview()
 	}
 
@@ -91,7 +93,11 @@ export class AuthController {
 			actModeApiProvider: requesty,
 			requestyApiKey: code,
 		}
-		applyApiConfigurationTransaction(this.deps, updatedConfig)
+		await applyApiConfigurationTransaction(this.deps, updatedConfig, undefined, undefined, {
+			planModeApiProvider: requesty,
+			actModeApiProvider: requesty,
+			requestyApiKey: code,
+		})
 		await this.deps.postStateToWebview()
 	}
 }

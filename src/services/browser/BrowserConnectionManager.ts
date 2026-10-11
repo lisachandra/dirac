@@ -7,7 +7,8 @@ import * as chromeLauncher from "chrome-launcher"
 import os from "os"
 import * as path from "path"
 import { Browser, connect, launch, Page } from "puppeteer-core"
-import { StateManager } from "@/core/storage/StateManager"
+import type { StateManager } from "@/core/storage/StateManager"
+import type { BrowserSettings } from "@shared/BrowserSettings"
 import { telemetryService } from "@/services/telemetry"
 import { getErrorMessage } from "@/shared/errors"
 import { Logger } from "@/shared/services/Logger"
@@ -46,10 +47,14 @@ export class BrowserConnectionManager {
 	private sessionStartTime = 0
 	private browserActions: string[] = []
 	private ulid?: string
-	private stateManager: StateManager
+	constructor(private readonly settingsSource: StateManager | BrowserSettings | (() => BrowserSettings)) {}
 
-	constructor(stateManager: StateManager) {
-		this.stateManager = stateManager
+	private get browserSettings(): BrowserSettings {
+		if (typeof this.settingsSource === "function") return this.settingsSource()
+		if ("getGlobalSettingsKey" in this.settingsSource) {
+			return this.settingsSource.getGlobalSettingsKey("browserSettings")
+		}
+		return this.settingsSource
 	}
 
 	// --- accessors for the action layer ---
@@ -94,7 +99,7 @@ export class BrowserConnectionManager {
 			isConnected: !!this.browser,
 			isRemote: this.isConnectedToRemote,
 			host: this.isConnectedToRemote
-				? this.stateManager.getGlobalSettingsKey("browserSettings").remoteBrowserHost
+				? this.browserSettings.remoteBrowserHost
 				: undefined,
 		}
 	}
@@ -107,7 +112,7 @@ export class BrowserConnectionManager {
 
 	async getDetectedChromePath(): Promise<{ path: string; isBundled: boolean }> {
 		// First check browserSettings (from UI, stored in global state)
-		const browserSettings = this.stateManager.getGlobalSettingsKey("browserSettings")
+		const browserSettings = this.browserSettings
 		if (browserSettings.chromeExecutablePath && (await fileExistsAtPath(browserSettings.chromeExecutablePath))) {
 			return {
 				path: browserSettings.chromeExecutablePath,
@@ -140,7 +145,7 @@ export class BrowserConnectionManager {
 			}
 			Logger.info("chrome installation", installation)
 
-			const userArgs = splitArgs(this.stateManager.getGlobalSettingsKey("browserSettings").customArgs)
+			const userArgs = splitArgs(this.browserSettings.customArgs)
 
 			const args = [
 				`--remote-debugging-port=${DEBUG_PORT}`,
@@ -194,7 +199,7 @@ export class BrowserConnectionManager {
 		this.browserActions = []
 		this.isConnectedToRemote = false
 
-		const browserSettings = this.stateManager.getGlobalSettingsKey("browserSettings")
+		const browserSettings = this.browserSettings
 
 		if (browserSettings.remoteBrowserEnabled) {
 			Logger.log(`launch browser called -- remote host mode (non-headless)`)
@@ -228,7 +233,7 @@ export class BrowserConnectionManager {
 	}
 
 	async launchLocalBrowser() {
-		const browserSettings = this.stateManager.getGlobalSettingsKey("browserSettings")
+		const browserSettings = this.browserSettings
 		const { path } = await this.getDetectedChromePath()
 		const userArgs = splitArgs(browserSettings.customArgs)
 		this.browser = await launch({
@@ -244,7 +249,7 @@ export class BrowserConnectionManager {
 	}
 
 	async launchRemoteBrowser() {
-		const browserSettings = this.stateManager.getGlobalSettingsKey("browserSettings")
+		const browserSettings = this.browserSettings
 		let remoteBrowserHost = browserSettings.remoteBrowserHost
 		let browserWSEndpoint: string | undefined = this.cachedWebSocketEndpoint
 		let _reconnectionAttempted = false

@@ -9,6 +9,7 @@
  * whole block.
  */
 
+import { CardKind, CardStatus, isFinalStatus } from "@shared/ExtensionMessage"
 import { DiracAskResponse } from "@shared/WebviewMessage"
 import sinon from "sinon"
 import { TaskState } from "../../../TaskState"
@@ -28,11 +29,20 @@ export function createMockContext(): IDiracContext {
 		markAnchorStateDirty: () => { },
 		task: {
 			get: async <T>(key: string): Promise<T | undefined> => taskData[key] as T,
+			getEntry: async <T>(key: string, entryKey: string): Promise<T | undefined> => taskData[key]?.[entryKey] as T,
+			getEntries: async <T>(key: string, entryKeys: readonly string[]): Promise<Record<string, T>> =>
+				Object.fromEntries(entryKeys.filter((entryKey) => taskData[key]?.[entryKey] !== undefined).map((entryKey) => [entryKey, taskData[key][entryKey]])),
 			set: async <T>(key: string, value: T): Promise<void> => {
 				taskData[key] = value
 			},
 			update: async <T>(key: string, updater: (value: T | undefined) => T): Promise<void> => {
 				taskData[key] = updater(taskData[key] as T | undefined)
+			},
+			updateEntries: async <T>(key: string, updates: Record<string, T>, deletions: readonly string[] = []) => {
+				const current = (taskData[key] ?? {}) as Record<string, T>
+				Object.assign(current, updates)
+				for (const entryKey of deletions) delete current[entryKey]
+				taskData[key] = current
 			},
 		},
 		workspace: {
@@ -48,6 +58,7 @@ export function createMockContext(): IDiracContext {
 }
 
 export function createMockTaskMessenger() {
+	let nextCardId = 0
 	return {
 		upsertText: sinon.stub().resolves(),
 		streamText: sinon.stub().resolves({
@@ -55,31 +66,60 @@ export function createMockTaskMessenger() {
 			appendReasoning: sinon.stub().resolves(),
 			close: sinon.stub().resolves(),
 		}),
-		createCard: sinon.stub().resolves({
-			id: "mock-card-id",
-			update: sinon.stub().resolves(),
-			appendBody: sinon.stub().resolves(),
-			finalize: sinon.stub().resolves(),
-			waitForInteraction: sinon.stub().resolves({
-				action: DiracAskResponse.APPROVE,
-				value: undefined,
-				text: undefined,
-				images: undefined,
-				files: undefined,
-				userEdits: undefined,
-			}),
+		createCard: sinon.stub().callsFake(async (params: any) => {
+			const id = `mock-card-${++nextCardId}`
+			const now = Date.now()
+			let card: any = {
+				id,
+				kind: params.kind ?? CardKind.GENERIC,
+				header: params.header,
+				status:
+					params.status ??
+					(params.requireApproval || params.requireFeedback ? CardStatus.WAITING_FOR_INPUT : CardStatus.RUNNING),
+				renderType: params.renderType ?? "text",
+				collapsed: params.collapsed,
+				startTime: now,
+				...params,
+			}
+			return {
+				id,
+				getCard: () => card,
+				update: sinon.stub().callsFake(async (patch: any) => {
+					card = { ...card, ...patch }
+				}),
+				appendBody: sinon.stub().callsFake(async (chunk: string) => {
+					card = { ...card, body: `${card.body ?? ""}${chunk}` }
+				}),
+				finalize: sinon.stub().callsFake(async (status: CardStatus) => {
+					card = { ...card, status, ...(isFinalStatus(status) ? { endTime: Date.now() } : {}) }
+				}),
+				waitForInteraction: sinon.stub().resolves({
+					action: DiracAskResponse.APPROVE,
+					value: undefined,
+					text: undefined,
+					images: undefined,
+					files: undefined,
+					userEdits: undefined,
+				}),
+			}
 		}),
 	}
 }
 
 export function createMockCallbacks(): TaskCallbacks {
 	return {
+		assertMutationAuthorized: sinon.stub(),
+		withMutationAuthorization: async <T>(_toolName: unknown, mutation: () => Promise<T>) => await mutation(),
+		transitionFromMutation: async <T>(transition: () => Promise<T>) => transition(),
+		retainMutationUntil: sinon.stub(),
+		commitEnabledToolToggles: sinon.stub().callsFake(async (_toolIds, finalize) => finalize?.()),
 		saveCheckpoint: sinon.stub().resolves(),
-		commitAttemptCompletion: sinon.stub().resolves(true),
+		commitAttemptCompletion: sinon.stub().resolves({ committed: true }),
 		executeCommandTool: sinon.stub().resolves([false, "ok"]),
 		cancelRunningCommandTool: sinon.stub().resolves(false),
 		doesLatestTaskCompletionHaveNewChanges: sinon.stub().resolves(false),
 		shouldAutoApproveToolWithPath: sinon.stub().resolves(true),
+		resolveToolPathPermission: sinon.stub().resolves("auto_approve"),
 		shouldAutoApproveTool: sinon.stub().returns([true, true]),
 		postStateToWebview: sinon.stub().resolves(),
 		cancelTask: sinon.stub().resolves(),
@@ -93,6 +133,14 @@ export function createMockCallbacks(): TaskCallbacks {
 		runUserPromptSubmitHook: sinon.stub().resolves({}),
 		resetTransientState: sinon.stub().resolves(),
 		notifyContextCompacted: sinon.stub(),
+		createUtilityModelRunner: sinon.stub(),
+		createSubagentRuntime: sinon.stub().returns({
+			providerId: "test-provider",
+			model: { id: "test-model", info: {} },
+			supportsNativeWebSearch: false,
+			createMessage: sinon.stub(),
+			abort: sinon.stub(),
+		}),
 	}
 }
 
@@ -122,18 +170,6 @@ export function createMockServices(overrides?: Partial<TaskServices>): TaskServi
 		} as any,
 		commandPermissionController: {} as any,
 		contextManager: {} as any,
-		stateManager: {
-			getGlobalStateKey: () => undefined,
-			getGlobalSettingsKey: (key: string) => {
-				if (key === "mode") return "act"
-				if (key === "hooksEnabled") return false
-				return undefined
-			},
-			getApiConfiguration: () => ({
-				planModeApiProvider: "openai",
-				actModeApiProvider: "openai",
-			}),
-		} as any,
 	}
 
 	return { ...base, ...overrides }
@@ -166,20 +202,32 @@ export function createMockTaskConfig(options: MockTaskConfigOptions = {}) {
 		mode: "act" as const,
 		strictPlanModeEnabled: false,
 		yoloModeToggled: true,
+		lowVerbosityEnabled: true,
 		doubleCheckCompletionEnabled: false,
 		vscodeTerminalExecutionMode: "backgroundExec" as const,
 		enableParallelToolCalling: true,
 		isSubagentExecution: true,
 		backgroundEditEnabled: false,
+		providerId: "test-provider",
+		customPrompt: undefined,
+		hooksEnabled: false,
+		subagentsEnabled: false,
+		useAutoCondense: true,
+		utilityModelEnabled: false,
+		utilityModelUseCondense: true,
+		utilityModelUseNewTask: true,
+		utilityModelSelection: undefined,
+		globalSkillsToggles: {},
+		localSkillsToggles: {},
 		taskState,
 		messageState: {
 			getApiConversationHistory: sinon.stub().returns([]),
 			getDiracMessages: sinon.stub().returns([]),
 			addToDiracMessages: sinon.stub().resolves(),
+			flushPendingWrites: sinon.stub().resolves(),
 		},
-		api: {
-			getModel: () => ({ id: "test-model", info: { supportsImages: false } }),
-		},
+		model: { id: "test-model", info: { supportsImages: false } },
+		supportsNativeWebSearch: false,
 		autoApprovalSettings: {
 			enableNotifications: false,
 			actions: { executeCommands: false },

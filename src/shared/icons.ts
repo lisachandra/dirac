@@ -13,6 +13,7 @@ export enum DiracIcon {
 	FILE_LIST = "folder-tree",
 	SEARCH = "search",
 	DIAGNOSTICS = "shield-check",
+	PERMISSION_APPROVAL = "badge-check",
 	SUBAGENTS = "users",
 	SUMMARIZE = "clipboard-list",
 	CHAT = "message-square",

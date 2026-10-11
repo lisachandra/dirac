@@ -345,6 +345,7 @@ function createMockConfig(cwd: string) {
 		askWarning: sinon.stub().resolves(undefined),
 		askInfo: sinon.stub().resolves(undefined),
 		shouldAutoApproveToolWithPath: sinon.stub().resolves(true),
+		resolveToolPathPermission: sinon.stub().resolves("auto_approve"),
 		removeLastPartialMessageIfExistsWithType: sinon.stub().resolves(),
 		sayAndCreateMissingParamError: sinon.stub().resolves("missing_param_error"),
 		cancelTask: sinon.stub().resolves(),

@@ -24,9 +24,11 @@ interface PanelProps {
 	isSubpage?: boolean
 	/** Panel content */
 	children: ReactNode
+	/** Optional stable shortcut/status footer. */
+	footer?: ReactNode
 }
 
-export const Panel: React.FC<PanelProps> = ({ label, tabs, currentTab, isSubpage, children }) => {
+export const Panel: React.FC<PanelProps> = ({ label, tabs, currentTab, isSubpage, children, footer }) => {
 	const { columns } = useTerminalSize()
 	const currentTabIndex = currentTab && tabs ? tabs.findIndex((t) => t.key === currentTab) : 0
 
@@ -61,15 +63,23 @@ export const Panel: React.FC<PanelProps> = ({ label, tabs, currentTab, isSubpage
 
 			{/* Separator line */}
 			<Box>
-				<Text color={theme.separator}>
-					{"─".repeat(Math.max(columns - 2, 0))}
-				</Text>
+				<Text color={theme.separator}>{"─".repeat(Math.max(columns - 2, 0))}</Text>
 			</Box>
 
 			{/* Content */}
 			<Box flexDirection="column" paddingLeft={1} paddingRight={1}>
 				{children}
 			</Box>
+			{footer && (
+				<Box flexDirection="column">
+					<Box>
+						<Text color={theme.separator}>{"─".repeat(Math.max(columns - 2, 0))}</Text>
+					</Box>
+					<Box paddingLeft={1} paddingRight={1}>
+						<Text color={theme.muted}>{footer}</Text>
+					</Box>
+				</Box>
+			)}
 		</Box>
 	)
 }

@@ -1,14 +1,15 @@
-import type { SubagentRunResult, SubagentRunStats } from "./SubagentRunner"
 import { SubagentExecutionStatus } from "@shared/ExtensionMessage"
+import type { DiracStorageMessage } from "@shared/messages"
+import { type SubagentRunResult, type SubagentRunStats } from "./SubagentRunTypes"
 
 // Constructs the authoritative result for a subagent stopped by timeout or cancellation.
 export class SubagentAbortHandler {
 	constructor(
 		private getAbortReason: () => string | undefined,
-		private getBestEffortResult: (conversation: any[]) => string,
+		private getBestEffortResult: (conversation: DiracStorageMessage[]) => string,
 	) {}
 
-	buildAbortResult(conversation: any[], stats: SubagentRunStats): SubagentRunResult {
+	buildAbortResult(conversation: DiracStorageMessage[], stats: SubagentRunStats): SubagentRunResult {
 		const reason = this.getAbortReason() || "Subagent run cancelled."
 		const finalStats = { ...stats }
 		if (/timed out/.test(reason)) {

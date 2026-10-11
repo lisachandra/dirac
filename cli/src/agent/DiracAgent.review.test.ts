@@ -64,7 +64,7 @@ const mocks = vi.hoisted(() => {
 			EXTENSION_DIR: "/tmp/dirac-test",
 			DATA_DIR: "/tmp/dirac-test-data",
 		})),
-		initCoreServices: vi.fn(async () => {}),
+		initCoreServices: vi.fn(async () => { }),
 		hostProviderInitialize: vi.fn(),
 		setRuntimeHooksDir: vi.fn(),
 	}
@@ -78,7 +78,8 @@ vi.mock("@/core/controller/slash/getAvailableSlashCommands", () => ({
 	getAvailableSlashCommands: mocks.getAvailableSlashCommands,
 }))
 
-vi.mock("@/core/storage/disk", () => ({
+vi.mock("@/core/storage/disk", async (importOriginal) => ({
+	...(await importOriginal<typeof import("@/core/storage/disk")>()),
 	setRuntimeHooksDir: mocks.setRuntimeHooksDir,
 	getSavedDiracMessages: vi.fn(async () => []),
 }))
@@ -87,7 +88,8 @@ vi.mock("../vscode-context.js", () => ({
 	initializeCliContext: mocks.initializeCliContext,
 }))
 
-vi.mock("@/core/api", () => ({
+vi.mock("@/core/api", async (importOriginal) => ({
+	...(await importOriginal<typeof import("@/core/api")>()),
 	buildApiHandler: mocks.buildApiHandler,
 }))
 
@@ -108,10 +110,8 @@ vi.mock("@/hosts/host-provider.js", () => ({
 
 vi.mock("@/core/storage/StateManager", () => ({
 	StateManager: {
-		initialize: vi.fn(async () => {}),
+		initialize: vi.fn(async () => { }),
 		get: vi.fn(() => ({
-			getSessionOverrideCache: vi.fn(() => ({})),
-			setSessionOverrideCache: vi.fn(),
 			getGlobalSettingsKey: vi.fn((key: string) => {
 				if (key === "mode") return "act"
 				return undefined
@@ -125,9 +125,19 @@ vi.mock("@/core/storage/StateManager", () => ({
 				actModeThinkingBudgetTokens: 1024,
 				planModeThinkingBudgetTokens: 1024,
 			})),
+			captureEffectiveTaskConfiguration: vi.fn((overrides: Record<string, unknown>) => ({
+				apiConfiguration: {
+					actModeApiProvider: "anthropic",
+					planModeApiProvider: "anthropic",
+					actModeThinkingBudgetTokens: 1024,
+					planModeThinkingBudgetTokens: 1024,
+					...overrides,
+				},
+			})),
 			setGlobalState: vi.fn(),
+			getSecretKey: vi.fn(() => undefined),
 			setSessionOverride: vi.fn(),
-			flushPendingState: vi.fn(async () => {}),
+			flushPendingState: vi.fn(async () => { }),
 		})),
 	},
 }))
@@ -156,9 +166,9 @@ function commitFile(repoPath: string, relativePath: string, content: string, mes
 
 async function createAgentForRepo(repoPath: string): Promise<{ agent: DiracAgent; sessionId: string }> {
 	const agent = new DiracAgent({ cwd: repoPath })
-	;(agent as any).getSessionModelState = vi.fn(async () => [])
-	;(agent as any).getSessionConfigOptions = vi.fn(async () => [])
-	;(agent as any).getSessionModeState = vi.fn(() => [])
+		; (agent as any).getSessionModelState = vi.fn(async () => [])
+		; (agent as any).getSessionConfigOptions = vi.fn(async () => [])
+		; (agent as any).getSessionModeState = vi.fn(() => [])
 
 	await agent.initialize({ clientCapabilities: {} } as any)
 

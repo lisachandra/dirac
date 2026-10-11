@@ -1,8 +1,10 @@
 import { StringRequest } from "@shared/proto/dirac/common"
+import { GoalControlRequest } from "@shared/proto/dirac/goal"
+import { isGoalHistoryItem, type HistoryItem } from "@shared/HistoryItem"
 import { memo, useMemo } from "react"
 import DiracLogoVariable from "@/assets/DiracLogoVariable"
 import { useTaskStore } from "@/entities/task/store/taskStore"
-import { TaskServiceClient } from "@/shared/api/grpc-client"
+import { GoalServiceClient, TaskServiceClient } from "@/shared/api/grpc-client"
 import { getRandomQuote } from "@shared/quotes"
 
 type HistoryPreviewProps = {
@@ -12,10 +14,12 @@ type HistoryPreviewProps = {
 const HistoryPreview = ({ showHistoryView }: HistoryPreviewProps) => {
 	const taskHistory = useTaskStore((state) => state.taskHistory)
 	const quote = useMemo(() => getRandomQuote(), [])
-	const handleHistorySelect = (id: string) => {
-		TaskServiceClient.showTaskWithId(StringRequest.create({ value: id })).catch((error) =>
-			console.error("Error showing task:", error),
-		)
+	const recentRuns = taskHistory.filter((item) => item.ts && item.task)
+	const handleHistorySelect = (item: HistoryItem) => {
+		const openRun = isGoalHistoryItem(item)
+			? GoalServiceClient.selectGoal(GoalControlRequest.create({ goalId: item.id }))
+			: TaskServiceClient.showTaskWithId(StringRequest.create({ value: item.id }))
+		openRun.catch((error) => console.error("Error showing history run:", error))
 	}
 
 	const formatDate = (timestamp: number) => {
@@ -132,7 +136,7 @@ const HistoryPreview = ({ showHistoryView }: HistoryPreviewProps) => {
 						Recent
 					</span>
 				</div>
-				{taskHistory.filter((item: any) => item.ts && item.task).length > 0 && (
+				{recentRuns.length > 0 && (
 					<button
 						aria-label="View all history"
 						className="history-view-all-btn"
@@ -158,33 +162,41 @@ const HistoryPreview = ({ showHistoryView }: HistoryPreviewProps) => {
 
 			{
 				<div className="px-4">
-					{taskHistory.filter((item: any) => item.ts && item.task).length > 0 ? (
-						taskHistory
-							.filter((item: any) => item.ts && item.task)
-							.slice(0, 3)
-							.map((item: any) => (
-								<div className="history-preview-item" key={item.id} onClick={() => handleHistorySelect(item.id)}>
-									<div className="history-task-content">
-										{item.isFavorited && (
-											<span
-												aria-label="Favorited"
-												className="codicon codicon-star-full"
-												style={{
-													color: "var(--vscode-button-background)",
-													flexShrink: 0,
-												}}
-											/>
+					{recentRuns.length > 0 ? (
+						recentRuns.slice(0, 3).map((item) => (
+							<div className="history-preview-item" key={item.id} onClick={() => handleHistorySelect(item)}>
+								<div className="history-task-content">
+									{item.isFavorited && (
+										<span
+											aria-label="Favorited"
+											className="codicon codicon-star-full"
+											style={{
+												color: "var(--vscode-button-background)",
+												flexShrink: 0,
+											}}
+										/>
+									)}
+									<div className="history-task-description ph-no-capture">
+										{isGoalHistoryItem(item) && (
+											<span className="mr-1 rounded bg-(--vscode-badge-background) px-1.5 py-0.5 text-[10px] font-medium text-(--vscode-badge-foreground)">
+												Goal
+											</span>
 										)}
-										<div className="history-task-description ph-no-capture">{item.task}</div>
-									</div>
-									<div className="history-meta-stack">
-										<span className="history-date">{formatDate(item.ts)}</span>
-										{item.totalCost != null && (
-											<span className="history-cost-chip">${item.totalCost.toFixed(2)}</span>
-										)}
+										{isGoalHistoryItem(item) ? item.objectivePreview : item.task}
 									</div>
 								</div>
-							))
+								<div className="history-meta-stack">
+									<span className="history-date">{formatDate(item.ts)}</span>
+									<span className="history-cost-chip">
+										{isGoalHistoryItem(item)
+											? item.accounting.cost === undefined
+												? "—"
+												: `$${item.accounting.cost.toFixed(2)}`
+											: `$${item.totalCost.toFixed(2)}`}
+									</span>
+								</div>
+							</div>
+						))
 					) : (
 						<div
 							style={{
@@ -193,7 +205,7 @@ const HistoryPreview = ({ showHistoryView }: HistoryPreviewProps) => {
 								fontSize: "var(--vscode-font-size)",
 								padding: "10px 0",
 							}}>
-							No recent tasks
+							No recent runs
 						</div>
 					)}
 				</div>

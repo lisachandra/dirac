@@ -18,12 +18,19 @@ import {
  */
 type ReasoningSummary = { type: "summary_text"; text: string }
 type AssistantContentPart = { type: "output_text"; text: string }
+type ResponsesImageContent = { type: "input_image"; detail: "auto" | "high"; image_url: string }
+type FunctionCallOutputContent = { type: "input_text"; text: string } | ResponsesImageContent
+type ResponseFunctionCallOutput = {
+	type: "function_call_output"
+	call_id: string
+	output: string | FunctionCallOutputContent[]
+}
 type ResponseTransformItem =
 	| { role: string; content: ResponseInputMessageContentList; type?: never }
 	| { type: "message"; role: "assistant"; content: AssistantContentPart[] }
 	| { type: "reasoning"; summary: ReasoningSummary[]; encrypted_content?: string }
 	| { type: "function_call"; call_id: string; name: string; arguments: string }
-	| { type: "function_call_output"; call_id: string; output: string }
+	| ResponseFunctionCallOutput
 
 /**
  * Converts an array of DiracStorageMessage objects (extension of Anthropic format) to a ResponseInput array to use with OpenAI's Responses API.
@@ -137,17 +144,14 @@ export function convertToOpenAIResponsesInput(
 		if (m.role === "assistant") {
 			allItems.push(...convertAssistantTurnItems(m.content as DiracContent[], toolUseIdToCallId))
 		} else {
-			allItems.push(...convertUserTurnItems(m.content as DiracContent[], m.role, toolUseIdToCallId, allItems))
+			allItems.push(...convertUserTurnItems(m.content as DiracContent[], m.role, toolUseIdToCallId))
 		}
 	}
 
 	return { input: allItems as unknown as ResponseInput, previousResponseId }
 }
 
-function seedToolCallIdsFromAssistantTurn(
-	message: DiracStorageMessage,
-	toolUseIdToCallId: Map<string, string>,
-): void {
+function seedToolCallIdsFromAssistantTurn(message: DiracStorageMessage, toolUseIdToCallId: Map<string, string>): void {
 	if (typeof message.content === "string") return
 
 	for (const part of message.content as DiracContent[]) {
@@ -267,51 +271,63 @@ function convertAssistantTurnItems(content: DiracContent[], toolUseIdToCallId: M
 	return finalized
 }
 
-// Processes a user turn: collects text/image content into messages, and tool_result
-// parts into function_call_output items (flushing pending content first).
+function convertImageBlockToResponsesInput(
+	imageBlock: DiracImageContentBlock,
+	detail: ResponsesImageContent["detail"],
+): ResponsesImageContent {
+	return {
+		type: "input_image",
+		detail,
+		image_url:
+			imageBlock.source.type === "base64"
+				? `data:${imageBlock.source.media_type};base64,${imageBlock.source.data}`
+				: imageBlock.source.url,
+	}
+}
+
+function convertToolResultContentToResponsesOutput(
+	content: DiracUserToolResultContentBlock["content"],
+): string | FunctionCallOutputContent[] {
+	if (typeof content === "string") return content
+	if (!content) return ""
+
+	return content.map((part) => {
+		if (part.type === "text") return { type: "input_text", text: part.text }
+		if (part.type === "image") return convertImageBlockToResponsesInput(part as DiracImageContentBlock, "high")
+		return { type: "input_text", text: JSON.stringify(part) }
+	})
+}
+
+// Processes a user turn: collects text/image content into messages and emits
+// one function_call_output for each atomic tool result.
 function convertUserTurnItems(
 	content: DiracContent[],
 	role: string,
 	toolUseIdToCallId: Map<string, string>,
-	allItems: ResponseTransformItem[],
 ): ResponseTransformItem[] {
 	const newItems: ResponseTransformItem[] = []
 	const messageContent: ResponseInputMessageContentList = []
 
-	for (const _part of content) {
-		const part = _part as DiracContent
+	for (const part of content) {
 		switch (part.type) {
 			case "text":
 				messageContent.push({ type: "input_text", text: (part as DiracTextContentBlock).text || "" })
 				break
-			case "image": {
-				const imageBlock = part as DiracImageContentBlock
-				messageContent.push({
-					type: "input_image",
-					detail: "auto",
-					image_url:
-						imageBlock.source.type === "base64"
-							? `data:${imageBlock.source.media_type};base64,${imageBlock.source.data}`
-							: imageBlock.source.url,
-				})
+			case "image":
+				messageContent.push(convertImageBlockToResponsesInput(part as DiracImageContentBlock, "auto"))
 				break
-			}
 			case "tool_result": {
 				const toolResultBlock = part as DiracUserToolResultContentBlock
 				if (messageContent.length > 0) {
 					newItems.push({ role, content: [...messageContent] })
 					messageContent.length = 0
 				}
-				const call_id =
+
+				const callId =
 					toolResultBlock.call_id || toolUseIdToCallId.get(toolResultBlock.tool_use_id) || toolResultBlock.tool_use_id
-				newItems.push({
-					type: "function_call_output",
-					call_id,
-					output:
-						typeof toolResultBlock.content === "string"
-							? toolResultBlock.content
-							: JSON.stringify(toolResultBlock.content),
-				})
+				const output = convertToolResultContentToResponsesOutput(toolResultBlock.content)
+				const functionOutput: ResponseFunctionCallOutput = { type: "function_call_output", call_id: callId, output }
+				newItems.push(functionOutput)
 				break
 			}
 		}

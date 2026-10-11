@@ -179,6 +179,7 @@ export async function orchestrateCommandExecution(
 						completed: false,
 						outputLines: fileSummary?.summaryLines ?? outputLines,
 						logFilePath: trackingResult?.logFilePath ?? fileState.largeOutputLogPath ?? undefined,
+						backgroundCompletion: trackingResult?.completion,
 					}
 				}
 

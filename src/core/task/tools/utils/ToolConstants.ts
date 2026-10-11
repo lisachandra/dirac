@@ -10,24 +10,37 @@ import type { ToolParamName, ToolUse } from "@core/assistant-message"
  * Keep this in sync with the TaskConfig interface
  */
 export const TASK_CONFIG_KEYS = [
+	"executionProfile",
 	"taskId",
 	"ulid",
 	"cwd",
 	"mode",
 	"strictPlanModeEnabled",
 	"yoloModeToggled",
+	"lowVerbosityEnabled",
 	"doubleCheckCompletionEnabled",
 	"vscodeTerminalExecutionMode",
 	"enableParallelToolCalling",
 	"isSubagentExecution",
 	"backgroundEditEnabled",
+	"providerId",
+	"model",
+	"supportsNativeWebSearch",
+	"hooksEnabled",
+	"subagentsEnabled",
+	"useAutoCondense",
+	"utilityModelEnabled",
+	"utilityModelUseCondense",
+	"utilityModelUseNewTask",
+	"globalSkillsToggles",
+	"localSkillsToggles",
 	"taskState",
 	"messageState",
-	"api",
 	"services",
 	"autoApprovalSettings",
 	"autoApprover",
 	"browserSettings",
+	"permissionDecisionBinding",
 	"callbacks",
 	"coordinator",
 	"context",
@@ -45,7 +58,6 @@ export const TASK_SERVICES_KEYS = [
 	"diracIgnoreController",
 	"commandPermissionController",
 	"contextManager",
-	"stateManager",
 ] as const
 
 /**
@@ -53,11 +65,17 @@ export const TASK_SERVICES_KEYS = [
  * Keep this in sync with the TaskCallbacks interface
  */
 export const TASK_CALLBACKS_KEYS = [
+	"assertMutationAuthorized",
+	"withMutationAuthorization",
+	"transitionFromMutation",
+	"retainMutationUntil",
+	"commitEnabledToolToggles",
 	"saveCheckpoint",
 	"commitAttemptCompletion",
 	"executeCommandTool",
 	"doesLatestTaskCompletionHaveNewChanges",
 	"shouldAutoApproveToolWithPath",
+	"resolveToolPathPermission",
 	"postStateToWebview",
 	"cancelTask",
 	"switchToActMode",
@@ -67,18 +85,15 @@ export const TASK_CALLBACKS_KEYS = [
 	"runUserPromptSubmitHook",
 	"resetTransientState",
 	"notifyContextCompacted",
+	"createUtilityModelRunner",
+	"createSubagentRuntime",
 ] as const
 
 /**
  * Tools that require a path parameter
  * Used for validation in ToolErrorHandler
  */
-export const PATH_REQUIRED_TOOLS = [
-	"read_file",
-	"write_to_file",
-	"list_files",
-	"search_files",
-] as const
+export const PATH_REQUIRED_TOOLS = ["read_file", "write_to_file", "list_files", "search_files"] as const
 
 /**
  * Browser action types for validation

@@ -1,12 +1,12 @@
-import {
-	DEFAULT_OPENAI_REASONING_EFFORT,
-	isOpenaiReasoningEffort,
-	OPENAI_REASONING_EFFORT_OPTIONS
-} from "@shared/ExtensionMessage"
+import { modelSupportsInferenceSpeed } from "@shared/api"
+import { DEFAULT_INFERENCE_SPEED, DEFAULT_OPENAI_REASONING_EFFORT } from "@shared/ExtensionMessage"
 import { StringRequest } from "@shared/proto/dirac/common"
 import React, { useState } from "react"
 import { useAppStore } from "@/app/store/appStore"
-import { supportsReasoningEffortForModelId } from "@/features/settings/components/utils/providerUtils"
+import {
+	getReasoningEffortOptionsForModelId,
+	resolveReasoningEffortForModelId,
+} from "@/features/settings/components/utils/providerUtils"
 import { useApiConfigurationHandlers } from "@/features/settings/components/utils/useApiConfigurationHandlers"
 import { useSettingsStore } from "@/features/settings/store/settingsStore"
 import { StateServiceClient } from "@/shared/api/grpc-client"
@@ -22,15 +22,9 @@ const InputSectionContent: React.FC<{ context: ChatViewContext }> = ({ context }
 	const [isActivatingModelPreset, setIsActivatingModelPreset] = useState(false)
 	const [reasoningEffortError, setReasoningEffortError] = useState<string>()
 	const [isUpdatingReasoningEffort, setIsUpdatingReasoningEffort] = useState(false)
-	const {
-		chatState,
-		messageHandlers,
-		scrollBehavior,
-		placeholderText,
-		shouldDisableFilesAndImages,
-		selectFilesAndImages,
-		selectedModelInfo,
-	} = context
+	const [fastModeError, setFastModeError] = useState<string>()
+	const [isUpdatingFastMode, setIsUpdatingFastMode] = useState(false)
+	const { chatState, messageHandlers, scrollBehavior, placeholderText, selectedModelInfo } = context
 
 	const { activeQuote, setActiveQuote, isTextAreaFocused, inputValue, selectedImages, selectedFiles, taskStatus } = chatState
 
@@ -45,13 +39,17 @@ const InputSectionContent: React.FC<{ context: ChatViewContext }> = ({ context }
 			preset.modelId === selectedModelInfo.selectedModelId &&
 			(preset.provider !== "openai" || preset.openAiProfileName === activeProfileName),
 	)?.id
-	const supportsReasoningEffort = supportsReasoningEffortForModelId(selectedModelInfo.selectedModelId, selectedModelInfo)
+	const reasoningEffortOptions = getReasoningEffortOptionsForModelId(selectedModelInfo.selectedModelId, selectedModelInfo)
+	const supportsReasoningEffort = reasoningEffortOptions.length > 0
 	const configuredReasoningEffort =
 		selectedModelInfo.mode === "plan" ? apiConfiguration?.planModeReasoningEffort : apiConfiguration?.actModeReasoningEffort
-	const reasoningEffortOptions = OPENAI_REASONING_EFFORT_OPTIONS
-	const reasoningEffort = isOpenaiReasoningEffort(configuredReasoningEffort)
-		? configuredReasoningEffort
-		: DEFAULT_OPENAI_REASONING_EFFORT
+	const configuredInferenceSpeed =
+		selectedModelInfo.mode === "plan" ? apiConfiguration?.planModeInferenceSpeed : apiConfiguration?.actModeInferenceSpeed
+	const fastModeSupported = modelSupportsInferenceSpeed(selectedModelInfo.selectedProvider, selectedModelInfo.selectedModelId)
+	const fastModeEnabled = configuredInferenceSpeed === "fast" && fastModeSupported
+	const reasoningEffort =
+		resolveReasoningEffortForModelId(selectedModelInfo.selectedModelId, selectedModelInfo, configuredReasoningEffort) ??
+		DEFAULT_OPENAI_REASONING_EFFORT
 
 	return (
 		<>
@@ -68,20 +66,42 @@ const InputSectionContent: React.FC<{ context: ChatViewContext }> = ({ context }
 			<ModularChatTextArea
 				activeModelProviderPresetId={activeModelProviderPresetId}
 				className="mt-2"
+				fastModeEnabled={fastModeEnabled}
+				fastModeError={fastModeError}
+				fastModeSupported={fastModeSupported}
 				inputValue={inputValue}
 				isActivatingModelPreset={isActivatingModelPreset}
+				isUpdatingFastMode={isUpdatingFastMode}
 				isUpdatingReasoningEffort={isUpdatingReasoningEffort}
 				mode={selectedModelInfo.mode}
 				modelDisplayName={`${selectedModelInfo.selectedProvider}:${selectedModelInfo.name || selectedModelInfo.selectedModelId}`}
 				modelPresetError={modelPresetError}
 				modelProviderPresets={modelProviderPresets}
+				modeSwitchingDisabled={context.goal?.modeSwitchingDisabled}
+				modeSwitchingExplanation={context.goal?.modeSwitchingExplanation}
+				onFastModeToggle={async () => {
+					setFastModeError(undefined)
+					setIsUpdatingFastMode(true)
+					try {
+						const didPersist = await handleModeFieldChange(
+							{ plan: "planModeInferenceSpeed", act: "actModeInferenceSpeed" },
+							fastModeEnabled ? DEFAULT_INFERENCE_SPEED : "fast",
+							selectedModelInfo.mode,
+						)
+						if (!didPersist) {
+							setFastModeError(useSettingsStore.getState().apiConfigurationError || "Failed to update Fast Mode")
+						}
+					} finally {
+						setIsUpdatingFastMode(false)
+					}
+				}}
 				onHeightChange={() => {
 					if (isFollowingRef.current) {
 						scrollToBottomAuto()
 					}
 				}}
 				onModelButtonClick={() => {
-					navigateToSettings("api-config")
+					navigateToSettings("models-api")
 				}}
 				onModelProviderPresetSelect={async (presetId) => {
 					setModelPresetError(undefined)
@@ -112,7 +132,6 @@ const InputSectionContent: React.FC<{ context: ChatViewContext }> = ({ context }
 						setIsUpdatingReasoningEffort(false)
 					}
 				}}
-				onSelectFilesAndImages={selectFilesAndImages}
 				onSend={() => messageHandlers.handleSendMessage(inputValue, selectedImages, selectedFiles)}
 				placeholder={placeholderText}
 				reasoningEffort={reasoningEffort}
@@ -124,7 +143,6 @@ const InputSectionContent: React.FC<{ context: ChatViewContext }> = ({ context }
 				setInputValue={chatState.setInputValue}
 				setSelectedFiles={chatState.setSelectedFiles}
 				setSelectedImages={chatState.setSelectedImages}
-				shouldDisableFilesAndImages={shouldDisableFilesAndImages}
 				supportsReasoningEffort={supportsReasoningEffort}
 				taskStatus={taskStatus}
 			/>

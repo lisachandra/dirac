@@ -44,12 +44,9 @@ function createMocks() {
 			autoApprovalSettings: { enableNotifications: false },
 			ulid: "ulid-1",
 			mode: "act",
-			api: { getModel: () => ({ id: "model-1" }) },
-			services: {
-				stateManager: {
-					getApiConfiguration: () => ({ actModeApiProvider: "provider-1", planModeApiProvider: "provider-1" }),
-				},
-			},
+			providerId: "provider-1",
+			model: { id: "model-1", info: {} },
+			services: {},
 		},
 	}
 	return { abortController, card, env, state, conversationCondensation }

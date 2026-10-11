@@ -1,8 +1,6 @@
 import type { ModelInfo } from "./types"
 import { MODEL_CAPABILITIES } from "./capabilities"
 
-export const ANTHROPIC_FAST_MODE_SUFFIX = ":fast"
-
 export const ANTHROPIC_MIN_THINKING_BUDGET = 1_024
 export const ANTHROPIC_MAX_THINKING_BUDGET = 6_000
 
@@ -43,20 +41,6 @@ export const anthropicModels = {
 		cacheWritesPrice: 6.25,
 		cacheReadsPrice: 0.5,
 	},
-	"claude-opus-4-6:fast": {
-		maxTokens: 128_000,
-		contextWindow: 200_000,
-		supportsImages: true,
-		supportsPromptCache: true,
-		supportsReasoning: true,
-		supportsAdaptiveThinking: true,
-		inputPrice: 30.0,
-		outputPrice: 150.0,
-		cacheWritesPrice: 37.5,
-		cacheReadsPrice: 3.0,
-		description:
-			"Anthropic fast mode preview for Claude Opus 4.6. Same model and capabilities with higher output token speed at premium pricing. Requires fast mode access on your Anthropic account.",
-	},
 	"claude-opus-4-7": {
 		...MODEL_CAPABILITIES["claude-opus-4-7"],
 		supportsPromptCache: true,
@@ -65,51 +49,27 @@ export const anthropicModels = {
 		cacheWritesPrice: 6.25,
 		cacheReadsPrice: 0.5,
 	},
-	"claude-opus-4-7:fast": {
-		...MODEL_CAPABILITIES["claude-opus-4-7:fast"],
-		supportsPromptCache: true,
-		inputPrice: 30.0,
-		outputPrice: 150.0,
-		cacheWritesPrice: 37.5,
-		cacheReadsPrice: 3.0,
-		description:
-			"Anthropic fast mode preview for Claude Opus 4.6. Same model and capabilities with higher output token speed at premium pricing. Requires fast mode access on your Anthropic account.",
-	},
 	"claude-opus-4-8": {
 		...MODEL_CAPABILITIES["claude-opus-4-8"],
 		supportsPromptCache: true,
+		supportsFastMode: true,
+		fastModePriceMultiplier: 2,
 		inputPrice: 5.0,
 		outputPrice: 25.0,
 		cacheWritesPrice: 6.25,
 		cacheReadsPrice: 0.5,
-	},
-	"claude-opus-4-8:fast": {
-		...MODEL_CAPABILITIES["claude-opus-4-8:fast"],
-		supportsPromptCache: true,
-		inputPrice: 10.0,
-		outputPrice: 50.0,
-		cacheWritesPrice: 12.5,
-		cacheReadsPrice: 1.0,
-		description:
-			"Anthropic fast mode preview for Claude Opus 4.8. Same model and capabilities with higher output token speed at premium pricing. Requires fast mode access on your Anthropic account.",
+		description: "Claude Opus 4.8. Anthropic Fast mode is available at 2x token pricing when enabled.",
 	},
 	"claude-opus-5": {
 		...MODEL_CAPABILITIES["claude-opus-5"],
 		supportsPromptCache: true,
+		supportsFastMode: true,
+		fastModePriceMultiplier: 2,
 		inputPrice: 5.0,
 		outputPrice: 25.0,
 		cacheWritesPrice: 6.25,
 		cacheReadsPrice: 0.5,
-	},
-	"claude-opus-5:fast": {
-		...MODEL_CAPABILITIES["claude-opus-5:fast"],
-		supportsPromptCache: true,
-		inputPrice: 10.0,
-		outputPrice: 50.0,
-		cacheWritesPrice: 12.5,
-		cacheReadsPrice: 1.0,
-		description:
-			"Anthropic fast mode preview for Claude Opus 5. Same model and capabilities with higher output token speed at premium pricing. Requires fast mode access on your Anthropic account.",
+		description: "Claude Opus 5. Anthropic Fast mode is available at 2x token pricing when enabled.",
 	},
 	"claude-fable-5": {
 		...MODEL_CAPABILITIES["claude-fable-5"],

@@ -166,7 +166,9 @@ function convertCardToProto(card: AppCard): Card {
 				value: action.value,
 				primary: action.primary ?? undefined,
 				style: action.style ?? undefined,
+				url: action.url ?? undefined,
 			})) ?? [],
+		autoScroll: card.autoScroll ?? undefined,
 	}
 }
 
@@ -206,7 +208,9 @@ function convertProtoToCard(protoCard: Card): AppCard {
 				value: action.value,
 				primary: action.primary ?? undefined,
 				style: action.style as any,
+				url: action.url ?? undefined,
 			})) ?? undefined,
+		autoScroll: protoCard.autoScroll ?? undefined,
 	}
 }
 

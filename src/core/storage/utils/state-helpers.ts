@@ -16,6 +16,7 @@ import { Logger } from "@/shared/services/Logger"
 import { DiracMemento } from "@/shared/storage"
 import { readTaskHistoryFromState } from "../disk"
 import { StateManager } from "../StateManager"
+import { withTaskHistoryInventoryLock } from "../taskHistory"
 
 // ─── File-backed storage readers (used by StateManager) ────────────────────
 
@@ -123,7 +124,12 @@ export async function resetWorkspaceState() {
 export async function resetGlobalState() {
 	// TODO: Reset all workspace states?
 	const stateManager = StateManager.get()
-	GlobalStateAndSettingKeys.map((key) => stateManager.setGlobalState(key, undefined))
-	SecretKeys.map((key) => stateManager.setSecret(key, undefined))
-	await stateManager.reInitialize()
+	await withTaskHistoryInventoryLock(async () => {
+		GlobalStateAndSettingKeys.map((key) => {
+			if (key === "taskHistory") stateManager.replaceTaskHistory([])
+			else stateManager.setGlobalState(key, undefined)
+		})
+		SecretKeys.map((key) => stateManager.setSecret(key, undefined))
+		await stateManager.reInitialize()
+	})
 }

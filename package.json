@@ -2,7 +2,7 @@
     "name": "dirac",
     "displayName": "Dirac",
     "description": "Reduces API costs by more than 50%, produces better and faster work. Uses line-anchored parallel edits, AST manipulation and a whole lot of neat optimizations. Fully Open Source.",
-    "version": "0.4.35",
+    "version": "0.5.12",
     "icon": "assets/icons/icon.png",
     "workspaces": [
         ".",
@@ -62,42 +62,63 @@
         "walkthroughs": [
             {
                 "id": "DiracWalkthrough",
-                "title": "Dirac, the most token efficient and accurate AI Agent",
-                "description": "Dirac improves the dev speed and accuracy while consuming 50-80% less tokens compared to other agents.",
+                "title": "What Dirac is built to do",
+                "description": "Seven capabilities that shape how Dirac works on real coding tasks.",
                 "steps": [
                     {
-                        "id": "hash-anchored-edits",
-                        "title": "Line-Anchored MultiFile Edits",
-                        "description": "Dirac targets exact source lines with opaque stateful IDs, batching multiple changes across files in a single shot.",
+                        "id": "goal",
+                        "title": "Give Dirac a Goal, walk away",
+                        "description": "Dirac can stay on the same goal for hours or days without drifting while you check in and steer it.",
                         "media": {
-                            "markdown": "walkthrough/step1.md"
+                            "markdown": "walkthrough/goal.md"
                         }
                     },
                     {
-                        "id": "ast-precision",
-                        "title": "AST Precision",
-                        "description": "Dirac understands language syntax directly, allowing for precise structural manipulations like function extraction or replacement.",
+                        "id": "token-efficiency",
+                        "title": "Obsessively optimized for token efficiency",
+                        "description": "Context, output, compaction, and model calls are designed to minimize token use while preserving relevant code and evidence.",
                         "media": {
-                            "markdown": "walkthrough/step2.md"
+                            "markdown": "walkthrough/token-efficiency.md"
                         }
                     },
                     {
-                        "id": "minimal-roundtrips",
-                        "title": "Minimal Roundtrips",
-                        "description": "Dirac processes multiple files and runs parallel commands to minimize latency and API costs.",
+                        "id": "parallel-work",
+                        "title": "Get work done a lot faster",
+                        "description": "Independent reads, searches, edits, commands, and coding work happen together whenever they safely can.",
                         "media": {
-                            "markdown": "walkthrough/step3.md"
+                            "markdown": "walkthrough/parallel-work.md"
                         }
                     },
                     {
-                        "id": "speed-and-performance",
-                        "title": "Speed and Performance",
-                        "description": "Context curation optimizations keep Dirac lean and fast, significantly improving LLM performance.",
+                        "id": "precise-codebase-edits",
+                        "title": "Make precise changes in large codebases",
+                        "description": "Hash-anchored edits and AST-based understanding keep large refactors attached to the intended source and symbols.",
                         "media": {
-                            "markdown": "walkthrough/step4.md"
-                        },
-                        "content": {
-                            "path": "walkthrough/step4.md"
+                            "markdown": "walkthrough/precise-edits.md"
+                        }
+                    },
+                    {
+                        "id": "utility-model",
+                        "title": "No permission fatigue",
+                        "description": "A separate Utility model handles routine permissions and context compaction while escalating sensitive decisions to you.",
+                        "media": {
+                            "markdown": "walkthrough/utility-model.md"
+                        }
+                    },
+                    {
+                        "id": "continuous-steering",
+                        "title": "Continuous steering",
+                        "description": "Send new direction during Goal or regular work without cancelling the task in progress.",
+                        "media": {
+                            "markdown": "walkthrough/continuous-steering.md"
+                        }
+                    },
+                    {
+                        "id": "model-routing",
+                        "title": "Choose from hundreds of models across dozens of providers",
+                        "description": "Assign different models to planning, coding, and permission handling, then use them together in one task.",
+                        "media": {
+                            "markdown": "walkthrough/model-routing.md"
                         }
                     }
                 ]
@@ -384,9 +405,9 @@
     },
     "scripts": {
         "vscode:prepublish": "npm run package",
-        "compile": "npm run check-types && npm run lint && npm run prepare-extension-ripgrep-binaries && node esbuild.mjs",
+        "compile": "npm run protos && npm-run-all -p --max-parallel 4 typecheck:root typecheck:cli typecheck:webview:app typecheck:webview:node lint prepare-extension-ripgrep-binaries build:extension",
         "compile-standalone": "npm run check-types && npm run lint && node esbuild.mjs --standalone",
-        "compile-standalone-npm": "npm run protos && npm run check-types && npm run lint && node esbuild.mjs --standalone",
+        "compile-standalone-npm": "npm run protos && npm run check-types:generated && npm run lint && node esbuild.mjs --standalone",
         "cli:link": "cd cli && npm run link",
         "cli:build": "npm run protos && cd cli && npm run build",
         "cli:run": "node cli/dist/cli.mjs",
@@ -401,7 +422,7 @@
         "watch": "npx npm-run-all -p watch:*",
         "watch:esbuild": "node esbuild.mjs --watch",
         "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
-        "package": "npm run check-types && npm run build:webview && npm run lint && npm run prepare-extension-ripgrep-binaries && node esbuild.mjs --production",
+        "package": "npm run protos && npm-run-all -p --max-parallel 4 typecheck:root typecheck:cli typecheck:webview:app typecheck:webview:node lint prepare-extension-ripgrep-binaries build:extension:production build:webview:bundle",
         "protos": "node scripts/build-proto.mjs",
         "protos-python": "node scripts/build-python-proto.mjs",
         "download-ripgrep": "node scripts/download-ripgrep.mjs",
@@ -413,7 +434,12 @@
         "clean:all": "npm run clean:build && npm run clean:deps",
         "compile-tests": "node ./scripts/build-tests.js",
         "watch-tests": "tsc -p . -w --outDir out",
-        "check-types": "npm run protos && npx tsc --noEmit && cd webview-ui && npx tsc --noEmit && cd ../cli && npx tsc --noEmit",
+        "check-types": "npm run protos && npm run check-types:generated",
+        "check-types:generated": "npm-run-all -p --max-parallel 4 typecheck:root typecheck:cli typecheck:webview:app typecheck:webview:node",
+        "typecheck:root": "tsc --noEmit --project tsconfig.json",
+        "typecheck:cli": "tsc --noEmit --project cli/tsconfig.json",
+        "typecheck:webview:app": "npm --prefix webview-ui run typecheck:app",
+        "typecheck:webview:node": "npm --prefix webview-ui run typecheck:node",
         "lint": "biome lint --no-errors-on-unmatched --files-ignore-unknown=true --diagnostic-level=error && npm run lint:proto",
         "lint:proto": "bash ./scripts/proto-lint.sh",
         "format": "biome format --changed --no-errors-on-unmatched --files-ignore-unknown=true --diagnostic-level=error",
@@ -437,6 +463,9 @@
         "install:all": "npm install && cd webview-ui && npm install",
         "dev:webview": "cd webview-ui && npm run dev",
         "build:webview": "cd webview-ui && npm run build",
+        "build:webview:bundle": "npm --prefix webview-ui run build:bundle",
+        "build:extension": "node esbuild.mjs",
+        "build:extension:production": "node esbuild.mjs --production",
         "test:webview": "cd webview-ui && npm run test",
         "publish:marketplace": "vsce publish --allow-package-secrets sendgrid && ovsx publish",
         "publish:marketplace:prerelease": "vsce publish --allow-package-secrets sendgrid --pre-release && ovsx publish --pre-release",
@@ -484,7 +513,7 @@
         "@types/vscode": "1.101.0",
         "@vscode/test-cli": "^0.0.10",
         "@vscode/test-electron": "^2.5.2",
-        "@vscode/vsce": "^3.6.0",
+        "@vscode/vsce": "^3.9.2",
         "c8": "^10.1.3",
         "chai": "^4.3.10",
         "chalk": "5.6.2",
@@ -580,6 +609,7 @@
         "pdf-parse": "^1.1.1",
         "picomatch": "^4.0.3",
         "posthog-node": "^5.8.0",
+        "proper-lockfile": "^4.1.2",
         "puppeteer-chromium-resolver": "^23.0.0",
         "puppeteer-core": "^23.4.0",
         "reconnecting-eventsource": "^1.6.4",

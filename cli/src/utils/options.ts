@@ -1,7 +1,9 @@
 import { isValidAutoCondenseContextLimit } from "@shared/context-management"
-import type { ApiProvider } from "@shared/api"
-import type { OpenaiReasoningEffort } from "@/shared/storage/types"
+import { modelSupportsInferenceSpeed, providerSupportsInferenceSpeed, type ApiProvider } from "@shared/api"
+import type { InferenceSpeed, OpenaiReasoningEffort } from "@/shared/storage/types"
+import type { Controller } from "@/core/controller"
 import type { TaskOptions } from "../types"
+import { applyToolSelectionOptions } from "./tool-options"
 
 export async function setModeScopedState(currentMode: "act" | "plan", setter: (mode: "act" | "plan") => void): Promise<void> {
 	const { StateManager } = await import("@/core/storage/StateManager")
@@ -54,21 +56,11 @@ export async function normalizeMaxConsecutiveMistakes(value?: string | number): 
 }
 
 export async function normalizeApiErrorMaxRetries(value?: string | number): Promise<number | undefined> {
-	if (value === undefined) {
-		return undefined
-	}
-
-	const parsed = typeof value === "number" ? value : Number(value)
-	if (!Number.isSafeInteger(parsed) || parsed < 0) {
-		throw new Error(
-			`Invalid API error max retries '${value}'. Expected a non-negative integer (0 = retry forever).`,
-		)
-	}
-
-	return parsed
+	// Always retry infinitely.
+	return 0
 }
 
-export async function applyTaskOptions(options: TaskOptions): Promise<void> {
+export async function applyTaskOptions(options: TaskOptions, workspaceRoot: string, controller: Controller): Promise<void> {
 	const { StateManager } = await import("@/core/storage/StateManager")
 	const { telemetryService } = await import("@/services/telemetry")
 	const { getProviderModelIdKey } = await import("@/shared/storage")
@@ -76,6 +68,14 @@ export async function applyTaskOptions(options: TaskOptions): Promise<void> {
 	const { exit } = await import("node:process")
 
 	const stateManager = StateManager.get()
+
+	try {
+		const toolSelectionPolicy = await applyToolSelectionOptions(options, workspaceRoot)
+		if (toolSelectionPolicy) controller.setTaskInitializationDefaults({ toolSelectionPolicy })
+	} catch (error) {
+		printError(`Error: ${error instanceof Error ? error.message : String(error)}`)
+		exit(1)
+	}
 
 	if (process.env.OPENAI_COMPATIBLE_CUSTOM_KEY) {
 		if (!options.provider && !process.env.OPENAI_API_BASE && !stateManager.getGlobalSettingsKey("openAiBaseUrl")) {
@@ -134,6 +134,14 @@ export async function applyTaskOptions(options: TaskOptions): Promise<void> {
 			const modelKey = getProviderModelIdKey(targetProvider, mode)
 			if (modelKey) {
 				stateManager.setSessionOverride(modelKey, options.model!)
+				const speedKey = mode === "act" ? "actModeInferenceSpeed" : "planModeInferenceSpeed"
+				const inferenceSpeed = stateManager.getGlobalSettingsKey(speedKey)
+				if (
+					(inferenceSpeed === "fast" && !modelSupportsInferenceSpeed(targetProvider, options.model!)) ||
+					(inferenceSpeed === "standard" && !providerSupportsInferenceSpeed(targetProvider))
+				) {
+					stateManager.setSessionOverride(speedKey, "default")
+				}
 			}
 		})
 		telemetryService.captureHostEvent("model_flag", options.model)
@@ -170,6 +178,33 @@ export async function applyTaskOptions(options: TaskOptions): Promise<void> {
 			stateManager.setSessionOverride(reasoningKey, reasoningEffort)
 		})
 		telemetryService.captureHostEvent("reasoning_effort_flag", reasoningEffort)
+	}
+
+	if (options.speed !== undefined) {
+		const { isInferenceSpeed, INFERENCE_SPEED_OPTIONS } = await import("@/shared/storage/types")
+		if (!isInferenceSpeed(options.speed)) {
+			throw new Error(`Invalid inference speed '${options.speed}'. Valid values: ${INFERENCE_SPEED_OPTIONS.join(", ")}.`)
+		}
+		const modes = stateManager.getGlobalSettingsKey("planActSeparateModelsSetting")
+			? [currentMode]
+			: (["plan", "act"] as const)
+		for (const mode of modes) {
+			const providerKey = mode === "act" ? "actModeApiProvider" : "planModeApiProvider"
+			const provider = stateManager.getGlobalSettingsKey(providerKey) as ApiProvider | undefined
+			const modelKey = provider ? getProviderModelIdKey(provider, mode) : undefined
+			const modelId = modelKey ? (stateManager.getGlobalSettingsKey(modelKey) as string | undefined) : undefined
+			if (options.speed === "standard" && (!provider || !providerSupportsInferenceSpeed(provider))) {
+				throw new Error(`Provider ${provider || "(unconfigured)"} does not support inference speed controls`)
+			}
+			if (options.speed === "fast" && (!provider || !modelId || !modelSupportsInferenceSpeed(provider, modelId))) {
+				throw new Error(`Model ${modelId || "(unconfigured)"} does not support Fast mode`)
+			}
+		}
+		await setModeScopedState(currentMode, (mode) => {
+			const speedKey = mode === "act" ? "actModeInferenceSpeed" : "planModeInferenceSpeed"
+			stateManager.setSessionOverride(speedKey, options.speed as InferenceSpeed)
+		})
+		telemetryService.captureHostEvent("inference_speed_flag", options.speed)
 	}
 
 	const maxConsecutiveMistakes = await normalizeMaxConsecutiveMistakes(options.maxConsecutiveMistakes)

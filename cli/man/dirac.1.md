@@ -73,6 +73,18 @@ Show the effective global and workspace configuration.
 
 **dirac config** [**--config** *path*]
 
+## tools
+
+Print the current tool configuration as copy-pasteable comma-separated **--enable-tool** and **--disable-tool** options, then exit.
+
+**dirac tools** [**--cwd** *path*] [**--config** *path*]
+
+**-c**, **--cwd** *path*
+: Select the workspace used to discover tools. The default is the current directory.
+
+**--config** *path*
+: Use another Dirac home directory.
+
 ## auth
 
 Open the interactive provider setup or perform quick setup with flags.
@@ -169,6 +181,9 @@ These options apply to both **dirac** [*prompt*] and **dirac task** [*prompt*], 
 **--reasoning-effort** *effort*
 : Set reasoning effort to `none`, `low`, `medium`, `high`, or `xhigh`. Matching is case-insensitive.
 
+**--speed** *speed*
+: Set inference speed to `default`, `standard`, or `fast`. Fast is available only for supported Anthropic, OpenAI API, and OpenAI Codex subscription models and may use premium pricing or credits.
+
 **--max-consecutive-mistakes** *count*
 : Stop a yolo task after this many consecutive mistakes. The value must be a positive integer.
 
@@ -183,6 +198,17 @@ These options apply to both **dirac** [*prompt*] and **dirac task** [*prompt*], 
 
 **--subagents**
 : Enable subagents for this task.
+
+**--enable-tool** *ids*
+: Enable comma-separated configurable tool IDs over the saved configuration for this invocation. May be repeated and may be combined with **--disable-tool** when the resolved sets are disjoint.
+
+**--disable-tool** *ids*
+: Disable comma-separated configurable tool IDs over the saved configuration for this invocation. May be repeated and may be combined with **--enable-tool** when the resolved sets are disjoint.
+
+**--only-tools** *ids*
+: Use exactly the listed comma-separated configurable tool IDs for this invocation. This exact mode cannot be combined with **--enable-tool** or **--disable-tool**.
+
+Tool-selection options apply only to ordinary CLI tasks and are not persisted. They cannot be used with ACP, detached listen mode, Kanban, or Goals, and they never alter task-scoped tools. Lists accept canonical IDs or unambiguous names. Unknown, non-configurable, ambiguous, or conflicting tool identifiers stop startup with an error. Use **dirac tools** to list canonical IDs and saved status.
 
 **--headers** *headers*
 : Set custom headers for an OpenAI-compatible provider. Accepts a JSON object or comma-separated `key=value` pairs.

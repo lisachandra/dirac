@@ -8,11 +8,14 @@ import type { SkillMetadata } from "@/shared/skills"
 import { DiracDefaultTool } from "@/shared/tools"
 import { ShellType } from "@/utils/shell-detection"
 import { SystemPromptSection } from "./templates/placeholders"
+import type { TaskExecutionProfile } from "@core/task/TaskExecutionProfile"
 
 /**
  * Enhanced system prompt context with better typing
  */
 export interface SystemPromptContext {
+	readonly executionProfile?: TaskExecutionProfile
+	readonly profileInstructions?: string
 	readonly providerInfo: ApiProviderInfo
 	readonly cwd?: string
 	readonly ide: string
@@ -37,6 +40,7 @@ export interface SystemPromptContext {
 	readonly isTesting?: boolean
 	readonly runtimePlaceholders?: Readonly<Record<string, unknown>>
 	readonly yoloModeToggled?: boolean
+	readonly lowVerbosityEnabled?: boolean
 	readonly subagentsEnabled?: boolean
 	readonly utilityModelConfigured?: boolean
 	readonly diracWebToolsEnabled?: boolean
@@ -46,7 +50,6 @@ export interface SystemPromptContext {
 	readonly isCliSubagent?: boolean
 	readonly isSubagentRun?: boolean
 	readonly isCliEnvironment?: boolean
-	readonly enableParallelToolCalling?: boolean
 	readonly terminalExecutionMode?: "vscodeTerminal" | "backgroundExec"
 	readonly activeShellType?: ShellType
 	readonly activeShellPath?: string

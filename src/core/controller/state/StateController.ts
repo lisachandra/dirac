@@ -7,6 +7,7 @@ import { PlanInteractionResponse } from "@shared/responseTool"
 import { TaskStatus } from "@shared/ExtensionMessage"
 import type { StateManager } from "@core/storage/StateManager"
 import { telemetryService } from "@/services/telemetry"
+import { persistModeSelection } from "./persistModeSelection"
 
 export interface StateControllerDependencies {
 	stateManager: StateManager
@@ -56,13 +57,10 @@ export class StateController {
 	async toggleActModeForYoloMode(): Promise<boolean> {
 		const modeToSwitchTo: Mode = "act"
 		const task = this.getTask()
-		const nextApi = task
-			? this.buildApiHandlerFn({ ...this.stateManager.getApiConfiguration(), ulid: task.ulid }, modeToSwitchTo)
-			: undefined
+		const persistMode = () => persistModeSelection(this.stateManager, modeToSwitchTo)
 
-		this.stateManager.setGlobalState("mode", modeToSwitchTo)
-		this.stateManager.setSessionOverride("mode", modeToSwitchTo)
-		if (task && nextApi) task.setApiHandler(nextApi)
+		if (task) await task.applyWorkingConfigurationUpdate({ settings: { mode: modeToSwitchTo } }, persistMode)
+		else persistMode()
 
 		await this.postStateToWebviewFn()
 		return !!task
@@ -71,24 +69,16 @@ export class StateController {
 	async togglePlanActMode(modeToSwitchTo: Mode, chatContent?: ChatContent): Promise<boolean> {
 		const didSwitchToActMode = modeToSwitchTo === "act"
 		const task = this.getTask()
-		const nextApi = task
-			? this.buildApiHandlerFn({ ...this.stateManager.getApiConfiguration(), ulid: task.ulid }, modeToSwitchTo)
-			: undefined
+		const persistMode = () => persistModeSelection(this.stateManager, modeToSwitchTo)
 
-		this.stateManager.setGlobalState("mode", modeToSwitchTo)
-		this.stateManager.setSessionOverride("mode", modeToSwitchTo)
+		if (task) await task.applyWorkingConfigurationUpdate({ settings: { mode: modeToSwitchTo } }, persistMode)
+		else persistMode()
+
 		this.captureModeSwitchFn(task?.ulid ?? "0", modeToSwitchTo)
-
-		if (task && nextApi) {
-			if (didSwitchToActMode) task.taskState.didSwitchToActMode = true
-			task.setApiHandler(nextApi)
-		}
-
 		await this.postStateToWebviewFn()
 
 		if (!task) return false
 		if (task.taskState.isAwaitingPlanResponse && didSwitchToActMode) {
-			task.taskState.didRespondToPlanAskBySwitchingMode = true
 			const cardId = task.taskState.lastWaitingCardId
 			if (cardId) {
 				await task.submitCardResponse(

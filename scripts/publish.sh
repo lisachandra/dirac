@@ -40,6 +40,7 @@ STATE_DIR=""
 MANIFEST_FILE=""
 RELEASE_NOTES_FILE=""
 CLI_RELEASE_NOTES_FILE=""
+BUNDLED_RELEASE_NOTES_FILE=""
 VSIX_FILE=""
 NPM_TARBALL=""
 BASE_COMMIT=""
@@ -156,6 +157,7 @@ function configure_release_paths() {
     MANIFEST_FILE="${STATE_DIR}/manifest.json"
     RELEASE_NOTES_FILE="${STATE_DIR}/release-notes.md"
     CLI_RELEASE_NOTES_FILE="${STATE_DIR}/cli-release-notes.md"
+    BUNDLED_RELEASE_NOTES_FILE="release-notes/${VERSION}.json"
     VSIX_FILE="${STATE_DIR}/dirac-${VERSION}.vsix"
     NPM_TARBALL="${STATE_DIR}/dirac-cli-${VERSION}.tgz"
 }
@@ -313,6 +315,9 @@ function assert_only_release_or_publisher_files_changed() {
     while IFS= read -r status; do
         [ -n "$status" ] || continue
         path="${status:3}"
+        if [ "$path" = "$BUNDLED_RELEASE_NOTES_FILE" ] && [ -z "$RELEASE_COMMIT" ]; then
+            continue
+        fi
         allowed=false
         for allowed_file in "${RESUME_ALLOWED_FILES[@]}"; do
             if [ "$path" = "$allowed_file" ]; then
@@ -402,10 +407,175 @@ function generate_release_notes() {
     } > "$output_file"
 }
 
+function validate_curated_release_notes() {
+    node scripts/release-notes.mjs validate-curated \
+        --input "$BUNDLED_RELEASE_NOTES_FILE" \
+        --version "$VERSION" \
+        --kind "$BUMP_TYPE" \
+        --previous-tag "$PREVIOUS_TAG" \
+        --head "$BASE_COMMIT"
+}
+
+function validate_patch_release_notes() {
+    node scripts/release-notes.mjs validate-patch \
+        --input "$BUNDLED_RELEASE_NOTES_FILE" \
+        --document-path "$BUNDLED_RELEASE_NOTES_FILE" \
+        --version "$VERSION" \
+        --previous-tag "$PREVIOUS_TAG" \
+        --head "$BASE_COMMIT"
+}
+
+function infer_release_kind() {
+    local previous_tag="$1"
+    local version="$2"
+    node - "$previous_tag" "$version" <<'NODE'
+const previousTag = process.argv[2]
+const targetVersion = process.argv[3]
+const previousMatch = /^v(\d+)\.(\d+)\.(\d+)$/.exec(previousTag)
+const targetMatch = /^(\d+)\.(\d+)\.(\d+)$/.exec(targetVersion)
+if (!previousMatch || !targetMatch) process.exit(1)
+const previous = previousMatch.slice(1).map(Number)
+const target = targetMatch.slice(1).map(Number)
+let kind
+if (target[0] > previous[0] && target[1] === 0 && target[2] === 0) kind = "major"
+else if (target[0] === previous[0] && target[1] > previous[1] && target[2] === 0) kind = "minor"
+else if (target[0] === previous[0] && target[1] === previous[1] && target[2] > previous[2]) kind = "patch"
+else process.exit(1)
+process.stdout.write(kind)
+NODE
+}
+
+function validate_committed_bundled_release_notes() {
+    [ -n "$RELEASE_COMMIT" ] || return
+    if ! git cat-file -e "${RELEASE_COMMIT}:${BUNDLED_RELEASE_NOTES_FILE}" 2>/dev/null; then
+        log_warn "Release commit ${RELEASE_COMMIT} predates bundled release notes; skipping bundled-note validation."
+        return
+    fi
+
+    local temporary_notes
+    temporary_notes=$(mktemp)
+    git show "${RELEASE_COMMIT}:${BUNDLED_RELEASE_NOTES_FILE}" > "$temporary_notes"
+    log_step "Validating bundled release notes in ${RELEASE_COMMIT}..."
+    if [ "$BUMP_TYPE" = "patch" ]; then
+        if ! node scripts/release-notes.mjs validate-patch \
+            --input "$temporary_notes" \
+            --document-path "$BUNDLED_RELEASE_NOTES_FILE" \
+            --version "$VERSION" \
+            --previous-tag "$PREVIOUS_TAG" \
+            --head "$BASE_COMMIT"; then
+            rm -f "$temporary_notes"
+            die "Committed bundled release notes are invalid for ${RELEASE_TAG}."
+        fi
+    else
+        if ! node scripts/release-notes.mjs validate-curated \
+            --input "$temporary_notes" \
+            --document-path "$BUNDLED_RELEASE_NOTES_FILE" \
+            --version "$VERSION" \
+            --kind "$BUMP_TYPE" \
+            --previous-tag "$PREVIOUS_TAG" \
+            --head "$BASE_COMMIT"; then
+            rm -f "$temporary_notes"
+            die "Committed bundled release notes are invalid for ${RELEASE_TAG}."
+        fi
+    fi
+    rm -f "$temporary_notes"
+}
+
+function generate_curated_release_notes_draft() {
+    command -v dirac >/dev/null 2>&1 \
+        || die "Curated notes for ${RELEASE_TAG} are missing and the 'dirac' CLI is not installed. Create ${BUNDLED_RELEASE_NOTES_FILE} manually or install Dirac."
+
+    local prompt
+    prompt=$(cat <<EOF
+Activate the release-notes skill and prepare curated user-facing release notes for ${RELEASE_TAG}.
+Analyze every user-facing change in ${PREVIOUS_TAG}..${BASE_COMMIT}.
+Write exactly ${BUNDLED_RELEASE_NOTES_FILE} with:
+- version: ${VERSION}
+- kind: ${BUMP_TYPE}
+- sourceTag: ${PREVIOUS_TAG}
+- analyzedCommit: ${BASE_COMMIT}
+Modify no other file. Use subagents for independent product areas.
+EOF
+)
+
+    log_step "Generating curated release-note draft for ${RELEASE_TAG} with Dirac..."
+    if ! dirac task --act --yolo --subagents --no-index --cwd "$PWD" "$prompt"; then
+        die "Dirac could not generate curated release notes. No release metadata or artifacts were created."
+    fi
+    [ -f "$BUNDLED_RELEASE_NOTES_FILE" ] \
+        || die "Dirac completed without creating ${BUNDLED_RELEASE_NOTES_FILE}."
+
+    local status changed_path
+    while IFS= read -r status; do
+        [ -n "$status" ] || continue
+        changed_path="${status:3}"
+        [ "$changed_path" = "$BUNDLED_RELEASE_NOTES_FILE" ] \
+            || die "Release-note generation changed an unexpected file: ${changed_path}"
+    done < <(git status --porcelain)
+
+    validate_curated_release_notes
+    echo ""
+    log_info "Created curated release-note draft: ${BUNDLED_RELEASE_NOTES_FILE}"
+    echo "Review and edit the draft, commit it, then rerun: ./scripts/publish.sh ${BUMP_TYPE}"
+    exit 1
+}
+
+function ensure_curated_release_notes_ready() {
+    case "$BUMP_TYPE" in
+        minor|major)
+            if [ ! -f "$BUNDLED_RELEASE_NOTES_FILE" ]; then
+                generate_curated_release_notes_draft
+            fi
+            validate_curated_release_notes
+            ;;
+    esac
+}
+
+function ensure_bundled_release_notes() {
+    if [ -f "$BUNDLED_RELEASE_NOTES_FILE" ]; then
+        if [ "$BUMP_TYPE" = "patch" ]; then
+            validate_patch_release_notes
+        fi
+        return
+    fi
+    if [ -n "$RELEASE_COMMIT" ]; then
+        return
+    fi
+    [ "$BUMP_TYPE" = "patch" ] \
+        || die "Missing bundled release notes: ${BUNDLED_RELEASE_NOTES_FILE}"
+
+    log_step "Generating bundled patch notes for ${RELEASE_TAG}..."
+    node scripts/release-notes.mjs generate-patch \
+        --version "$VERSION" \
+        --previous-tag "$PREVIOUS_TAG" \
+        --source-ref "$BASE_COMMIT" \
+        --output "$BUNDLED_RELEASE_NOTES_FILE"
+    validate_patch_release_notes
+}
+
 function ensure_release_notes() {
     local source_ref="${RELEASE_COMMIT:-$BASE_COMMIT}"
+    local bundled_notes_input="$BUNDLED_RELEASE_NOTES_FILE"
+    if [ -n "$RELEASE_COMMIT" ] && git cat-file -e "${RELEASE_COMMIT}:${BUNDLED_RELEASE_NOTES_FILE}" 2>/dev/null; then
+        bundled_notes_input="${STATE_DIR}/bundled-release-notes.json"
+        git show "${RELEASE_COMMIT}:${BUNDLED_RELEASE_NOTES_FILE}" > "$bundled_notes_input"
+    fi
     if [ ! -f "$RELEASE_NOTES_FILE" ]; then
-        generate_release_notes "$RELEASE_NOTES_FILE" "Highlights" "$PREVIOUS_TAG" "$RELEASE_TAG" "$source_ref"
+        local bundled_kind=""
+        if [ -f "$bundled_notes_input" ]; then
+            bundled_kind=$(BUNDLED_NOTES_PATH="$bundled_notes_input" node -p \
+                "JSON.parse(require('node:fs').readFileSync(process.env.BUNDLED_NOTES_PATH, 'utf8')).kind || ''")
+        fi
+        if [ "$bundled_kind" = "minor" ] || [ "$bundled_kind" = "major" ]; then
+            node scripts/release-notes.mjs render \
+                --input "$bundled_notes_input" \
+                --output "$RELEASE_NOTES_FILE" \
+                --version "$VERSION" \
+                --previous-tag "$PREVIOUS_TAG" \
+                --repository "$REPOSITORY"
+        else
+            generate_release_notes "$RELEASE_NOTES_FILE" "Highlights" "$PREVIOUS_TAG" "$RELEASE_TAG" "$source_ref"
+        fi
     fi
     if [ ! -f "$CLI_RELEASE_NOTES_FILE" ]; then
         generate_release_notes "$CLI_RELEASE_NOTES_FILE" "CLI changes" "$PREVIOUS_CLI_TAG" "$CLI_TAG" "$source_ref"
@@ -555,7 +725,7 @@ function ensure_release_commit() {
     fi
 
     assert_only_release_or_publisher_files_changed
-    git add "${MUTATED_FILES[@]}"
+    git add "${MUTATED_FILES[@]}" "$BUNDLED_RELEASE_NOTES_FILE"
     git diff --cached --quiet && die "No release metadata changes are available to commit."
     log_step "Committing release metadata..."
     git commit -m "chore: bump version to ${RELEASE_TAG}"
@@ -579,6 +749,7 @@ function ensure_local_tag() {
 }
 
 function ensure_local_tags() {
+    validate_committed_bundled_release_notes
     ensure_release_notes
     ensure_local_tag "$RELEASE_TAG" "$RELEASE_NOTES_FILE"
     ensure_local_tag "$CLI_TAG" "$CLI_RELEASE_NOTES_FILE"
@@ -835,14 +1006,8 @@ function reconstruct_resume_state() {
     PREVIOUS_TAG=$(discover_previous_tag "$RELEASE_COMMIT" "$RELEASE_TAG" stable)
     PREVIOUS_CLI_TAG=$(discover_previous_tag "$RELEASE_COMMIT" "$CLI_TAG" cli)
 
-    if release_is_complete; then
-        print_success
-        exit 0
-    fi
-
     log_info "Reconstructing local recovery state for ${RELEASE_TAG}."
     create_manifest
-    ensure_release_notes
 }
 
 function initialize_new_release() {
@@ -871,13 +1036,14 @@ function initialize_new_release() {
         die "${CLI_TAG} already exists. Use: scripts/publish.sh --resume ${RELEASE_TAG}"
     fi
 
-    require_gh_authentication
-    [ -n "${VSCE_PAT:-}" ] || die "VSCE_PAT is required to start a release."
-    [ -n "${OVSX_PAT:-}" ] || die "OVSX_PAT is required to start a release."
-
     BASE_COMMIT=$(git rev-parse HEAD)
     PREVIOUS_TAG=$(discover_previous_tag "$BASE_COMMIT" "$RELEASE_TAG" stable)
     PREVIOUS_CLI_TAG=$(discover_previous_tag "$BASE_COMMIT" "$CLI_TAG" cli)
+    ensure_curated_release_notes_ready
+
+    require_gh_authentication
+    [ -n "${VSCE_PAT:-}" ] || die "VSCE_PAT is required to start a release."
+    [ -n "${OVSX_PAT:-}" ] || die "OVSX_PAT is required to start a release."
     create_manifest
     log_info "Starting ${RELEASE_TAG} from ${BASE_COMMIT}."
 }
@@ -887,13 +1053,22 @@ function initialize_resume() {
     require_gh_authentication
     if [ -f "$MANIFEST_FILE" ]; then
         load_manifest
-        if [ -n "$RELEASE_COMMIT" ] && release_is_complete; then
+    else
+        reconstruct_resume_state
+    fi
+
+    BUMP_TYPE=$(infer_release_kind "$PREVIOUS_TAG" "$VERSION") \
+        || die "Cannot infer release kind for ${PREVIOUS_TAG} -> ${RELEASE_TAG}."
+    if [ -n "$RELEASE_COMMIT" ]; then
+        validate_committed_bundled_release_notes
+        assert_only_release_or_publisher_files_changed
+        if release_is_complete; then
             print_success
             exit 0
         fi
         return
     fi
-    reconstruct_resume_state
+    ensure_curated_release_notes_ready
 }
 
 function prepare_uncommitted_release() {
@@ -903,6 +1078,7 @@ function prepare_uncommitted_release() {
     [ "$(git rev-parse HEAD)" = "$BASE_COMMIT" ] \
         || ensure_release_commit
     write_versions
+    ensure_bundled_release_notes
     ensure_release_notes
     ensure_vsix
     ensure_npm_tarball
@@ -937,6 +1113,17 @@ function print_success() {
     echo "--------------------------------------------------"
 }
 
+function restore_dry_run() {
+    git restore --worktree -- "${MUTATED_FILES[@]}"
+    # Dry runs never change the index, so it remains the source of tracking state.
+    if git ls-files --error-unmatch "$BUNDLED_RELEASE_NOTES_FILE" >/dev/null 2>&1; then
+        git restore --worktree -- "$BUNDLED_RELEASE_NOTES_FILE"
+    else
+        rm -f "$BUNDLED_RELEASE_NOTES_FILE"
+    fi
+    rm -rf "$STATE_DIR"
+}
+
 function run_dry_run() {
     assert_clean_worktree
     local old_version
@@ -951,18 +1138,18 @@ function run_dry_run() {
     BASE_COMMIT=$(git rev-parse HEAD)
     PREVIOUS_TAG=$(discover_previous_tag "$BASE_COMMIT" "$RELEASE_TAG" stable)
     PREVIOUS_CLI_TAG=$(discover_previous_tag "$BASE_COMMIT" "$CLI_TAG" cli)
+    ensure_curated_release_notes_ready
     create_manifest
 
-    function restore_dry_run() {
-        git checkout -- "${MUTATED_FILES[@]}" 2>/dev/null || true
-        rm -rf "$STATE_DIR"
-    }
     trap restore_dry_run EXIT
 
     write_versions
+    ensure_bundled_release_notes
     ensure_release_notes
     ensure_vsix
     ensure_npm_tarball
+    trap - EXIT
+    restore_dry_run
     log_info "Dry run complete for ${RELEASE_TAG}. Nothing was committed, tagged, pushed, or published."
 }
 

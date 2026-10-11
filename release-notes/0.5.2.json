@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "version": "0.5.2",
+  "kind": "patch",
+  "announce": true,
+  "sourceTag": "v0.5.1",
+  "analyzedCommit": "4ff93d5084d12ce58b7c5bcbc9b7c632227114c4",
+  "headline": "Updates and improvements",
+  "highlights": [
+    {
+      "id": "feat-ba8fd43f",
+      "title": "bound file reads and invalidate anchors after edits",
+      "category": "feat",
+      "evidence": [
+        "ba8fd43fe5c1c23b130a423d9c9e66779da89da2"
+      ]
+    },
+    {
+      "id": "fix-18f879b6",
+      "title": "serialize task history inventory mutations with a lock, fixes race in multiple dirac instances coming up together",
+      "category": "fix",
+      "evidence": [
+        "18f879b60c632576fc6bd8867bf6512a2bde63d3"
+      ]
+    }
+  ]
+}

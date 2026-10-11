@@ -2,8 +2,8 @@ import { ApiHandler } from "@core/api"
 import { FileContextTracker } from "@core/context/context-tracking/FileContextTracker"
 import { formatResponse } from "@core/formatResponse"
 import { getEditingFilesInstructions } from "@core/prompts/system-prompt/sections/editing-files"
-import { StateManager } from "@core/storage/StateManager"
-import { isMultiRootEnabled } from "@core/workspace/multi-root-utils"
+import type { TaskWorkingConfiguration } from "./runtime/TaskWorkingConfiguration"
+import type { TaskRequestRuntime } from "./runtime/TaskRequestRuntime"
 import { WorkspaceRootManager } from "@core/workspace/WorkspaceRootManager"
 import { ITerminalManager } from "@integrations/terminal/types"
 import type { Dirent } from "fs"
@@ -53,6 +53,19 @@ const CODE_EXTENSIONS = new Set([
 ])
 
 const ALWAYS_IGNORED_DIRS = new Set(["node_modules", ".git", ".next", "dist", "build", "__pycache__", ".venv", "venv", ".cache"])
+const MAX_WALK_ENTRIES = 5000
+
+function isCodeFile(filename: string): boolean {
+	return CODE_EXTENSIONS.has(path.extname(filename).toLowerCase())
+}
+
+async function readDirEntries(dir: string): Promise<Dirent[]> {
+	try {
+		return await fs.readdir(dir, { withFileTypes: true })
+	} catch {
+		return []
+	}
+}
 
 export interface EnvironmentManagerDependencies {
 	cwd: string
@@ -61,7 +74,8 @@ export interface EnvironmentManagerDependencies {
 	fileContextTracker: FileContextTracker
 	api: ApiHandler
 	messageStateHandler: MessageStateHandler
-	stateManager: StateManager
+	getWorkingConfiguration: () => TaskWorkingConfiguration
+	getRequestRuntime: () => TaskRequestRuntime | undefined
 	workspaceManager?: WorkspaceRootManager
 }
 
@@ -93,9 +107,6 @@ export class EnvironmentManager {
 	}
 	private get messageStateHandler() {
 		return this.dependencies.messageStateHandler
-	}
-	private get stateManager() {
-		return this.dependencies.stateManager
 	}
 	private get workspaceManager() {
 		return this.dependencies.workspaceManager
@@ -138,22 +149,27 @@ export class EnvironmentManager {
 			}
 		}
 
-		details += "\n\n# Current Mode"
-		const mode = this.stateManager.getGlobalSettingsKey("mode")
-		if (mode === "plan") {
-			details += `\nPLAN MODE\n${formatResponse.planModeInstructions()}`
-		} else {
-			details += "\nACT MODE"
-			if (this.taskState.didSwitchToActMode) {
-				details += `\n${getEditingFilesInstructions()}\n`
+		const requestRuntime = this.dependencies.getRequestRuntime()
+		const mode = (requestRuntime?.workingConfiguration ?? this.dependencies.getWorkingConfiguration()).settings.mode
+		const modeNotice = this.taskState.pendingModeNotice
+		if (modeNotice?.mode === mode) {
+			if (requestRuntime) modeNotice.includedInRequestId = requestRuntime.requestId
+			details += "\n\n# Current Mode"
+			if (mode === "plan") {
+				details += `\nPLAN MODE\n${formatResponse.planModeInstructions()}`
+			} else {
+				details += `\nACT MODE\n${getEditingFilesInstructions()}`
 			}
 		}
 
-		return `<environment_details>\n${details.trim()}\n</environment_details>`
+		const content = details.trim()
+		if (!content) return ""
+		return `<environment_details>\n${content}\n</environment_details>`
 	}
 
 	private formatWorkspaceRootsSection(): string {
-		const multiRootEnabled = isMultiRootEnabled(this.stateManager)
+		const multiRootEnabled =
+			(this.dependencies.getRequestRuntime()?.workingConfiguration ?? this.dependencies.getWorkingConfiguration()).executionOptions.multiRootEnabled
 		const hasWorkspaceManager = !!this.workspaceManager
 		const roots = hasWorkspaceManager ? this.workspaceManager!.getRoots() : []
 
@@ -211,24 +227,31 @@ export class EnvironmentManager {
 		return ignored
 	}
 
-	private async *walkCodeFiles(dir: string, ignoredDirs: Set<string>): AsyncGenerator<string> {
-		let entries: Dirent[]
-		try {
-			entries = await fs.readdir(dir, { withFileTypes: true })
-		} catch {
-			return
-		}
-		for (const entry of entries) {
-			if (entry.name.startsWith(".")) {
-				continue
-			}
-			if (entry.isDirectory()) {
-				if (!ignoredDirs.has(entry.name)) {
-					yield* this.walkCodeFiles(path.join(dir, entry.name), ignoredDirs)
+	private async *walkCodeFiles(
+		root: string,
+		ignoredDirs: Set<string>,
+		maxEntries = MAX_WALK_ENTRIES,
+	): AsyncGenerator<string> {
+		const queue: string[] = [root]
+		let inspected = 0
+
+		while (queue.length > 0 && !this.taskState.abort) {
+			const dir = queue.shift()!
+			const entries = await readDirEntries(dir)
+
+			for (const entry of entries) {
+				if (this.taskState.abort || ++inspected > maxEntries) {
+					return
 				}
-			} else if (entry.isFile()) {
-				if (CODE_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) {
-					yield path.join(dir, entry.name)
+				if (entry.name.startsWith(".")) {
+					continue
+				}
+
+				const fullPath = path.join(dir, entry.name)
+				if (entry.isDirectory() && !ignoredDirs.has(entry.name)) {
+					queue.push(fullPath)
+				} else if (entry.isFile() && isCodeFile(entry.name)) {
+					yield fullPath
 				}
 			}
 		}

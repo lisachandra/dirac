@@ -14,6 +14,10 @@ function contextFile(diracHome: string): string {
 	return path.join(diracHome, "data", "tasks", TASK_ID, "tool_context.json")
 }
 
+function operationFile(diracHome: string): string {
+	return path.join(diracHome, "data", "tasks", TASK_ID, "tool_context.jsonl")
+}
+
 describe("DiracContext persistence", () => {
 	let diracHome: string
 	let previousDiracHome: string | undefined
@@ -43,7 +47,7 @@ describe("DiracContext persistence", () => {
 		sinon.assert.notCalled(stateManager.flushPendingState)
 	})
 
-	it("loads legacy pretty JSON without rewriting read-only context and writes compact mutations", async () => {
+	it("loads a legacy baseline without rewriting it and appends framed mutations", async () => {
 		const filePath = contextFile(diracHome)
 		await fs.mkdir(path.dirname(filePath), { recursive: true })
 		const legacy = JSON.stringify({ fileHashes: { "/workspace/a.ts#plain": { contentHash: "abc" } } }, null, 2)
@@ -57,8 +61,14 @@ describe("DiracContext persistence", () => {
 
 		await context.task.set("fileHashes", { "/workspace/a.ts#plain": { contentHash: "def" } })
 		await context.save()
-		const compact = await fs.readFile(filePath, "utf8")
-		assert.equal(compact, JSON.stringify(JSON.parse(compact)))
+		assert.equal(await fs.readFile(filePath, "utf8"), legacy)
+		const operations = (await fs.readFile(operationFile(diracHome), "utf8"))
+			.trim()
+			.split("\n")
+			.map((record) => JSON.parse(record))
+		assert.deepEqual(operations, [
+			{ offset: 0, type: "set", key: "fileHashes", value: { "/workspace/a.ts#plain": { contentHash: "def" } } },
+		])
 		sinon.assert.calledOnce(stateManager.flushPendingState)
 
 		await context.task.set("fileHashes", { "/workspace/a.ts#plain": { contentHash: "def" } })
@@ -81,6 +91,25 @@ describe("DiracContext persistence", () => {
 		await restored.ensureAnchorState()
 		assert.deepEqual(AnchorStateManager.getAnchors(sourcePath, CONVERSATION_ID), anchors)
 	})
+
+	it("retains current anchor documents when compacting a large operation tail", async () => {
+		const sourcePath = path.join(diracHome, "workspace", "baseline.ts")
+		const context = new DiracContext(TASK_ID, stateManager as any, CONVERSATION_ID)
+		await context.ensureAnchorState()
+		const anchors = AnchorStateManager.reconcile(sourcePath, ["baseline"], CONVERSATION_ID)
+		context.markAnchorStateDirty(sourcePath)
+		await context.task.set("largeValue", "x".repeat(8 * 1024 * 1024))
+		await context.save()
+
+		await fs.access(path.join(diracHome, "data", "tasks", TASK_ID, "tool_context.baseline.jsonl"))
+		AnchorStateManager.reset(CONVERSATION_ID)
+		const restored = new DiracContext(TASK_ID, stateManager as any, CONVERSATION_ID)
+		await restored.ensureAnchorState()
+
+		assert.deepEqual(AnchorStateManager.getAnchors(sourcePath, CONVERSATION_ID), anchors)
+		assert.equal((await restored.task.get<string>("largeValue"))?.length, 8 * 1024 * 1024)
+	})
+
 	it("serializes concurrent cache updates and retains anchor mutations made during persistence", async () => {
 		const context = new DiracContext(TASK_ID, stateManager as any, CONVERSATION_ID)
 		await Promise.all([
@@ -95,15 +124,13 @@ describe("DiracContext persistence", () => {
 		AnchorStateManager.reconcile(sourcePath, ["first"], CONVERSATION_ID)
 		context.markAnchorStateDirty()
 
-		const originalWriteJson = (context as any).writeJson.bind(context)
 		let releaseWrite!: () => void
 		const writeReleased = new Promise<void>((resolve) => { releaseWrite = resolve })
 		let signalWriteStarted!: () => void
 		const writeStarted = new Promise<void>((resolve) => { signalWriteStarted = resolve })
-		const writeJson = sinon.stub(context as any, "writeJson").callsFake(async (filePath, data) => {
+		stateManager.flushPendingState.onSecondCall().callsFake(async () => {
 			signalWriteStarted()
 			await writeReleased
-			await originalWriteJson(filePath, data)
 		})
 
 		const firstSave = context.save()
@@ -112,7 +139,6 @@ describe("DiracContext persistence", () => {
 		context.markAnchorStateDirty()
 		releaseWrite()
 		await firstSave
-		writeJson.restore()
 		await context.save()
 
 		AnchorStateManager.reset(CONVERSATION_ID)
@@ -122,4 +148,35 @@ describe("DiracContext persistence", () => {
 		assert.deepEqual(await restored.task.get("fileHashes"), { first: "one", second: "two" })
 	})
 
+
+	it("replays anchor recency and evicts the oldest document at capacity", async () => {
+		const context = new DiracContext(TASK_ID, stateManager as any, CONVERSATION_ID)
+		await context.ensureAnchorState()
+		const paths = Array.from(
+			{ length: AnchorStateManager.MAX_TRACKED_FILES },
+			(_, index) => path.join(diracHome, "workspace", `source-${index}.ts`),
+		)
+		for (const sourcePath of paths) {
+			AnchorStateManager.reconcile(sourcePath, [sourcePath], CONVERSATION_ID)
+			context.markAnchorStateDirty(sourcePath)
+		}
+		await context.save()
+
+		AnchorStateManager.reconcile(paths[0], [paths[0]], CONVERSATION_ID)
+		context.markAnchorStateDirty(paths[0])
+		const newestPath = path.join(diracHome, "workspace", "newest.ts")
+		AnchorStateManager.reconcile(newestPath, ["newest"], CONVERSATION_ID)
+		context.markAnchorStateDirty(newestPath)
+		await context.save()
+
+		AnchorStateManager.reset(CONVERSATION_ID)
+		const restored = new DiracContext(TASK_ID, stateManager as any, CONVERSATION_ID)
+		await restored.ensureAnchorState()
+		const persisted = AnchorStateManager.exportState(CONVERSATION_ID)
+
+		assert.equal(persisted.documents.length, AnchorStateManager.MAX_TRACKED_FILES)
+		assert.equal(AnchorStateManager.isTracking(paths[0], CONVERSATION_ID), true)
+		assert.equal(AnchorStateManager.isTracking(paths[1], CONVERSATION_ID), false)
+		assert.equal(persisted.documents.at(-1)?.absolutePath, newestPath)
+	})
 })

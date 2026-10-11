@@ -1,5 +1,6 @@
 import type { ApiConfiguration, ModelInfo } from "@shared/api"
-import { buildLegacySynthetic1mStateUpdates } from "@shared/storage/legacy-model-id-migration"
+import type { RunHistoryItem } from "@shared/HistoryItem"
+import { buildLegacyModelIdStateUpdates } from "@shared/storage/legacy-model-id-migration"
 import {
 	type GlobalState,
 	type GlobalStateAndSettings,
@@ -11,6 +12,11 @@ import type { StorageContext } from "@shared/storage/storage-context"
 import { initializeDistinctId } from "@/services/logging/distinctId"
 import { Logger } from "@/shared/services/Logger"
 import { AgentConfigLoader } from "../task/tools/subagent/AgentConfigLoader"
+import {
+	createTaskWorkingConfiguration,
+	type TaskExecutionOptions,
+	type TaskWorkingConfiguration,
+} from "../task/runtime/TaskWorkingConfiguration"
 import {
 	getAllGlobalStateEntries,
 	getAllWorkspaceStateEntries,
@@ -25,7 +31,10 @@ import {
 import { getModelInfo, getModelsCache, type ModelCache, setModelsCache } from "./StateManagerModelCache"
 import {
 	clearTaskSettings,
+	clearSessionOverride,
 	loadTaskSettings,
+	mutateTaskHistory,
+	hasSessionOverride,
 	refreshModelProviderPresetsFromDisk,
 	type StateManagerSettersContext,
 	setApiConfiguration,
@@ -34,13 +43,19 @@ import {
 	setSecret,
 	setSecretsBatch,
 	setSessionOverride,
-	setSessionOverrideCache,
 	setTaskSettings,
 	setTaskSettingsBatch,
+	clearTaskSetting,
+	getTaskSetting,
+	hasTaskSetting,
 	setWorkspaceState,
 	setWorkspaceStateBatch,
 } from "./StateManagerSetters"
-import { type StateManagerSettingsCaches } from "./StateManagerSettings"
+import {
+	buildEffectiveApiConfigurationFromCache,
+	buildEffectiveSettingsFromCache,
+	type StateManagerSettingsCaches,
+} from "./StateManagerSettings"
 import { type PersistenceErrorEvent, StatePersistenceManager } from "./StatePersistenceManager"
 
 // Re-export for backward compatibility — consumers import PersistenceErrorEvent from StateManager
@@ -54,14 +69,15 @@ export type { PersistenceErrorEvent }
  * This is shared across all platforms (VSCode, CLI, JetBrains).
  *
  * MULTI-INSTANCE BEHAVIOR:
- * StateManager reads from disk ONLY during initialize(). After that, all reads come from
- * the in-memory cache. Writes update both the cache and disk, but other running instances
- * won't see those changes because they don't re-read from disk.
+ * Settings are read from disk during initialize() and then remain isolated in each
+ * instance's cache. Task history is the exception: it is a shared multi-writer index,
+ * synchronized through ID-scoped transactions and a file watcher.
  *
  * This means: If you have multiple VS Code windows open, each has its own StateManager
  * instance with its own cache. Changing a setting (like plan/act mode) in Window A writes
  * to disk, but Window B keeps using its cached value. Window B only sees the change after
- * restart (when it re-initializes from disk).
+ * restart (when it re-initializes from disk). Task-history changes are merged and become
+ * visible in every running instance without a restart.
  *
  * This is intentional for performance (avoids constant disk reads) and provides natural
  * isolation between concurrent instances. Task-specific state is independent anyway since
@@ -107,6 +123,12 @@ export class StateManager {
 			getWorkspaceStateValue: (key) => this.workspaceStateCache[key],
 			setTaskHistoryInCache: (value) => {
 				this.globalStateCache.taskHistory = value
+			},
+			onTaskHistoryCommitMerged: () => {
+				this.notifyStateChange()
+				void Promise.resolve(this.onSyncExternalChange?.()).catch((error) => {
+					Logger.error("[StateManager] Failed to publish merged task history:", error)
+				})
 			},
 		})
 	}
@@ -163,7 +185,7 @@ export class StateManager {
 			const rawUtilityModelUseGenerateCommitMessage = storage.globalStateBackingStore.get<boolean>(
 				"utilityModelUseGenerateCommitMessage",
 			)
-			const legacyModelIdUpdates = buildLegacySynthetic1mStateUpdates(globalState)
+			const legacyModelIdUpdates = buildLegacyModelIdStateUpdates(globalState)
 			if (Object.keys(legacyModelIdUpdates).length > 0) {
 				await storage.globalStateBackingStore.setBatch(legacyModelIdUpdates)
 				Object.assign(globalState, legacyModelIdUpdates)
@@ -211,7 +233,7 @@ export class StateManager {
 	}
 
 	public static isInitialized(): boolean {
-		return StateManager.instance != null
+		return StateManager.instance?.isInitialized === true
 	}
 
 	public static get(): StateManager {
@@ -238,7 +260,7 @@ export class StateManager {
 
 	/**
 	 * Subscribe to global state changes. The listener is called whenever global state
-	 * is modified via setGlobalState or setGlobalStateBatch. Returns an unsubscribe function.
+	 * is modified through StateManager setters. Returns an unsubscribe function.
 	 */
 	public subscribe(listener: () => void): () => void {
 		this.stateChangeListeners.add(listener)
@@ -265,12 +287,44 @@ export class StateManager {
 		setGlobalStateBatch(this.settersContext, updates)
 	}
 
+	upsertTaskHistoryItem(item: RunHistoryItem): RunHistoryItem[] {
+		return mutateTaskHistory(this.settersContext, { kind: "upsert", item })
+	}
+
+	setTaskHistoryFavorite(id: string, isFavorited: boolean): RunHistoryItem[] {
+		return mutateTaskHistory(this.settersContext, { kind: "setFavorite", id, isFavorited })
+	}
+
+	removeTaskHistoryItems(ids: string[]): RunHistoryItem[] {
+		return mutateTaskHistory(this.settersContext, { kind: "remove", ids })
+	}
+
+	insertMissingTaskHistoryItems(items: RunHistoryItem[]): RunHistoryItem[] {
+		return mutateTaskHistory(this.settersContext, { kind: "insertMissing", items })
+	}
+
+	replaceTaskHistory(items: RunHistoryItem[]): RunHistoryItem[] {
+		return mutateTaskHistory(this.settersContext, { kind: "replace", items })
+	}
+
 	setTaskSettings<K extends keyof Settings>(taskId: string, key: K, value: Settings[K]): void {
 		setTaskSettings(this.settersContext, taskId, key, value)
 	}
 
 	setTaskSettingsBatch(taskId: string, updates: Partial<Settings>): void {
 		setTaskSettingsBatch(this.settersContext, taskId, updates)
+	}
+
+	hasTaskSetting<K extends keyof Settings>(key: K): boolean {
+		return hasTaskSetting(this.settersContext, key)
+	}
+
+	getTaskSetting<K extends keyof Settings>(key: K): Settings[K] | undefined {
+		return getTaskSetting(this.settersContext, key)
+	}
+
+	clearTaskSetting<K extends keyof Settings>(taskId: string, key: K): void {
+		clearTaskSetting(this.settersContext, taskId, key)
 	}
 
 	async loadTaskSettings(taskId: string): Promise<void> {
@@ -303,15 +357,15 @@ export class StateManager {
 		setSessionOverride(this.settersContext, key, value)
 	}
 
-	/** Return the current session-override cache (in-memory only). (from main) */
-	getSessionOverrideCache(): Partial<Settings> {
-		return this.sessionOverrideCache
+
+	hasSessionOverride<K extends keyof Settings>(key: K): boolean {
+		return hasSessionOverride(this.settersContext, key)
 	}
 
-	/** Replace the session-override cache wholesale. In-memory only, never persisted. (from main) */
-	setSessionOverrideCache(overrides: Partial<Settings>): void {
-		setSessionOverrideCache(this.settersContext, overrides)
+	clearSessionOverride<K extends keyof Settings>(key: K): void {
+		clearSessionOverride(this.settersContext, key)
 	}
+
 
 	setModelsCache(provider: string, models: Record<string, ModelInfo>): void {
 		setModelsCache(this.modelInfoCache, provider, models)
@@ -330,6 +384,31 @@ export class StateManager {
 
 	getApiConfiguration(): ApiConfiguration {
 		return getApiConfiguration(this.settingsCaches, this.isInitialized)
+	}
+
+	/**
+	 * Capture a detached task-owned effective configuration from already loaded state.
+	 * Explicit runtime overrides participate as a highest-precedence, session-like
+	 * input but are never installed into StateManager caches.
+	 */
+	captureEffectiveTaskConfiguration(
+		explicitOverrides?: Partial<Settings>,
+		executionOptions?: Partial<TaskExecutionOptions>,
+	): TaskWorkingConfiguration {
+		if (!this.isInitialized) throw new Error("StateManager has not been initialized")
+
+		return createTaskWorkingConfiguration({
+			revision: 1,
+			settings: buildEffectiveSettingsFromCache(this.settingsCaches, explicitOverrides),
+			apiConfiguration: buildEffectiveApiConfigurationFromCache(this.settingsCaches, explicitOverrides),
+			workspaceConfiguration: this.workspaceStateCache,
+			executionOptions: {
+				terminalReuseEnabled: executionOptions?.terminalReuseEnabled ?? this.globalStateCache.terminalReuseEnabled,
+				vscodeTerminalExecutionMode:
+					executionOptions?.vscodeTerminalExecutionMode ?? this.globalStateCache.vscodeTerminalExecutionMode,
+				multiRootEnabled: executionOptions?.multiRootEnabled ?? this.globalStateCache.multiRootEnabled,
+			},
+		})
 	}
 
 	setApiConfiguration(apiConfiguration: ApiConfiguration): void {
@@ -360,9 +439,7 @@ export class StateManager {
 	}
 
 	async reInitialize(currentTaskId?: string): Promise<void> {
-		if (this.persistence.hasPendingTimeout()) {
-			await this.persistence.persistPendingState()
-		}
+		await this.persistence.flushPendingState()
 		await this.dispose()
 		await StateManager.initialize(this.storage)
 		if (currentTaskId) await this.loadTaskSettings(currentTaskId)

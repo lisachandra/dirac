@@ -113,6 +113,8 @@ describe("Dirac message proto conversion", () => {
 					rawOutput,
 					diffs,
 					locations,
+					autoScroll: true,
+					actions: [{ label: "Documentation", value: "docs", url: "https://example.com/docs" }],
 				},
 			},
 		}
@@ -130,6 +132,10 @@ describe("Dirac message proto conversion", () => {
 		assert.deepEqual(roundTripped.content.card.rawOutput, rawOutput)
 		assert.deepEqual(roundTripped.content.card.diffs, diffs)
 		assert.deepEqual(roundTripped.content.card.locations, locations)
+		assert.equal(roundTripped.content.card.autoScroll, true)
+		assert.deepEqual(roundTripped.content.card.actions, [
+			{ label: "Documentation", value: "docs", primary: undefined, style: undefined, url: "https://example.com/docs" },
+		])
 	})
 
 

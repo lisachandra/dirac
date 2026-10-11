@@ -24,7 +24,7 @@ import type {
 } from "@integrations/terminal/types"
 import { EventEmitter } from "events"
 import { Logger } from "@/shared/services/Logger"
-import { SessionIdResolver } from "./ACPDiffViewProvider"
+import { requireActiveAcpSessionId, type ActiveAcpSessionIdResolver } from "./active-session.js"
 
 // =============================================================================
 // Local Types
@@ -390,7 +390,7 @@ function mergePromise(process: AcpTerminalProcess, promise: Promise<void>): Term
 export class AcpTerminalManager implements ITerminalManager {
 	private readonly connection: acp.AgentSideConnection
 	private readonly clientCapabilities: acp.ClientCapabilities | undefined
-	private readonly sessionIdResolver: SessionIdResolver
+	private readonly sessionIdResolver: ActiveAcpSessionIdResolver
 
 	/** Active terminals indexed by their string ID */
 	private readonly terminals: Map<string, ManagedTerminal> = new Map()
@@ -421,7 +421,7 @@ export class AcpTerminalManager implements ITerminalManager {
 	constructor(
 		connection: acp.AgentSideConnection,
 		clientCapabilities: acp.ClientCapabilities | undefined,
-		sessionIdResolver: SessionIdResolver,
+		sessionIdResolver: ActiveAcpSessionIdResolver,
 	) {
 		this.connection = connection
 		this.clientCapabilities = clientCapabilities
@@ -710,7 +710,7 @@ export class AcpTerminalManager implements ITerminalManager {
 	 * Create a new terminal and execute a command.
 	 *
 	 * @param options - Terminal creation options
-	 * @returns The managed terminal instance or an error
+	 * @returns The managed terminal instance or an error when the capability is absent
 	 */
 	async createTerminal(options: CreateTerminalOptions): Promise<ManagedTerminal | { error: string }> {
 		if (!this.canUseTerminal()) {
@@ -718,56 +718,43 @@ export class AcpTerminalManager implements ITerminalManager {
 		}
 
 		Logger.debug("[AcpTerminalManager] createTerminal:", options)
-
-		try {
-			const request: acp.CreateTerminalRequest = {
-				sessionId: this.getSessionId(),
-				command: options.command,
-			}
-
-			// Add optional parameters if provided
-			if (options.args !== undefined && options.args.length > 0) {
-				request.args = options.args
-			}
-			if (options.cwd !== undefined) {
-				request.cwd = options.cwd
-			}
-			if (options.env !== undefined && options.env.length > 0) {
-				request.env = options.env.map((e) => ({ name: e.name, value: e.value }))
-			}
-			if (options.outputByteLimit !== undefined) {
-				request.outputByteLimit = Number(options.outputByteLimit)
-			}
-
-			const handle = await this.connection.createTerminal(request)
-			const numericId = this.nextNumericId++
-
-			const managedTerminal: ManagedTerminal = {
-				id: handle.id,
-				numericId,
-				handle,
-				command: options.command,
-				args: options.args,
-				cwd: options.cwd,
-				createdAt: Date.now(),
-				released: false,
-				busy: true,
-				lastCommand: options.command,
-			}
-
-			this.terminals.set(handle.id, managedTerminal)
-			this.numericIdToStringId.set(numericId, handle.id)
-
-			Logger.debug("[AcpTerminalManager] createTerminal success:", { id: handle.id, numericId })
-
-			return managedTerminal
-		} catch (error) {
-			const errorMessage = error instanceof Error ? error.message : String(error)
-
-			Logger.debug("[AcpTerminalManager] createTerminal error:", errorMessage)
-
-			return { error: errorMessage }
+		const request: acp.CreateTerminalRequest = {
+			sessionId: this.getSessionId(),
+			command: options.command,
 		}
+
+		if (options.args !== undefined && options.args.length > 0) {
+			request.args = options.args
+		}
+		if (options.cwd !== undefined) {
+			request.cwd = options.cwd
+		}
+		if (options.env !== undefined && options.env.length > 0) {
+			request.env = options.env.map((entry) => ({ name: entry.name, value: entry.value }))
+		}
+		if (options.outputByteLimit !== undefined) {
+			request.outputByteLimit = Number(options.outputByteLimit)
+		}
+
+		const handle = await this.connection.createTerminal(request)
+		const numericId = this.nextNumericId++
+		const managedTerminal: ManagedTerminal = {
+			id: handle.id,
+			numericId,
+			handle,
+			command: options.command,
+			args: options.args,
+			cwd: options.cwd,
+			createdAt: Date.now(),
+			released: false,
+			busy: true,
+			lastCommand: options.command,
+		}
+
+		this.terminals.set(handle.id, managedTerminal)
+		this.numericIdToStringId.set(numericId, handle.id)
+		Logger.debug("[AcpTerminalManager] createTerminal success:", { id: handle.id, numericId })
+		return managedTerminal
 	}
 
 	/**
@@ -1070,13 +1057,9 @@ export class AcpTerminalManager implements ITerminalManager {
 
 	/**
 	 * Get the current session ID.
-	 * @throws Error if session ID is not available
+	 * @throws Error if no ACP session is active
 	 */
 	private getSessionId(): string {
-		const sessionId = this.sessionIdResolver()
-		if (!sessionId) {
-			throw new Error("Session ID is undefined. Cannot perform terminal operations.")
-		}
-		return sessionId
+		return requireActiveAcpSessionId(this.sessionIdResolver, "creating a terminal")
 	}
 }

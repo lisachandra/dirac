@@ -39,6 +39,7 @@ import {
 	minimaxModels,
 	mistralDefaultModelId,
 	mistralModels,
+	modelSupportsInferenceSpeed,
 	moonshotDefaultModelId,
 	moonshotModels,
 	nebiusDefaultModelId,
@@ -50,6 +51,7 @@ import {
 	openAiModelInfoSaneDefaults,
 	openAiNativeDefaultModelId,
 	openAiNativeModels,
+	providerSupportsInferenceSpeed,
 	qwenCodeDefaultModelId,
 	qwenCodeModels,
 	requestyDefaultModelId,
@@ -63,14 +65,23 @@ import {
 	xaiDefaultModelId,
 	xaiModels,
 } from "@shared/api"
-import { Mode } from "@shared/ExtensionMessage"
+import { Mode, type OpenaiReasoningEffort } from "@shared/ExtensionMessage"
 import * as reasoningSupport from "@shared/utils/reasoning-support"
 
+export function getReasoningEffortOptionsForModelId(modelId?: string, modelInfo?: ModelInfo): readonly OpenaiReasoningEffort[] {
+	return reasoningSupport.getReasoningEffortOptionsForModel(modelId, modelInfo)
+}
+
+export function resolveReasoningEffortForModelId(
+	modelId: string | undefined,
+	modelInfo: ModelInfo | undefined,
+	requestedEffort?: string,
+): OpenaiReasoningEffort | undefined {
+	return reasoningSupport.resolveReasoningEffortForModel(modelId, modelInfo, requestedEffort)
+}
+
 export function supportsReasoningEffortForModelId(modelId?: string, modelInfo?: ModelInfo): boolean {
-	if ((modelInfo as any)?.supportsReasoningEffort) {
-		return true
-	}
-	return reasoningSupport.supportsReasoningEffortForModel(modelId)
+	return reasoningSupport.supportsReasoningEffortForModel(modelId, modelInfo)
 }
 
 /**
@@ -357,8 +368,8 @@ export function normalizeApiConfiguration(
 				selectedModelInfo: basetenModelInfo ||
 					basetenModels[finalBasetenModelId as keyof typeof basetenModels] ||
 					basetenModels[basetenDefaultModelId] || {
-					description: "Baseten model",
-				},
+						description: "Baseten model",
+					},
 			}
 		}
 		case "huawei-cloud-maas":
@@ -465,6 +476,7 @@ export function getModeSpecificFields(apiConfiguration: ApiConfiguration | undef
 		thinkingBudgetTokens:
 			mode === "plan" ? apiConfiguration?.planModeThinkingBudgetTokens : apiConfiguration?.actModeThinkingBudgetTokens,
 		reasoningEffort: mode === "plan" ? apiConfiguration?.planModeReasoningEffort : apiConfiguration?.actModeReasoningEffort,
+		inferenceSpeed: mode === "plan" ? apiConfiguration?.planModeInferenceSpeed : apiConfiguration?.actModeInferenceSpeed,
 		vsCodeLmModelSelector:
 			mode === "plan" ? apiConfiguration?.planModeVsCodeLmModelSelector : apiConfiguration?.actModeVsCodeLmModelSelector,
 		awsBedrockCustomSelected:
@@ -541,10 +553,16 @@ export async function syncModeConfigurations(
 
 	const sourceFields = getModeSpecificFields(apiConfiguration, sourceMode)
 	const { apiProvider } = sourceFields
-
 	if (!apiProvider) {
 		return
 	}
+	const selectedModelId = normalizeApiConfiguration(apiConfiguration, sourceMode).selectedModelId
+	const configuredInferenceSpeed = sourceFields.inferenceSpeed ?? "default"
+	const inferenceSpeed =
+		(configuredInferenceSpeed === "fast" && !modelSupportsInferenceSpeed(apiProvider, selectedModelId)) ||
+		(configuredInferenceSpeed === "standard" && !providerSupportsInferenceSpeed(apiProvider))
+			? "default"
+			: configuredInferenceSpeed
 
 	// Build the complete update object with both plan and act mode fields
 	const updates: Partial<ApiConfiguration> = {
@@ -555,6 +573,8 @@ export async function syncModeConfigurations(
 		actModeThinkingBudgetTokens: sourceFields.thinkingBudgetTokens,
 		planModeReasoningEffort: sourceFields.reasoningEffort,
 		actModeReasoningEffort: sourceFields.reasoningEffort,
+		planModeInferenceSpeed: inferenceSpeed,
+		actModeInferenceSpeed: inferenceSpeed,
 	}
 
 	// Handle provider-specific fields
@@ -565,7 +585,6 @@ export async function syncModeConfigurations(
 			updates.planModeOpenRouterModelInfo = sourceFields.openRouterModelInfo
 			updates.actModeOpenRouterModelInfo = sourceFields.openRouterModelInfo
 			break
-
 
 		case "requesty":
 			updates.planModeRequestyModelId = sourceFields.requestyModelId

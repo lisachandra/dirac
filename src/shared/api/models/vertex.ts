@@ -58,20 +58,6 @@ export const vertexModels = {
 			supportsThinkingLevel: true,
 		},
 	},
-	"gemini-3.6-flash": {
-		...MODEL_CAPABILITIES["gemini-3.6-flash"],
-		supportsPromptCache: true,
-		supportsGlobalEndpoint: true,
-		inputPrice: 1.5,
-		outputPrice: 7.5,
-		cacheReadsPrice: 0.15,
-		cacheWritesPrice: 0.0,
-		temperature: 1.0,
-		thinkingConfig: {
-			geminiThinkingLevel: "high" as const,
-			supportsThinkingLevel: true,
-		},
-	},
 	"gemini-3.5-flash-lite": {
 		...MODEL_CAPABILITIES["gemini-3.5-flash-lite"],
 		supportsPromptCache: true,
@@ -81,6 +67,52 @@ export const vertexModels = {
 		cacheReadsPrice: 0.03,
 		cacheWritesPrice: 0.0,
 		temperature: 1.0,
+		thinkingConfig: {
+			geminiThinkingLevel: "high" as const,
+			supportsThinkingLevel: true,
+		},
+	},
+	"gemini-3.6-flash": {
+		...MODEL_CAPABILITIES["gemini-3.6-flash"],
+		supportsPromptCache: true,
+		supportsGlobalEndpoint: true,
+		inputPrice: 0.75,
+		outputPrice: 3.75,
+		cacheReadsPrice: 0.075,
+		cacheWritesPrice: 0.0,
+		temperature: 1.0,
+		thinkingConfig: {
+			geminiThinkingLevel: "high" as const,
+			supportsThinkingLevel: true,
+		},
+	},
+	"gemini-3.7-flash": {
+		...MODEL_CAPABILITIES["gemini-3.7-flash"],
+		supportsPromptCache: true,
+		supportsGlobalEndpoint: true,
+		inputPrice: 0.75,
+		outputPrice: 3.75,
+		cacheReadsPrice: 0.075,
+		cacheWritesPrice: 0.0,
+		temperature: 1.0,
+		description:
+			"Google's most capable Flash model for agentic workflows and multimodal reasoning. Introductory pricing applies through December 31, 2026.",
+		thinkingConfig: {
+			geminiThinkingLevel: "medium" as const,
+			supportsThinkingLevel: true,
+		},
+	},
+	"gemini-3.8-flash": {
+		...MODEL_CAPABILITIES["gemini-3.8-flash"],
+		supportsPromptCache: true,
+		supportsGlobalEndpoint: true,
+		inputPrice: 0.75,
+		outputPrice: 3.75,
+		cacheReadsPrice: 0.075,
+		cacheWritesPrice: 0.0,
+		temperature: 1.0,
+		description:
+			"Google's Gemini 3.8 Flash model for agentic workflows and multimodal reasoning. Introductory pricing applies through December 31, 2026.",
 		thinkingConfig: {
 			geminiThinkingLevel: "high" as const,
 			supportsThinkingLevel: true,

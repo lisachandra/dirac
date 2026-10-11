@@ -374,13 +374,13 @@
     "function": {
       "name": "respond",
       "strict": false,
-      "description": "Send a user-facing response.",
+      "description": "The user has explicitly asked for a low verbosity response. Send a concise user-facing response without omitting information needed to understand, decide, act, or verify.",
       "parameters": {
         "type": "object",
         "properties": {
           "operation": {
             "type": "string",
-            "description": "progress = interim update; complete = final Act Mode result; plan = Plan Mode response/proposal; question = required user input.",
+            "description": "progress = interim update; complete = final Act Mode or subagent result; plan = Plan Mode response/proposal; question = required user input.",
             "enum": [
               "progress",
               "complete",
@@ -390,7 +390,7 @@
           },
           "text": {
             "type": "string",
-            "description": "Response text."
+            "description": "The user has explicitly asked for a low verbosity response. Treat this as a presentation constraint, not permission to omit requested or decision-critical information. Preserve material constraints, uncertainty, failures, caveats, and verification status. Explicit requirements for content, detail, or format take precedence.\n\n- progress: Give one short sentence containing only a key finding, milestone, blocker, change in approach, or immediate next action. Skip acknowledgements and routine narration.\n- question: Ask only for input required to continue. Give the minimum context, ask one direct question, and keep choices short and distinct. Do not repeat established context or seek confirmation when a safe choice is already determined.\n- plan: Answer simple questions directly. For implementation proposals, lead with important decisions and clearly state affected areas, ordered work, and verification. Prominently surface tradeoffs, risks, assumptions, and decisions requiring the user's input; do not bury them in implementation steps. Omit research narration and generic advice.\n- complete: Lead with the outcome. Include only material changes, verification and results, caveats or failures, and remaining work. Do not recap task history, routine steps, the original request, or a redundant conclusion. Use one sentence when it is enough."
           },
           "options": {
             "type": "array",

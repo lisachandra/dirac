@@ -106,6 +106,8 @@ export interface DiracAgentOptions {
 	thinkingBudgetTokens?: number
 	/** Reasoning effort explicitly selected for this agent process */
 	reasoningEffort?: string
+	/** Inference speed explicitly selected for this agent process */
+	inferenceSpeed?: "default" | "standard" | "fast"
 	/** Additional runtime hooks directory */
 	hooksDir?: string
 	/** Whether ACP is served through a reconnectable Unix socket. */
@@ -136,6 +138,8 @@ export interface AcpAgentOptions {
 	thinkingBudgetTokens?: number
 	/** Reasoning effort explicitly selected for this agent process */
 	reasoningEffort?: string
+	/** Inference speed explicitly selected for this agent process */
+	inferenceSpeed?: "default" | "standard" | "fast"
 	/** Additional runtime hooks directory */
 	hooksDir?: string
 	/** Whether ACP is served through a reconnectable Unix socket. */

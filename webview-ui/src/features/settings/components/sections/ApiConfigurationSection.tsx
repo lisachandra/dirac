@@ -20,7 +20,7 @@ const ApiConfigurationSection = ({ renderSectionHeader }: ApiConfigurationSectio
 	const { handleFieldsChange } = useApiConfigurationHandlers()
 	return (
 		<div>
-			{renderSectionHeader?.("api-config")}
+			{renderSectionHeader?.("models-api")}
 			<Section>
 				{/* Tabs container */}
 				{planActSeparateModelsSetting ? (
@@ -77,11 +77,11 @@ const ApiConfigurationSection = ({ renderSectionHeader }: ApiConfigurationSectio
 								console.error("Failed to update separate models setting:", error)
 							}
 						}}>
-						Use different models for Plan and Act modes
+						Use separate models for Plan and Act
 					</VSCodeCheckbox>
 					<p className="text-xs mt-[5px] text-(--vscode-descriptionForeground)">
-						Switching between Plan and Act mode will persist the API and model used in the previous mode. This may be
-						helpful e.g. when using a strong reasoning model to architect a plan for a cheaper coding model to act on.
+						Use one provider/model for planning and another for implementation. Before disabling, note that the
+						current {currentTab === "plan" ? "Plan" : "Act"} configuration becomes shared.
 					</p>
 				</div>
 			</Section>

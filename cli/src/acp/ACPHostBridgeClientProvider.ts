@@ -1,13 +1,14 @@
 /**
  * ACP Host Bridge Client Provider
  *
- * Implements HostBridgeClientProvider for ACP mode, providing stub implementations
- * of the 4 required service clients. These clients conform to the interfaces in
- * host-bridge-client-types.ts and will use ACP connection capabilities where applicable.
+ * Implements HostBridgeClientProvider for ACP mode. File editing is handled by
+ * FileEditProvider with ACPTextFileAccess; the diff client provides truthful
+ * protocol presentation or rejects legacy document-editor operations.
  *
  * @module acp
  */
 
+import { randomUUID } from "node:crypto"
 import type * as acp from "@agentclientprotocol/sdk"
 import type {
 	DiffServiceClientInterface,
@@ -19,12 +20,15 @@ import type { HostBridgeClientProvider, StreamingCallbacks } from "@hosts/host-p
 import * as proto from "@shared/proto/index"
 import { DiracClient } from "@/shared/dirac"
 import { Logger } from "@/shared/services/Logger"
+import { requireActiveAcpSessionId, type ActiveAcpSessionIdResolver } from "./active-session.js"
 
-/**
- * Function type that resolves the current session ID.
- * Returns undefined if no session is active.
- */
-export type SessionIdResolver = () => string | undefined
+export type AcpSessionUpdateEmitter = (sessionId: string, update: acp.SessionUpdate) => Promise<void>
+
+function invalidLegacyDiffOperation(operation: string): Error {
+	return new Error(
+		`ACP host diff document operation "${operation}" is not the ACP file-editing path. Use FileEditProvider with ACPTextFileAccess.`,
+	)
+}
 
 /**
  * Function type that resolves the current working directory.
@@ -32,69 +36,76 @@ export type SessionIdResolver = () => string | undefined
  */
 export type CwdResolver = () => string | undefined
 
-/**
- * ACP implementation of DiffService client.
- *
- * Handles diff operations for the ACP environment. Most operations are stubs
- * that will be implemented in the next phase using ACP extension methods or
- * the fs capabilities (readTextFile/writeTextFile).
- */
 class ACPDiffServiceClient implements DiffServiceClientInterface {
+	constructor(
+		private readonly sessionIdResolver: ActiveAcpSessionIdResolver,
+		private readonly emitSessionUpdate: AcpSessionUpdateEmitter | undefined,
+	) {}
+
 	async openDiff(_request: proto.host.OpenDiffRequest): Promise<proto.host.OpenDiffResponse> {
-		// Next phase: Could use ACP client capabilities to open a diff view in the editor.
-		// This would involve sending an ACP extension notification/request to the client
-		// to display a side-by-side diff of the original vs modified content.
-		Logger.debug("[ACPDiffServiceClient] openDiff called (stub)")
-		return proto.host.OpenDiffResponse.create({})
+		throw invalidLegacyDiffOperation("openDiff")
 	}
 
-	async getDocumentText(request: proto.host.GetDocumentTextRequest): Promise<proto.host.GetDocumentTextResponse> {
-		// Next phase: Use connection.readTextFile if clientCapabilities.fs.readTextFile is available.
-		// This would read the current document content from the editor, including any unsaved changes.
-		// For now, return empty content.
-		Logger.debug("[ACPDiffServiceClient] getDocumentText called (stub)", { diffId: request.diffId })
-		return proto.host.GetDocumentTextResponse.create({ content: "" })
+	async getDocumentText(_request: proto.host.GetDocumentTextRequest): Promise<proto.host.GetDocumentTextResponse> {
+		throw invalidLegacyDiffOperation("getDocumentText")
 	}
 
 	async replaceText(_request: proto.host.ReplaceTextRequest): Promise<proto.host.ReplaceTextResponse> {
-		// Next phase: Use connection.writeTextFile if clientCapabilities.fs.writeTextFile is available.
-		// This would replace text in the document at the specified range.
-		Logger.debug("[ACPDiffServiceClient] replaceText called (stub)")
-		return proto.host.ReplaceTextResponse.create({})
+		throw invalidLegacyDiffOperation("replaceText")
 	}
 
 	async scrollDiff(_request: proto.host.ScrollDiffRequest): Promise<proto.host.ScrollDiffResponse> {
-		// Next phase: Send ACP extension notification to scroll the diff view to a specific line.
-		// No visual editor in ACP mode by default, so this is a no-op.
-		Logger.debug("[ACPDiffServiceClient] scrollDiff called (stub)")
-		return proto.host.ScrollDiffResponse.create({})
+		throw invalidLegacyDiffOperation("scrollDiff")
 	}
 
 	async truncateDocument(_request: proto.host.TruncateDocumentRequest): Promise<proto.host.TruncateDocumentResponse> {
-		// Next phase: Read file using readTextFile, truncate content, write back using writeTextFile.
-		// This is used to truncate a document to a specific line count.
-		Logger.debug("[ACPDiffServiceClient] truncateDocument called (stub)")
-		return proto.host.TruncateDocumentResponse.create({})
+		throw invalidLegacyDiffOperation("truncateDocument")
 	}
 
 	async saveDocument(_request: proto.host.SaveDocumentRequest): Promise<proto.host.SaveDocumentResponse> {
-		// Next phase: Use connection.writeTextFile to persist the document to disk.
-		// This saves the current document content to the file system.
-		Logger.debug("[ACPDiffServiceClient] saveDocument called (stub)")
-		return proto.host.SaveDocumentResponse.create({})
+		throw invalidLegacyDiffOperation("saveDocument")
 	}
 
 	async closeAllDiffs(_request: proto.host.CloseAllDiffsRequest): Promise<proto.host.CloseAllDiffsResponse> {
-		// Next phase: Send ACP extension notification to close all diff views in the editor.
-		// No visual diff views in ACP mode by default, so this is a no-op.
-		Logger.debug("[ACPDiffServiceClient] closeAllDiffs called (stub)")
-		return proto.host.CloseAllDiffsResponse.create({})
+		throw invalidLegacyDiffOperation("closeAllDiffs")
 	}
 
-	async openMultiFileDiff(_request: proto.host.OpenMultiFileDiffRequest): Promise<proto.host.OpenMultiFileDiffResponse> {
-		// Next phase: Send ACP extension notification to open a multi-file diff view.
-		// This would display changes across multiple files in the editor.
-		Logger.debug("[ACPDiffServiceClient] openMultiFileDiff called (stub)")
+	async openMultiFileDiff(request: proto.host.OpenMultiFileDiffRequest): Promise<proto.host.OpenMultiFileDiffResponse> {
+		const sessionId = requireActiveAcpSessionId(this.sessionIdResolver, "presenting a multi-file diff")
+		if (request.diffs.length === 0) {
+			throw new Error("Cannot present an ACP multi-file diff without at least one diff.")
+		}
+		if (!this.emitSessionUpdate) {
+			throw new Error("Cannot present an ACP multi-file diff without a session update emitter.")
+		}
+
+		const diffs = request.diffs.map((diff) => {
+			const path = diff.filePath
+			if (!path?.trim()) {
+				throw new Error("Cannot present an ACP multi-file diff with a missing file path.")
+			}
+			return {
+				path,
+				oldText: diff.leftContent ?? "",
+				newText: diff.rightContent ?? "",
+			}
+		})
+
+		await this.emitSessionUpdate(sessionId, {
+			sessionUpdate: "tool_call",
+			toolCallId: randomUUID(),
+			name: "open_multi_file_diff",
+			title: request.title || "Review changes",
+			kind: "edit",
+			status: "completed",
+			content: diffs.map((diff) => ({ type: "diff", ...diff })),
+			locations: diffs.map((diff) => ({ path: diff.path })),
+			rawInput: {
+				title: request.title,
+				fileCount: diffs.length,
+			},
+		})
+
 		return proto.host.OpenMultiFileDiffResponse.create({})
 	}
 }
@@ -108,7 +119,11 @@ class ACPDiffServiceClient implements DiffServiceClientInterface {
 class ACPEnvServiceClient implements EnvServiceClientInterface {
 	private readonly version: string
 
-	constructor(_clientCapabilities: acp.ClientCapabilities | undefined, _sessionIdResolver: SessionIdResolver, version: string) {
+	constructor(
+		_clientCapabilities: acp.ClientCapabilities | undefined,
+		_sessionIdResolver: ActiveAcpSessionIdResolver,
+		version: string,
+	) {
 		this.version = version
 	}
 
@@ -187,7 +202,7 @@ class ACPEnvServiceClient implements EnvServiceClientInterface {
  * Most operations are stubs that will be implemented using ACP extension methods.
  */
 class ACPWindowServiceClient implements WindowServiceClientInterface {
-	constructor(_clientCapabilities: acp.ClientCapabilities | undefined, _sessionIdResolver: SessionIdResolver) {}
+	constructor(_clientCapabilities: acp.ClientCapabilities | undefined, _sessionIdResolver: ActiveAcpSessionIdResolver) {}
 
 	async showTextDocument(request: proto.host.ShowTextDocumentRequest): Promise<proto.host.TextEditorInfo> {
 		// Next phase: Send ACP extension request to open document in the editor.
@@ -273,7 +288,7 @@ class ACPWorkspaceServiceClient implements WorkspaceServiceClientInterface {
 
 	constructor(
 		clientCapabilities: acp.ClientCapabilities | undefined,
-		_sessionIdResolver: SessionIdResolver,
+		_sessionIdResolver: ActiveAcpSessionIdResolver,
 		cwdResolver: CwdResolver,
 	) {
 		this._clientCapabilities = clientCapabilities
@@ -300,9 +315,17 @@ class ACPWorkspaceServiceClient implements WorkspaceServiceClientInterface {
 	async saveOpenDocumentIfDirty(
 		_request: proto.host.SaveOpenDocumentIfDirtyRequest,
 	): Promise<proto.host.SaveOpenDocumentIfDirtyResponse> {
-		// Next phase: Use ACP extension or fs.writeTextFile to save dirty documents.
-		// This would save any unsaved changes in the specified document.
-		Logger.debug("[ACPWorkspaceServiceClient] saveOpenDocumentIfDirty called (stub)")
+		const canReadAndWriteThroughClient =
+			this._clientCapabilities?.fs?.readTextFile === true &&
+			this._clientCapabilities.fs.writeTextFile === true
+		if (!canReadAndWriteThroughClient) {
+			throw new Error(
+				"ACP file editing requires negotiated fs.readTextFile and fs.writeTextFile capabilities to avoid overwriting unsaved editor content.",
+			)
+		}
+
+		// ACP file reads observe the client's authoritative buffer, and ACP writes
+		// update that same client-owned file state, so no separate save is needed.
 		return proto.host.SaveOpenDocumentIfDirtyResponse.create({})
 	}
 
@@ -391,18 +414,25 @@ export class ACPHostBridgeClientProvider implements HostBridgeClientProvider {
 	 * @param clientCapabilities - The client's advertised capabilities
 	 * @param sessionIdResolver - Function that returns the current session ID
 	 * @param cwdResolver - Function that returns the current working directory
-	 * @param debug - Whether to enable debug logging
-	 * @param version - Version string for getHostVersion (optional)
+	 * @param emitSessionUpdate - Optional session-update delivery callback
+	 * @param version - Version string for getHostVersion
 	 */
 	constructor(
+		connection: acp.AgentSideConnection | undefined,
 		clientCapabilities: acp.ClientCapabilities | undefined,
-		sessionIdResolver: SessionIdResolver,
+		sessionIdResolver: ActiveAcpSessionIdResolver,
 		cwdResolver: CwdResolver,
+		emitSessionUpdate: AcpSessionUpdateEmitter | undefined,
 		version: string,
 	) {
+		const sessionUpdateEmitter =
+			emitSessionUpdate ??
+			(connection
+				? async (sessionId: string, update: acp.SessionUpdate) => connection.sessionUpdate({ sessionId, update })
+				: undefined)
 		this.workspaceClient = new ACPWorkspaceServiceClient(clientCapabilities, sessionIdResolver, cwdResolver)
 		this.envClient = new ACPEnvServiceClient(clientCapabilities, sessionIdResolver, version)
 		this.windowClient = new ACPWindowServiceClient(clientCapabilities, sessionIdResolver)
-		this.diffClient = new ACPDiffServiceClient()
+		this.diffClient = new ACPDiffServiceClient(sessionIdResolver, sessionUpdateEmitter)
 	}
 }

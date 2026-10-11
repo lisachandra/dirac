@@ -66,4 +66,34 @@ describe("message content provenance cleanup", () => {
 		assert.equal("isUserInput" in nestedBlock, false)
 		assert.equal("steeringMessageIds" in nestedBlock, false)
 	})
+
+	it("removes provider-boundary metadata recursively from document content", () => {
+		const result = convertDiracStorageToAnthropicMessage(
+			{
+				role: "user",
+				content: [
+					{
+						type: "document",
+						source: {
+							type: "content",
+							content: [
+								{
+									type: "text",
+									text: "document text",
+									isUserInput: true,
+									steeringMessageIds: ["steer-1"],
+								},
+							],
+						},
+					},
+				],
+			} as any,
+			"openrouter",
+		)
+		const nestedBlock = (result.content as any[])[0].source.content[0]
+
+		assert.equal("isUserInput" in nestedBlock, false)
+		assert.equal("steeringMessageIds" in nestedBlock, false)
+		assert.equal(nestedBlock.text, "document text")
+	})
 })

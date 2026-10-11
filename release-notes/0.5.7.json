@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "version": "0.5.7",
+  "kind": "patch",
+  "announce": true,
+  "sourceTag": "v0.5.6",
+  "analyzedCommit": "c7cade3b3c1df947e7b5d6998991069ec47e6b60",
+  "headline": "Updates and improvements",
+  "highlights": [
+    {
+      "id": "fix-c7cade3b",
+      "title": "preserve string tool results for Gemini",
+      "category": "fix",
+      "evidence": [
+        "c7cade3b3c1df947e7b5d6998991069ec47e6b60"
+      ]
+    }
+  ]
+}

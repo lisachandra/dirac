@@ -1,30 +1,35 @@
 import { resolveWorkspacePath } from "@core/workspace"
-import { isMultiRootEnabled } from "@core/workspace/multi-root-utils"
+import type { Settings } from "@shared/storage/state-keys"
 import { DiracDefaultTool } from "@shared/tools"
-import { isSafeCommand } from "./utils/CommandSafetyChecker"
-import { areCommandSegmentsApproved, isUserApprovedCommandSegment } from "./utils/UserApprovedCommandMatcher"
 import { CommandPermissionController } from "@/core/permissions/CommandPermissionController"
-import { StateManager } from "@/core/storage/StateManager"
 import { HostProvider } from "@/hosts/host-provider"
 import { getCwd, getDesktopDir, isLocatedInPath, isLocatedInWorkspace } from "@/utils/path"
+import type { DeepReadonly } from "../runtime/TaskWorkingConfiguration"
+import { isSafeCommand } from "./utils/CommandSafetyChecker"
+import { areCommandSegmentsApproved, isUserApprovedCommandSegment } from "./utils/UserApprovedCommandMatcher"
 
-const WRITE_TOOLS: DiracDefaultTool[] = [
-	DiracDefaultTool.FILE_NEW,
-	DiracDefaultTool.EDIT_FILE,
-	DiracDefaultTool.EDIT_AST,
-]
+const WRITE_TOOLS: DiracDefaultTool[] = [DiracDefaultTool.FILE_NEW, DiracDefaultTool.EDIT_FILE, DiracDefaultTool.EDIT_AST]
+
+export type ToolPermissionDisposition = "auto_approve" | "utility_eligible" | "manual_only"
 
 export class AutoApprove {
-	private stateManager: StateManager
 	private commandPermissionController: CommandPermissionController
 	// Cache for workspace paths - populated on first access and reused for the task lifetime
 	// NOTE: This assumes that the task has a fixed set of workspace roots(which is currently true).
 	private workspacePathsCache: { paths: string[] } | null = null
 	private isMultiRootScenarioCache: boolean | null = null
 
-	constructor(stateManager: StateManager, commandPermissionController: CommandPermissionController) {
-		this.stateManager = stateManager
+	constructor(
+		commandPermissionController: CommandPermissionController,
+		private readonly settingsSource: DeepReadonly<Settings> | (() => DeepReadonly<Settings>),
+		private readonly multiRootEnabled: boolean,
+	) {
 		this.commandPermissionController = commandPermissionController
+	}
+
+	private setting<K extends keyof Settings>(key: K): DeepReadonly<Settings[K]> {
+		const settings = typeof this.settingsSource === "function" ? this.settingsSource() : this.settingsSource
+		return settings[key]
 	}
 
 	/**
@@ -39,7 +44,7 @@ export class AutoApprove {
 		if (this.workspacePathsCache === null || this.isMultiRootScenarioCache === null) {
 			// First time - fetch and cache for the lifetime of this task
 			this.workspacePathsCache = await HostProvider.workspace.getWorkspacePaths({})
-			this.isMultiRootScenarioCache = isMultiRootEnabled(this.stateManager) && this.workspacePathsCache.paths.length > 1
+			this.isMultiRootScenarioCache = this.multiRootEnabled && this.workspacePathsCache.paths.length > 1
 		}
 
 		return {
@@ -51,7 +56,7 @@ export class AutoApprove {
 	// Check if the tool should be auto-approved based on the settings
 	// Returns bool for most tools, and tuple for tools with nested settings
 	shouldAutoApproveTool(toolName: DiracDefaultTool): boolean | [boolean, boolean] {
-		if (this.stateManager.getGlobalSettingsKey("yoloModeToggled")) {
+		if (this.setting("yoloModeToggled")) {
 			switch (toolName) {
 				case DiracDefaultTool.FILE_READ:
 				case DiracDefaultTool.INSPECT_AST:
@@ -73,7 +78,7 @@ export class AutoApprove {
 			}
 		}
 
-		if (this.stateManager.getGlobalSettingsKey("autoApproveAllToggled")) {
+		if (this.setting("autoApproveAllToggled")) {
 			switch (toolName) {
 				case DiracDefaultTool.FILE_READ:
 				case DiracDefaultTool.INSPECT_AST:
@@ -93,7 +98,7 @@ export class AutoApprove {
 			}
 		}
 
-		const autoApprovalSettings = this.stateManager.getGlobalSettingsKey("autoApprovalSettings")
+		const autoApprovalSettings = this.setting("autoApprovalSettings")
 
 		switch (toolName) {
 			case DiracDefaultTool.FILE_READ:
@@ -118,26 +123,56 @@ export class AutoApprove {
 		return false
 	}
 
-	// Check if the tool should be auto-approved based on the settings
-	// and the path of the action. Returns true if the tool should be auto-approved
-	// based on the user's settings and the path of the action.
+	async resolveToolPathPermission(
+		blockname: DiracDefaultTool,
+		autoApproveActionpath: string | undefined,
+	): Promise<ToolPermissionDisposition> {
+		let isLocal = false
+		if (autoApproveActionpath) {
+			const { isMultiRootScenario } = await this.getWorkspaceInfo()
+			if (isMultiRootScenario) {
+				isLocal = await isLocatedInWorkspace(autoApproveActionpath)
+			} else {
+				const cwd = await getCwd(getDesktopDir())
+				const absolutePath = resolveWorkspacePath(
+					cwd,
+					autoApproveActionpath,
+					"AutoApprove.resolveToolPathPermission",
+				) as string
+				isLocal = isLocatedInPath(cwd, absolutePath)
+			}
+		}
+
+		const isWriteOperation = WRITE_TOOLS.includes(blockname)
+		if (!isLocal && isWriteOperation) return "manual_only"
+
+		const ruleResult = this.commandPermissionController.validateTool(blockname, autoApproveActionpath)
+		if (!ruleResult.allowed) return "manual_only"
+		if (this.isUnrestrictedAutoApprove()) return "auto_approve"
+		if (ruleResult.reason === "allowed" && ruleResult.matchedPattern) return "auto_approve"
+
+		const autoApproveResult = this.shouldAutoApproveTool(blockname)
+		const [autoApproveLocal, autoApproveExternal] = Array.isArray(autoApproveResult)
+			? autoApproveResult
+			: [autoApproveResult, false]
+		if ((isLocal && autoApproveLocal) || (!isLocal && autoApproveLocal && autoApproveExternal)) {
+			return "auto_approve"
+		}
+		return "utility_eligible"
+	}
+
 	async shouldAutoApproveToolWithPath(
 		blockname: DiracDefaultTool,
 		autoApproveActionpath: string | undefined,
 	): Promise<boolean> {
-		// 1. Determine if the action is local or external FIRST
 		let isLocalRead = false
 		if (autoApproveActionpath) {
-			// Use cached workspace info instead of fetching every time
 			const { isMultiRootScenario } = await this.getWorkspaceInfo()
 
 			if (isMultiRootScenario) {
-				// Multi-root: check if file is in ANY workspace
 				isLocalRead = await isLocatedInWorkspace(autoApproveActionpath)
 			} else {
-				// Single-root: use existing logic
 				const cwd = await getCwd(getDesktopDir())
-				// When called with a string cwd, resolveWorkspacePath returns a string
 				const absolutePath = resolveWorkspacePath(
 					cwd,
 					autoApproveActionpath,
@@ -145,66 +180,43 @@ export class AutoApprove {
 				) as string
 				isLocalRead = isLocatedInPath(cwd, absolutePath)
 			}
-		} else {
-			// If we do not get a path for some reason, default to a (safer) false return
-			isLocalRead = false
 		}
 
-		// 2. Unrestricted modes: YOLO and auto-approve-all bypass all safety checks
-		if (this.stateManager.getGlobalSettingsKey("yoloModeToggled")) {
-			return true
-		}
-		if (this.stateManager.getGlobalSettingsKey("autoApproveAllToggled")) {
-			return true
-		}
+		if (this.setting("yoloModeToggled")) return true
+		if (this.setting("autoApproveAllToggled")) return true
 
-		// 3. SAFETY POLICY: Require manual approval for writes outside the workspace
 		const isWriteOperation = WRITE_TOOLS.includes(blockname)
-		if (!isLocalRead && isWriteOperation) {
-			return false
-		}
+		if (!isLocalRead && isWriteOperation) return false
 
-		// 4. Get auto-approve settings for local and external edits
 		const autoApproveResult = this.shouldAutoApproveTool(blockname)
 		const [autoApproveLocal, autoApproveExternal] = Array.isArray(autoApproveResult)
 			? autoApproveResult
 			: [autoApproveResult, false]
 
-		// 5. Check permission rules
-		if (this.shouldAutoApproveWithRules(blockname, autoApproveActionpath)) {
-			return true
-		}
+		if (this.shouldAutoApproveWithRules(blockname, autoApproveActionpath)) return true
 
-		if ((isLocalRead && autoApproveLocal) || (!isLocalRead && autoApproveLocal && autoApproveExternal)) {
-			return true
-		}
-		return false
+		return (isLocalRead && autoApproveLocal) || (!isLocalRead && autoApproveLocal && autoApproveExternal)
 	}
 
 	public isCommandAutoApproved(command: string): boolean {
-		const entries = this.stateManager.getGlobalSettingsKey("userApprovedCommands")
+		const entries = this.setting("userApprovedCommands")
 		const autoApproveResult = this.shouldAutoApproveTool(DiracDefaultTool.BASH)
 		const safeCommandAutoApprovalEnabled = Array.isArray(autoApproveResult) ? autoApproveResult[0] : autoApproveResult
 
 		if (safeCommandAutoApprovalEnabled && isSafeCommand(command)) return true
 
 		return areCommandSegmentsApproved(command, (segment) => {
-			if (isUserApprovedCommandSegment(segment, entries)) return true
+			if (isUserApprovedCommandSegment(segment, [...entries])) return true
 			return safeCommandAutoApprovalEnabled && isSafeCommand(segment)
 		})
 	}
 
 	/**
-	 * Returns true when the user is in YOLO or auto-approve-all mode,
-	 * meaning ALL security checks (safety, rules) should be bypassed.
-	 * This is distinct from per-tool auto-approve settings which may
-	 * still require safety/rule checks to pass.
+	 * Returns true when the user enabled YOLO or Auto-Approve All.
+	 * The active permission flow determines whether this override precedes or follows other restrictions.
 	 */
 	public isUnrestrictedAutoApprove(): boolean {
-		return (
-			this.stateManager.getGlobalSettingsKey("yoloModeToggled") ||
-			this.stateManager.getGlobalSettingsKey("autoApproveAllToggled")
-		)
+		return this.setting("yoloModeToggled") || this.setting("autoApproveAllToggled")
 	}
 
 	/**

@@ -2,8 +2,9 @@
  * Bedrock AWS auth + client construction. Extracted from `bedrock.ts` (FB-15b).
  * Takes the subset of provider options it needs so it never imports the handler.
  */
-import { fromNodeProviderChain } from "@aws-sdk/credential-providers"
+import type { BedrockRuntimeClientConfig } from "@aws-sdk/client-bedrock-runtime"
 import { BedrockRuntimeClient } from "@aws-sdk/client-bedrock-runtime"
+import { fromNodeProviderChain } from "@aws-sdk/credential-providers"
 
 export interface AwsBedrockClientOptions {
 	awsAuthentication?: string
@@ -17,12 +18,18 @@ export interface AwsBedrockClientOptions {
 	awsBedrockEndpoint?: string
 }
 
+type FromNodeProviderChainOptions = NonNullable<Parameters<typeof fromNodeProviderChain>[0]>
+
+/** Either bearer-token auth (Bedrock Gateway API key) or resolved AK/SK credentials. */
+type BedrockClientAuth =
+	| Pick<BedrockRuntimeClientConfig, "token" | "authSchemePreference">
+	| Pick<BedrockRuntimeClientConfig, "credentials">
+
 /** Returns the AWS region to use for the given options, with a default fallback. */
-export function resolveRegion(options: AwsBedrockClientOptions, defaultRegion: string): string {
+function resolveRegion(options: AwsBedrockClientOptions, defaultRegion: string): string {
 	return options.awsRegion || defaultRegion
 }
 
-/** Builds an AWS credentials resolver chain, then a BedrockRuntimeClient. */
 /** Resolves AWS credentials from options or the node provider chain, without mutating env. */
 export async function resolveAwsCredentials(
 	options: AwsBedrockClientOptions,
@@ -39,22 +46,15 @@ export async function resolveAwsCredentials(
 			sessionToken: options.awsSessionToken,
 		}
 	}
-	const providerOptions: {
-		clientConfig: { userAgentAppId: string; region?: string }
-		ignoreCache?: boolean
-		profile?: string
-	} = {
-		clientConfig: { userAgentAppId },
+	const providerOptions: FromNodeProviderChainOptions = {
+		clientConfig: { userAgentAppId, region },
 	}
-	providerOptions.clientConfig.region = region
 	if (useProfile) {
 		providerOptions.ignoreCache = true
 		if (options.awsProfile) providerOptions.profile = options.awsProfile
 	}
-	return await fromNodeProviderChain(providerOptions as never)()
+	return fromNodeProviderChain(providerOptions)()
 }
-
-
 
 export async function createBedrockClient(
 	options: AwsBedrockClientOptions,
@@ -63,27 +63,20 @@ export async function createBedrockClient(
 ): Promise<BedrockRuntimeClient> {
 	const region = resolveRegion(options, defaultRegion)
 
-	let auth: unknown
+	let auth: BedrockClientAuth
 	if (options.awsAuthentication === "apikey") {
 		auth = {
-			token: { token: options.awsBedrockApiKey },
+			token: { token: options.awsBedrockApiKey ?? "" },
 			authSchemePreference: ["httpBearerAuth"],
 		}
 	} else {
-		const credentials = await resolveAwsCredentials(options, region, userAgentAppId)
-		auth = {
-			credentials: {
-				accessKeyId: credentials.accessKeyId,
-				secretAccessKey: credentials.secretAccessKey,
-				sessionToken: credentials.sessionToken,
-			},
-		}
+		auth = { credentials: await resolveAwsCredentials(options, region, userAgentAppId) }
 	}
 
 	return new BedrockRuntimeClient({
 		userAgentAppId,
 		region,
-		...(auth as Record<string, unknown>),
+		...auth,
 		...(options.awsBedrockEndpoint ? { endpoint: options.awsBedrockEndpoint } : {}),
 	})
 }

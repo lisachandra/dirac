@@ -39,6 +39,11 @@ export interface FormattedInspectAstResult {
 	cacheStats: InspectAstCacheStats
 }
 
+export function implementationCacheKey(target: AstImplementationTargetResult): string {
+	const normalizedPath = (target.absolutePath ?? target.path).replace(/\\/g, "/")
+	return `${normalizedPath}::${target.symbol}#plain`
+}
+
 function formatLine(line: SourceLine, includeAnchors: boolean): string {
 	return includeAnchors && line.anchor ? `${line.anchor}${getDelimiter()}${line.text}` : line.text
 }
@@ -149,8 +154,7 @@ export class InspectAstFormatter {
 		const definition = target.definition!
 		const contentHash = target.contentHash!
 		const header = `${target.path}::${definition.qualifiedName}`
-		const normalizedPath = (target.absolutePath ?? target.path).replace(/\\/g, "/")
-		const cacheKey = `${normalizedPath}::${target.symbol}#plain`
+		const cacheKey = implementationCacheKey(target)
 		const cached = includeAnchors ? undefined : cache[cacheKey]
 		const contentMatches = typeof cached === "string"
 			? cached === contentHash

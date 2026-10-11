@@ -28,12 +28,20 @@ import type {
 	TerminalProcessResultPromise,
 } from "./types"
 
-/**
- * CommandExecutor - Unified command executor for all terminal modes.
- *
- * Uses the shared CommandOrchestrator for common logic and delegates
- * process management to the appropriate TerminalManager.
- */
+function waitForTerminalProcessCompletion(process: TerminalProcessResultPromise): Promise<void> {
+	return new Promise<void>((resolve) => {
+		let settled = false
+		const settle = () => {
+			if (settled) return
+			settled = true
+			resolve()
+		}
+		process.once("completed", settle)
+		process.once("error", settle)
+	})
+}
+
+
 export class CommandExecutor {
 	private cwd: string
 	private taskId: string
@@ -126,7 +134,11 @@ export class CommandExecutor {
 						existingLogFilePath,
 						existingOutputReady,
 					)
-					return { logFilePath: backgroundCmd.logFilePath, outputReady: existingOutputReady }
+					return {
+						logFilePath: backgroundCmd.logFilePath,
+						outputReady: existingOutputReady,
+						completion: waitForTerminalProcessCompletion(process),
+					}
 				}
 				: undefined,
 			showShellIntegrationSuggestion: this.shouldShowBackgroundTerminalSuggestion(),
@@ -138,6 +150,7 @@ export class CommandExecutor {
 			exitCode: result.exitCode,
 			signal: result.signal,
 			logFilePath: result.logFilePath,
+			backgroundCompletion: result.backgroundCompletion,
 		}
 
 		if (this.wasCancelledExternally) {

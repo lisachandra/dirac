@@ -2,6 +2,7 @@ import { DiracAskResponse } from "@shared/WebviewMessage"
 import { memo } from "react"
 import { CheckpointMarker, ModularCard, ModularMarkdown } from "@/features/modular-ui"
 import type { ChatRowProps } from "../types/chatRowTypes"
+import { IncrementalText } from "../../components/IncrementalText"
 
 export const MessageRenderer = memo(
 	({
@@ -26,6 +27,15 @@ export const MessageRenderer = memo(
 		if ("content" in message) {
 			switch (message.content.type) {
 				case "markdown":
+					if (message.id === activeVoiceStreamId && !message.content.isReasoning) {
+						return (
+							<IncrementalText
+								className="wrap-anywhere whitespace-pre-wrap rounded-lg border border-foreground/10 bg-foreground/[0.025] px-3 py-2 text-base leading-relaxed opacity-70"
+								initialText={message.content.content}
+								messageId={message.id}
+							/>
+						)
+					}
 					return (
 						<ModularMarkdown
 							content={message.content.content}
@@ -37,6 +47,7 @@ export const MessageRenderer = memo(
 							onSetQuote={onSetQuote}
 							onToggleExpand={() => onToggleExpand(message.id)}
 							partial={message.id === activeVoiceStreamId}
+							streamingMessageId={message.id === activeVoiceStreamId ? message.id : undefined}
 							role={message.content.role}
 							steeringStatus={message.content.steering?.status}
 						/>

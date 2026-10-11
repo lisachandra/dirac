@@ -169,25 +169,26 @@ export const getLocalDiracRules = async (
 export async function refreshDiracRulesToggles(
 	stateManager: StateManager,
 	workingDirectory: string,
+	configuration?: { globalToggles: DiracRulesToggles; localToggles: DiracRulesToggles },
 ): Promise<{
 	globalToggles: DiracRulesToggles
 	localToggles: DiracRulesToggles
 }> {
 	// Global toggles
-	const globalDiracRulesToggles = stateManager.getGlobalSettingsKey("globalDiracRulesToggles")
+	const globalDiracRulesToggles = configuration?.globalToggles ?? stateManager.getGlobalSettingsKey("globalDiracRulesToggles")
 	const globalDiracRulesFilePath = await ensureRulesDirectoryExists()
 	const updatedGlobalToggles = await synchronizeRuleToggles(globalDiracRulesFilePath, globalDiracRulesToggles)
-	stateManager.setGlobalState("globalDiracRulesToggles", updatedGlobalToggles)
+	if (!configuration) stateManager.setGlobalState("globalDiracRulesToggles", updatedGlobalToggles)
 
 	// Local toggles
-	const localDiracRulesToggles = stateManager.getWorkspaceStateKey("localDiracRulesToggles")
+	const localDiracRulesToggles = configuration?.localToggles ?? stateManager.getWorkspaceStateKey("localDiracRulesToggles")
 	const localDiracRulesFilePath = path.resolve(workingDirectory, GlobalFileNames.diracRules)
 	const updatedLocalToggles = await synchronizeRuleToggles(localDiracRulesFilePath, localDiracRulesToggles, "", [
 		[".diracrules", "workflows"],
 		[".diracrules", "hooks"],
 		[".diracrules", "skills"],
 	])
-	stateManager.setWorkspaceState("localDiracRulesToggles", updatedLocalToggles)
+	if (!configuration) stateManager.setWorkspaceState("localDiracRulesToggles", updatedLocalToggles)
 
 	return {
 		globalToggles: updatedGlobalToggles,

@@ -5,7 +5,8 @@ import type { LocalConversationCompactionOptions, LocalConversationCompactionOut
 import { ApiHandler, ApiProviderInfo } from "../../../core/api"
 import { DiffViewProvider } from "../../../integrations/editor/DiffViewProvider"
 import { ContextManager } from "../../context/context-management/ContextManager"
-import { StateManager } from "../../storage/StateManager"
+import type { TaskWorkingConfiguration } from "../runtime/TaskWorkingConfiguration"
+import type { TaskRequestRuntime } from "../runtime/TaskRequestRuntime"
 import { MessageStateHandler } from "../message-state"
 import { StreamResponseHandler } from "../StreamResponseHandler"
 import { TaskMessenger } from "../TaskMessenger"
@@ -18,7 +19,8 @@ export interface ApiConversationManagerDependencies {
 	messageStateHandler: MessageStateHandler
 	api: ApiHandler
 	contextManager: ContextManager
-	stateManager: StateManager
+	getWorkingConfiguration: () => TaskWorkingConfiguration
+	getRequestRuntime: () => TaskRequestRuntime | undefined
 	taskId: string
 	ulid: string
 	cwd: string

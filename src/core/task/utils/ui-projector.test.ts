@@ -90,4 +90,42 @@ describe("projectUIActionState", () => {
 			},
 		])
 	})
+
+	it("skips stale terminal card ids when projecting the active interaction", () => {
+		const state = new TaskState()
+		state.status = TaskStatus.EXECUTING_TOOL
+		state.waitingCardIds = ["stale", "active"]
+		const messages: DiracMessage[] = [
+			{
+				id: "stale",
+				ts: 1,
+				content: {
+					type: DiracMessageType.CARD,
+					card: {
+						id: "stale",
+						header: "Resolved",
+						status: CardStatus.SUCCESS,
+						renderType: "text",
+						requireApproval: true,
+					},
+				},
+			},
+			{
+				id: "active",
+				ts: 2,
+				content: {
+					type: DiracMessageType.CARD,
+					card: {
+						id: "active",
+						header: "Approve",
+						status: CardStatus.WAITING_FOR_INPUT,
+						renderType: "text",
+						requireApproval: true,
+					},
+				},
+			},
+		]
+
+		projectUIActionState(state, messages, 3).activeCardId!.should.equal("active")
+	})
 })

@@ -18,11 +18,12 @@ import { HostProvider } from "@/hosts/host-provider"
 import { BannerService } from "@/services/banner/BannerService"
 import type { DiracExtensionContext } from "@/shared/dirac"
 import { Session } from "@/shared/services/Session"
+import { expectLoggerErrors } from "@/test/loggerGuard"
 import * as pathUtils from "@/utils/path"
+import { Logger } from "../../../shared/services/Logger"
 import { StateManager } from "../../storage/StateManager"
 import { Task } from "../../task"
 import { Controller } from "../index"
-import { expectLoggerErrors } from "@/test/loggerGuard"
 
 describe("Controller (original)", () => {
 	let sandbox: sinon.SinonSandbox
@@ -48,6 +49,7 @@ describe("Controller (original)", () => {
 
 		sandbox.stub(checkpointFactory, "buildCheckpointManager").returns({
 			initialize: sandbox.stub().resolves(),
+			setEnabled: sandbox.stub(),
 			save: sandbox.stub().resolves(),
 			restore: sandbox.stub().resolves(),
 			getCheckpoints: sandbox.stub().returns([]),
@@ -128,6 +130,9 @@ describe("Controller (original)", () => {
 		}
 		const mockSM = {
 			getGlobalSettingsKey: sandbox.stub().callsFake((key: string) => globalSettings[key] ?? undefined),
+			getSystemDefaultSettingsKey: sandbox
+				.stub()
+				.callsFake((key: string) => globalSettings[key] ?? globalState[key] ?? undefined),
 			getGlobalStateKey: sandbox.stub().callsFake((key: string) => globalState[key] ?? undefined),
 			getWorkspaceStateKey: sandbox.stub().returns(undefined),
 			setGlobalState: sandbox.stub().callsFake((key: string, value: any) => {
@@ -135,6 +140,17 @@ describe("Controller (original)", () => {
 			}),
 			setGlobalStateBatch: sandbox.stub().callsFake((updates: Record<string, any>) => {
 				Object.assign(globalState, updates)
+			}),
+			upsertTaskHistoryItem: sandbox.stub().callsFake((item: any) => {
+				const index = globalState.taskHistory.findIndex((candidate: any) => candidate.id === item.id)
+				if (index === -1) globalState.taskHistory.push(item)
+				else globalState.taskHistory[index] = item
+				return globalState.taskHistory
+			}),
+			removeTaskHistoryItems: sandbox.stub().callsFake((ids: string[]) => {
+				const removedIds = new Set(ids)
+				globalState.taskHistory = globalState.taskHistory.filter((item: any) => !removedIds.has(item.id))
+				return globalState.taskHistory
 			}),
 			setTaskSettingsBatch: sandbox.stub(),
 			loadTaskSettings: sandbox.stub().resolves(),
@@ -145,8 +161,43 @@ describe("Controller (original)", () => {
 				planModeApiModelId: "claude-sonnet-4-20250514",
 				actModeApiModelId: "claude-sonnet-4-20250514",
 			}),
+			captureEffectiveTaskConfiguration: sandbox.stub().callsFake(() => ({
+				revision: 1,
+				settings: new Proxy(
+					{},
+					{
+						get: (_target, key) =>
+							(
+								({
+									mode: "plan",
+									enableCheckpointsSetting: false,
+									shellIntegrationTimeout: 5000,
+									terminalOutputLineLimit: 500,
+									defaultTerminalProfile: "default",
+									autoApprovalSettings: {},
+									browserSettings: {},
+									toolToggles: {},
+								}) as any
+							)[key as any],
+					},
+				),
+				apiConfiguration: {
+					planModeApiProvider: "anthropic",
+					actModeApiProvider: "anthropic",
+					planModeApiModelId: "claude-sonnet-4-20250514",
+					actModeApiModelId: "claude-sonnet-4-20250514",
+				},
+				workspaceConfiguration: {},
+				executionOptions: {
+					terminalReuseEnabled: true,
+					vscodeTerminalExecutionMode: "vscodeTerminal",
+					multiRootEnabled: false,
+				},
+			})),
 			setApiConfiguration: sandbox.stub(),
 			setSessionOverride: sandbox.stub(),
+			hasSessionOverride: sandbox.stub().returns(false),
+			clearSessionOverride: sandbox.stub(),
 			getModelsCache: sandbox.stub().returns(null),
 			setModelsCache: sandbox.stub(),
 			registerCallbacks: sandbox.stub(),
@@ -239,6 +290,71 @@ describe("Controller (original)", () => {
 		await initTask(c, "test")
 		;(c.task !== undefined).should.be.true()
 	})
+	it("routes /goal before ordinary Task construction", async () => {
+		expectLoggerErrors()
+		const c = trackController(new Controller(mockContext, { goalRoutingEnabled: true }))
+		const goalStart = sandbox.stub((c as any).goalController, "start").resolves("goal-id")
+		const ordinaryStart = sandbox.spy((c as any).taskController, "initTask")
+
+		const id = await c.initTask("  /goal   Ship the Goal loop  ")
+
+		id.should.equal("goal-id")
+		goalStart.calledOnceWithExactly("Ship the Goal loop").should.be.true()
+		ordinaryStart.called.should.be.false()
+	})
+	it("rejects Goals when invocation tool selection is active", async () => {
+		expectLoggerErrors()
+		const c = trackController(new Controller(mockContext, { goalRoutingEnabled: true }))
+		const goalStart = sandbox.spy((c as any).goalController, "start")
+		c.setTaskInitializationDefaults({
+			toolSelectionPolicy: { mode: "exact", toolIds: ["read_file"] },
+		})
+
+		await c.initTask("/goal Ship it").should.be.rejectedWith("Invocation tool-selection options cannot be used with Goals.")
+		goalStart.called.should.be.false()
+	})
+	it("rejects an empty /goal without constructing Goal or Task state", async () => {
+		expectLoggerErrors()
+		const c = new Controller(mockContext, { goalRoutingEnabled: true })
+		const goalStart = sandbox.spy((c as any).goalController, "start")
+		const ordinaryStart = sandbox.spy((c as any).taskController, "initTask")
+
+		await c.initTask(" /goal   ").should.be.rejectedWith("/goal requires a non-empty objective")
+
+		goalStart.called.should.be.false()
+		ordinaryStart.called.should.be.false()
+	})
+	it("requires a selected Goal for the literal resume command", async () => {
+		expectLoggerErrors()
+		const c = trackController(new Controller(mockContext, { goalRoutingEnabled: true }))
+		const goalStart = sandbox.spy((c as any).goalController, "start")
+		const ordinaryStart = sandbox.spy((c as any).taskController, "initTask")
+
+		await c.initTask(" /goal resume ").should.be.rejectedWith("Select a Goal before using /goal resume")
+
+		goalStart.called.should.be.false()
+		ordinaryStart.called.should.be.false()
+	})
+	it("routes selected Goal messages and the literal resume command separately", async () => {
+		expectLoggerErrors()
+		const c = trackController(new Controller(mockContext, { goalRoutingEnabled: true }))
+		const sendMessage = sandbox.stub((c as any).goalController, "sendMessage").resolves()
+		const resume = sandbox.stub((c as any).goalController, "resume").resolves()
+
+		await c.sendGoalMessage("goal-id", "What happened?")
+		await c.sendGoalMessage("goal-id", "  /goal resume  ")
+
+		sendMessage.calledOnceWithExactly("goal-id", "What happened?").should.be.true()
+		resume.calledOnceWithExactly("goal-id").should.be.true()
+	})
+	it("rejects mode switches whenever a Goal is selected", async () => {
+		expectLoggerErrors()
+		const c = new Controller(mockContext, { goalRoutingEnabled: true })
+		sandbox.stub((c as any).goalController, "selectedGoalId").get(() => "goal-id")
+
+		await c.togglePlanActMode("act").should.be.rejectedWith("Mode switching is disabled while a Goal is active.")
+		await c.toggleActModeForYoloMode().should.be.rejectedWith("Mode switching is disabled while a Goal is active.")
+	})
 	it("dispose clears task", async () => {
 		expectLoggerErrors()
 		const c = new Controller(mockContext)
@@ -270,9 +386,10 @@ describe("Controller (original)", () => {
 			if (task === "first") {
 				await replacementGate
 				await c.initTask("second")
-				return
+				return { kind: "completed", response: "", completedAt: Date.now() }
 			}
 			replacementStarted = task === "second"
+			return { kind: "completed", response: "", completedAt: Date.now() }
 		})
 
 		c = trackController(new Controller(mockContext))
@@ -339,5 +456,14 @@ describe("Controller (original)", () => {
 		const c = new Controller(mockContext)
 		const m = await c.readOpenRouterModels()
 		;(m === undefined).should.be.true()
+	})
+
+	it("logs routine disposal at DEBUG level", async () => {
+		const c = new Controller(mockContext)
+		const debugStub = sandbox.stub(Logger, "debug")
+		const errorStub = sandbox.stub(Logger, "error")
+		await c.dispose()
+		sinon.assert.calledWith(debugStub, "Controller disposed")
+		sinon.assert.neverCalledWith(errorStub, "Controller disposed")
 	})
 })

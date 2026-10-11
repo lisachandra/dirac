@@ -37,11 +37,11 @@ export interface DiracTextContentBlock extends Anthropic.TextBlockParam, DiracSh
 	signature?: string
 }
 
-export interface DiracImageContentBlock extends Anthropic.ImageBlockParam, DiracSharedMessageParam { }
+export interface DiracImageContentBlock extends Anthropic.ImageBlockParam, DiracSharedMessageParam {}
 
-export interface DiracDocumentContentBlock extends Anthropic.DocumentBlockParam, DiracSharedMessageParam { }
+export interface DiracDocumentContentBlock extends Anthropic.DocumentBlockParam, DiracSharedMessageParam {}
 
-export interface DiracUserToolResultContentBlock extends Anthropic.ToolResultBlockParam, DiracSharedMessageParam { }
+export interface DiracUserToolResultContentBlock extends Anthropic.ToolResultBlockParam, DiracSharedMessageParam {}
 
 /**
  * Assistant only content types
@@ -59,7 +59,7 @@ export interface DiracAssistantThinkingBlock extends Anthropic.ThinkingBlock, Di
 	summary?: unknown[] | DiracReasoningDetailParam[]
 }
 
-export interface DiracAssistantRedactedThinkingBlock extends Anthropic.RedactedThinkingBlockParam, DiracSharedMessageParam { }
+export interface DiracAssistantRedactedThinkingBlock extends Anthropic.RedactedThinkingBlockParam, DiracSharedMessageParam {}
 
 export type DiracToolResponseContent = DiracPromptInputContent | Array<DiracTextContentBlock | DiracImageContentBlock>
 
@@ -110,12 +110,24 @@ export interface DiracStorageMessage extends Anthropic.MessageParam {
 }
 
 export function removeUserInputMarkersFromContent(block: DiracContent): DiracContent {
-	const nestedContent =
-		block.type === "tool_result" && Array.isArray(block.content)
-			? block.content.map((contentBlock) => removeUserInputMarkersFromContent(contentBlock as DiracContent))
-			: undefined
 	const { isUserInput, ...contentBlock } = block as DiracContent & { isUserInput?: boolean }
-	if (nestedContent) return { ...contentBlock, content: nestedContent } as DiracContent
+	if (block.type === "tool_result" && Array.isArray(block.content)) {
+		return {
+			...contentBlock,
+			content: block.content.map((nestedBlock) => removeUserInputMarkersFromContent(nestedBlock as DiracContent)),
+		} as DiracContent
+	}
+	if (block.type === "document" && block.source.type === "content" && Array.isArray(block.source.content)) {
+		return {
+			...contentBlock,
+			source: {
+				...block.source,
+				content: block.source.content.map((nestedBlock) =>
+					removeUserInputMarkersFromContent(nestedBlock as DiracContent),
+				),
+			},
+		} as DiracContent
+	}
 	return contentBlock as DiracContent
 }
 
@@ -146,36 +158,41 @@ export function convertDiracStorageToAnthropicMessage(
 }
 
 function removeProviderBoundaryMetadata(block: DiracContent): DiracContent {
-	const nestedContent =
-		block.type === "tool_result" && Array.isArray(block.content)
-			? block.content.map((contentBlock) => removeProviderBoundaryMetadata(contentBlock as DiracContent))
-			: undefined
 	const { isUserInput, steeringMessageIds, ...contentBlock } = block as DiracContent & {
 		isUserInput?: boolean
 		steeringMessageIds?: string[]
 	}
-	if (nestedContent) return { ...contentBlock, content: nestedContent } as DiracContent
+	if (block.type === "tool_result" && Array.isArray(block.content)) {
+		return {
+			...contentBlock,
+			content: block.content.map((nestedBlock) => removeProviderBoundaryMetadata(nestedBlock as DiracContent)),
+		} as DiracContent
+	}
+	if (block.type === "document" && block.source.type === "content" && Array.isArray(block.source.content)) {
+		return {
+			...contentBlock,
+			source: {
+				...block.source,
+				content: block.source.content.map((nestedBlock) => removeProviderBoundaryMetadata(nestedBlock as DiracContent)),
+			},
+		} as DiracContent
+	}
 	return contentBlock as DiracContent
 }
 
-
 export function cleanContentBlock(block: DiracContent): Anthropic.ContentBlock {
-	const nestedContent =
-		block.type === "tool_result" && Array.isArray(block.content)
-			? block.content.map((contentBlock) => cleanContentBlock(contentBlock as DiracContent))
-			: undefined
-	const {
-		reasoning_details,
-		call_id,
-		summary,
-		isComplete,
-		isNativeToolCall,
-		isUserInput,
-		steeringMessageIds,
-		...rest
-	} = block as any
+	const { reasoning_details, call_id, summary, isComplete, isNativeToolCall, isUserInput, steeringMessageIds, ...rest } =
+		block as any
 
-	if (nestedContent) rest.content = nestedContent
+	if (block.type === "tool_result" && Array.isArray(block.content)) {
+		rest.content = block.content.map((nestedBlock) => cleanContentBlock(nestedBlock as DiracContent))
+	}
+	if (block.type === "document" && block.source.type === "content" && Array.isArray(block.source.content)) {
+		rest.source = {
+			...block.source,
+			content: block.source.content.map((nestedBlock) => cleanContentBlock(nestedBlock as DiracContent)),
+		}
+	}
 	if (block.type !== "thinking" && rest.signature) rest.signature = undefined
 	return rest satisfies Anthropic.ContentBlock
 }

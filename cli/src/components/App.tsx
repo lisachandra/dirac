@@ -13,7 +13,7 @@ import { AuthView } from "./AuthView"
 import { ChatView } from "./ChatView"
 import { ConfigView } from "./ConfigView"
 import { ErrorBoundary } from "./ErrorBoundary"
-import { HistoryView } from "./HistoryView"
+import { HistoryView, type HistoryDisplayItem } from "./HistoryView"
 
 export type ViewType = "task" | "history" | "config" | "auth" | "welcome"
 
@@ -52,8 +52,8 @@ interface AppProps {
 	onComplete?: () => void
 	onError?: () => void
 	// For history view
-	historyItems?: Array<{ id: string; ts: number; task?: string; totalCost?: number; modelId?: string }>
-	historyAllItems?: Array<{ id: string; ts: number; task?: string; totalCost?: number; modelId?: string }>
+	historyItems?: HistoryDisplayItem[]
+	historyAllItems?: HistoryDisplayItem[]
 	historyPagination?: HistoryPagination
 	onHistoryPageChange?: (page: number) => void
 	// For config view

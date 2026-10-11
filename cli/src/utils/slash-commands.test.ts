@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from "vitest"
 import {
-    executeLocalSlashCommand,
-    executeStandaloneLocalSlashCommand,
-    mergeCliSlashCommands,
-    type LocalSlashCommandContext,
+	executeLocalSlashCommand,
+	executeStandaloneLocalSlashCommand,
+	mergeCliSlashCommands,
+	type LocalSlashCommandContext,
 } from "./slash-commands"
 import { CliPanelType } from "../types"
 
@@ -14,6 +14,7 @@ function localCommandContext(): LocalSlashCommandContext {
 		resetInputLine: vi.fn(),
 		clearViewAndResetTask: vi.fn(),
 		handleExit: vi.fn(),
+		enableFastMode: vi.fn(),
 		toggleQuietMode: vi.fn(),
 	}
 }
@@ -24,6 +25,14 @@ describe("executeLocalSlashCommand", () => {
 
 		expect(executeLocalSlashCommand("quiet", context)).toBe(true)
 		expect(context.toggleQuietMode).toHaveBeenCalledOnce()
+		expect(context.resetInputLine).toHaveBeenCalledOnce()
+	})
+
+	it("enables Fast Mode and clears the input for /fast", () => {
+		const context = localCommandContext()
+
+		expect(executeLocalSlashCommand("fast", context)).toBe(true)
+		expect(context.enableFastMode).toHaveBeenCalledOnce()
 		expect(context.resetInputLine).toHaveBeenCalledOnce()
 	})
 

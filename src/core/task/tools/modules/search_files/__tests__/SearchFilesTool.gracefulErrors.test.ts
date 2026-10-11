@@ -2,6 +2,7 @@ import { strict as assert } from "node:assert"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
+import { CardStatus } from "@shared/ExtensionMessage"
 import { DiracDefaultTool } from "@shared/tools"
 import { ToolExecutorCoordinator } from "../../../ToolExecutorCoordinator"
 import { AnchorStateManager } from "@utils/AnchorStateManager"
@@ -232,6 +233,61 @@ describe("SearchFilesTool.execute – error recovery", () => {
 
 		assert.equal(typeof result, "string")
 		assert.equal(taskState.consecutiveMistakeCount, 0)
+	})
+
+	it("reports a typed timeout and terminalizes its card", async () => {
+		const clock = sinon.useFakeTimers()
+		try {
+			const { config, taskMessenger } = createMockTaskConfig({
+				overrides: { isSubagentExecution: false },
+			})
+			await fs.mkdir(path.join(tmpDir, "search-root"))
+			searchStub.callsFake(async () => await new Promise<string>(() => {}))
+			const coordinator = new ToolExecutorCoordinator()
+			coordinator.registerModularTool(new SearchFilesTool())
+
+			const pending = coordinator.execute(config, makeBlock("search-root", "needle"))
+			while (!searchStub.called) await clock.tickAsync(1)
+			await clock.tickAsync(30_000)
+			const result = await pending
+
+			assert.match(result as string, /<timeout>/)
+			assert.match(result as string, /searching .*search-root/)
+			const cardHandle = await taskMessenger.createCard.firstCall.returnValue
+			assert.equal(cardHandle.getCard().status, CardStatus.ERROR)
+			assert.equal(cardHandle.getCard().outcome, "timeout")
+		} finally {
+			clock.restore()
+		}
+	})
+
+	it("cancels the active search card when the task is stopped", async () => {
+		const { config, taskState, taskMessenger } = createMockTaskConfig({
+			overrides: { isSubagentExecution: false },
+		})
+		await fs.mkdir(path.join(tmpDir, "search-root"))
+		let markSearchStarted: (() => void) | undefined
+		const searchStarted = new Promise<void>((resolve) => {
+			markSearchStarted = resolve
+		})
+		searchStub.callsFake(async (...args: any[]) => {
+			const signal = args.at(-1) as AbortSignal
+			markSearchStarted?.()
+			return await new Promise<string>((_resolve, reject) => {
+				signal.addEventListener("abort", () => reject(signal.reason), { once: true })
+			})
+		})
+		const coordinator = new ToolExecutorCoordinator()
+		coordinator.registerModularTool(new SearchFilesTool())
+		const pending = coordinator.execute(config, makeBlock("search-root", "needle"))
+		await searchStarted
+
+		taskState.abort = true
+		await pending
+
+		const cardHandle = await taskMessenger.createCard.firstCall.returnValue
+		assert.equal(cardHandle.getCard().status, CardStatus.CANCELLED)
+		assert.equal(cardHandle.getCard().outcome, "cancelled")
 	})
 
 	it("correctly handles an array passed to the 'path' parameter (bug fix)", async () => {

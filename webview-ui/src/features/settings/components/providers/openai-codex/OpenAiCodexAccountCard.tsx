@@ -1,14 +1,13 @@
 import { Badge } from "@/shared/ui/badge"
 import { Button } from "@/shared/ui/button"
 import { formatOpenAiCodexPlan } from "./formatOpenAiCodexUsage"
+import { OpenAiCodexSignIn } from "./OpenAiCodexSignIn"
 
 interface OpenAiCodexAccountCardProps {
 	isAuthenticated: boolean
 	email?: string
 	planType?: string
-	isAuthenticating: boolean
 	authError?: string
-	onSignIn: () => void
 	onSignOut: () => void
 }
 
@@ -16,9 +15,7 @@ export function OpenAiCodexAccountCard({
 	isAuthenticated,
 	email,
 	planType,
-	isAuthenticating,
 	authError,
-	onSignIn,
 	onSignOut,
 }: OpenAiCodexAccountCardProps) {
 	const planLabel = formatOpenAiCodexPlan(planType)
@@ -30,17 +27,7 @@ export function OpenAiCodexAccountCard({
 				<p className="mb-3 mt-1 text-xs leading-5 text-(--vscode-descriptionForeground)">
 					Use your ChatGPT subscription to run Codex models. No API key is required.
 				</p>
-				<Button disabled={isAuthenticating} onClick={onSignIn} size="sm" type="button">
-					{isAuthenticating && (
-						<span aria-hidden="true" className="codicon codicon-loading codicon-modifier-spin text-xs" />
-					)}
-					{isAuthenticating ? "Waiting for browser sign-in…" : "Sign in with ChatGPT"}
-				</Button>
-				{isAuthenticating && (
-					<p aria-live="polite" className="mb-0 mt-2 text-xs text-(--vscode-descriptionForeground)">
-						Waiting for browser sign-in…
-					</p>
-				)}
+				<OpenAiCodexSignIn />
 				{authError && (
 					<p className="mb-0 mt-2 text-xs leading-4 text-(--vscode-descriptionForeground)" role="status">
 						{authError}

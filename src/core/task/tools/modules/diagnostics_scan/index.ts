@@ -7,6 +7,8 @@ import { DiracDefaultTool, DiracToolSpec } from "../../../../../shared/tools"
 import { IDiracTool } from "../../interfaces/IDiracTool"
 import { IToolEnvironment } from "../../interfaces/IToolEnvironment"
 import { SurfaceType } from "../../interfaces/SurfaceType"
+import { ToolExecutionDeadline, ToolTimeoutError } from "../../runtime/ToolExecutionDeadline"
+import { presentToolTimeout } from "../../runtime/ToolTimeoutPresentation"
 import { DiagnosticFormatter } from "../../utils/DiagnosticFormatter"
 
 export const diagnostics_scan_spec: DiracToolSpec = {
@@ -49,38 +51,31 @@ export class DiagnosticsScanTool implements IDiracTool<DiagnosticsScanArgs, stri
 			env.orchestration.setTaskState("consecutiveMistakeCount", currentMistakeCount + 1)
 			return "Error: Missing required parameter 'paths' or 'paths' is empty."
 		}
+		const cancellationSignal = env.orchestration.getTaskState("abortSignal")
+		const deadline = new ToolExecutionDeadline(this.spec().name, { cancellationSignal })
 
 		const isSubagent = env.config.isSubagentExecution
 		const card = !isSubagent
 			? await env.ui.createCard({
-				header: `Scanning ${relPaths.length} file(s) for diagnostics`,
-				icon: DiracIcon.DIAGNOSTICS,
-				collapsed: true,
-			})
+					header: `Scanning ${relPaths.length} file(s) for diagnostics`,
+					icon: DiracIcon.DIAGNOSTICS,
+					collapsed: true,
+				})
 			: undefined
 
 		try {
-			const fileInfos = await Promise.all(
-				relPaths.map(async (relPath) => {
-					const { absolutePath, displayPath } = await env.workspace.resolvePath(relPath)
-					try {
-						const content = await env.workspace.readFile(absolutePath)
-						return { absolutePath, displayPath, content, error: undefined }
-					} catch (error) {
-						return {
-							absolutePath,
-							displayPath,
-							content: "",
-							error: getErrorMessage(error),
-						}
-					}
-				}),
+			this.throwIfAborted(cancellationSignal)
+
+			const fileInfos = await deadline.run("reading files for diagnostics", () =>
+				Promise.all(relPaths.map((relPath) => this.readFileInfo(relPath, env.workspace))),
 			)
 
 			const errorResults = fileInfos.filter((f) => f.error).map((f) => `- file: ${f.displayPath}\n  error: ${f.error}`)
 			const validFiles = fileInfos.filter((f) => !f.error)
 
 			if (validFiles.length === 0) {
+				const currentMistakeCount = env.orchestration.getTaskState("consecutiveMistakeCount")
+				env.orchestration.setTaskState("consecutiveMistakeCount", currentMistakeCount + 1)
 				const result = errorResults.join("\n---\n")
 				if (card) {
 					await card.update({ status: CardStatus.ERROR, body: result })
@@ -90,37 +85,27 @@ export class DiagnosticsScanTool implements IDiracTool<DiagnosticsScanArgs, stri
 			}
 
 			// Prepare diagnostics
-			await env.diagnostics.prepare(validFiles.map((f) => f.absolutePath))
+			await deadline.run("preparing diagnostics", () => env.diagnostics.prepare(validFiles.map((f) => f.absolutePath)))
 
 			// Polling logic
 			const totalLines = validFiles.reduce((sum, f) => sum + f.content.split(/\r?\n/).length, 0)
 			const timeoutMs = Math.min(this.baseDiagnosticsTimeoutMs + Math.floor(totalLines / 1000) * 1000, 10000)
 			const startTime = Date.now()
 			let allDiagnostics: FileDiagnostics[] = []
-			let foundDiagnostics = false
 
-			while (Date.now() - startTime < timeoutMs) {
-				allDiagnostics = await env.diagnostics.getRaw(validFiles.map((f) => f.absolutePath))
+			while (Date.now() - startTime < timeoutMs && !cancellationSignal?.aborted) {
+				allDiagnostics = await deadline.run("collecting diagnostics", () =>
+					env.diagnostics.getRaw(validFiles.map((f) => f.absolutePath)),
+				)
 
-				foundDiagnostics = validFiles.some((f) => {
-					const fileDiags = allDiagnostics.find(
-						(d) => arePathsEqual(d.filePath, f.displayPath) || arePathsEqual(d.filePath, f.absolutePath),
-					)
-					return (
-						fileDiags?.diagnostics.some(
-							(d) =>
-								d.severity === DiagnosticSeverity.DIAGNOSTIC_ERROR ||
-								d.severity === DiagnosticSeverity.DIAGNOSTIC_WARNING,
-						) ?? false
-					)
-				})
-
-				if (foundDiagnostics) {
+				if (this.hasDiagnostics(validFiles, allDiagnostics)) {
 					break
 				}
 
-				await new Promise((resolve) => setTimeout(resolve, this.diagnosticsDelayMs))
+				await this.interruptibleSleep(this.diagnosticsDelayMs, cancellationSignal)
 			}
+
+			this.throwIfAborted(cancellationSignal)
 
 			const results = validFiles.map((f) => {
 				return DiagnosticFormatter.formatDetailed(f.displayPath, f.absolutePath, allDiagnostics, f.content)
@@ -138,6 +123,20 @@ export class DiagnosticsScanTool implements IDiracTool<DiagnosticsScanArgs, stri
 
 			return finalResult
 		} catch (error) {
+			if (cancellationSignal?.aborted) {
+				if (card) {
+					await card.update({
+						header: "Cancelled scanning for diagnostics",
+						status: CardStatus.CANCELLED,
+						body: "Diagnostics scan cancelled.",
+					})
+					await card.finalize(CardStatus.CANCELLED)
+				}
+				throw error
+			}
+			if (error instanceof ToolTimeoutError) {
+				return await presentToolTimeout(env, error, card ? [card] : [])
+			}
 			const errorMessage = getErrorMessage(error)
 			if (card) {
 				await card.update({
@@ -148,5 +147,59 @@ export class DiagnosticsScanTool implements IDiracTool<DiagnosticsScanArgs, stri
 			}
 			throw error
 		}
+	}
+
+	private throwIfAborted(signal?: AbortSignal): void {
+		if (signal?.aborted) {
+			throw signal.reason || new Error("Tool execution cancelled")
+		}
+	}
+
+	private async readFileInfo(relPath: string, workspace: IToolEnvironment["workspace"]) {
+		const { absolutePath, displayPath } = await workspace.resolvePath(relPath)
+		try {
+			const content = await workspace.readFile(absolutePath)
+			return { absolutePath, displayPath, content, error: undefined }
+		} catch (error) {
+			return {
+				absolutePath,
+				displayPath,
+				content: "",
+				error: getErrorMessage(error),
+			}
+		}
+	}
+
+	private hasDiagnostics(
+		validFiles: Array<{ displayPath: string; absolutePath: string }>,
+		allDiagnostics: FileDiagnostics[],
+	): boolean {
+		return validFiles.some((f) => {
+			const fileDiags = allDiagnostics.find(
+				(d) => arePathsEqual(d.filePath, f.displayPath) || arePathsEqual(d.filePath, f.absolutePath),
+			)
+			return (
+				fileDiags?.diagnostics.some(
+					(d) =>
+						d.severity === DiagnosticSeverity.DIAGNOSTIC_ERROR ||
+						d.severity === DiagnosticSeverity.DIAGNOSTIC_WARNING,
+				) ?? false
+			)
+		})
+	}
+
+	private async interruptibleSleep(delayMs: number, signal?: AbortSignal): Promise<void> {
+		this.throwIfAborted(signal)
+		await new Promise<void>((resolve, reject) => {
+			const onAbort = () => {
+				clearTimeout(timer)
+				reject(signal?.reason || new Error("Tool execution cancelled"))
+			}
+			const timer = setTimeout(() => {
+				signal?.removeEventListener("abort", onAbort)
+				resolve()
+			}, delayMs)
+			signal?.addEventListener("abort", onAbort, { once: true })
+		})
 	}
 }

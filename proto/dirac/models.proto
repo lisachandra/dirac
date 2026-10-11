@@ -38,7 +38,7 @@ service ModelsService {
   // Updates API configuration with partial values (only updates fields that are explicitly set)
   rpc updateApiConfigurationPartial(UpdateApiConfigurationPartialRequest) returns (Empty);
   // Authenticates with OpenAI Codex (ChatGPT subscription)
-  rpc authenticateOpenAiCodex(EmptyRequest) returns (Empty);
+  rpc authenticateOpenAiCodex(OpenAiCodexAuthRequest) returns (stream OpenAiCodexAuthEvent);
   // Signs out from OpenAI Codex
   rpc signOutOpenAiCodex(EmptyRequest) returns (Empty);
   // Silently refreshes and returns ChatGPT subscription usage.
@@ -53,6 +53,21 @@ service ModelsService {
   rpc refreshVercelAiGatewayModelsRpc(EmptyRequest) returns (OpenRouterCompatibleModelInfo);
   // Lazily fetches upstream endpoints for one selected OpenRouter model.
   rpc getOpenRouterEndpoints(OpenRouterEndpointsRequest) returns (OpenRouterEndpointsResponse);
+}
+
+enum OpenAiCodexAuthMethod {
+  OPEN_AI_CODEX_AUTH_METHOD_BROWSER = 0;
+  OPEN_AI_CODEX_AUTH_METHOD_DEVICE = 1;
+}
+
+message OpenAiCodexAuthRequest {
+  OpenAiCodexAuthMethod method = 1;
+}
+
+message OpenAiCodexAuthEvent {
+  string url = 1;
+  optional string user_code = 2;
+  bool completed = 3;
 }
 
 message OpenAiCodexUsageWindow {
@@ -175,6 +190,10 @@ message OpenRouterModelInfo {
   optional bool supports_strict_tools = 19;
   optional bool supports_reasoning_effort = 20;
   optional string canonical_slug = 21;
+  optional bool supports_fast_mode = 22;
+  optional double fast_mode_price_multiplier = 23;
+  repeated string reasoning_effort_options = 24;
+  optional string default_reasoning_effort = 25;
 }
 
 // Shared response message for model information
@@ -535,6 +554,8 @@ message OpenAiCompatibleModelInfo {
   optional double temperature = 13;
   optional bool is_r1_format_required = 14;
   optional bool supports_strict_tools = 18;
+  optional bool supports_fast_mode = 19;
+  optional double fast_mode_price_multiplier = 20;
   optional ApiFormat api_format = 15;
   optional bool supports_tools = 16;
   optional bool supports_adaptive_thinking = 17;
@@ -690,6 +711,7 @@ message ModelsApiConfiguration {
   optional string gemini_plan_mode_thinking_level = 139;
   reserved 140, 141; // were plan_mode_dirac_model_id and plan_mode_dirac_model_info
   optional string plan_mode_open_ai_profile_name = 142;
+  optional string plan_mode_inference_speed = 143;
 
   // Act mode configurations
   optional ApiProvider act_mode_api_provider = 200;
@@ -729,4 +751,5 @@ message ModelsApiConfiguration {
   optional string gemini_act_mode_thinking_level = 239;
   reserved 240, 241; // were act_mode_dirac_model_id and act_mode_dirac_model_info
   optional string act_mode_open_ai_profile_name = 242;
+  optional string act_mode_inference_speed = 243;
 }

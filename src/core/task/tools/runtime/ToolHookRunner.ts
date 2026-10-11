@@ -4,7 +4,6 @@ import { CardStatus } from "@shared/ExtensionMessage"
 import type { ApiHandler } from "../../../../core/api"
 import type { ToolUse } from "../../../assistant-message"
 import type { MessageStateHandler } from "../../message-state"
-import type { StateManager } from "../../../storage/StateManager"
 import type { TaskMessenger } from "../../TaskMessenger"
 import type { TaskState } from "../../TaskState"
 
@@ -13,17 +12,12 @@ export class ToolHookRunner {
 	constructor(
 		private taskState: TaskState,
 		private messageStateHandler: MessageStateHandler,
-		private api: ApiHandler,
-		private stateManager: StateManager,
 		private taskMessenger: TaskMessenger,
 		private taskId: string,
 		private setActiveHookExecution: (hookExecution: any) => Promise<void>,
 		private clearActiveHookExecution: () => Promise<void>,
-	) {}
+	) { }
 
-	setApi(api: ApiHandler): void {
-		this.api = api
-	}
 
 	// Runs PostToolUse hook; returns true if hook requested cancellation.
 	async runPostToolUseHook(
@@ -32,6 +26,8 @@ export class ToolHookRunner {
 		executionSuccess: boolean,
 		executionStartTime: number,
 		hooksEnabled: boolean,
+		api: ApiHandler,
+		providerId: string,
 	): Promise<boolean> {
 		const { executeHook } = await import("../../../hooks/hook-executor")
 		const executionTimeMs = Date.now() - executionStartTime
@@ -53,7 +49,7 @@ export class ToolHookRunner {
 			messageStateHandler: this.messageStateHandler,
 			taskId: this.taskId,
 			hooksEnabled,
-			model: getHookModelContext(this.api, this.stateManager),
+			model: getHookModelContext(api, { providerId }),
 			toolName: block.name,
 		})
 		if (postToolResult.cancel === true) {
@@ -109,7 +105,7 @@ export class ToolErrorHandler {
 	constructor(
 		private taskState: TaskState,
 		private taskMessenger: TaskMessenger,
-	) {}
+	) { }
 
 	// Creates an error card and pushes a tool error response to the conversation.
 	async handleError(
@@ -119,7 +115,12 @@ export class ToolErrorHandler {
 		pushToolResult: (content: any, block: ToolUse) => Promise<void>,
 	): Promise<void> {
 		const errorString = `Error ${action}: ${error.message}`
-		await this.taskMessenger.createCard({ header: "Tool Error", body: errorString, status: CardStatus.ERROR })
-		pushToolResult(formatResponse.toolError(errorString), block)
+		await this.taskMessenger.createCard({
+			header: "Tool Error",
+			toolName: block.name,
+			body: errorString,
+			status: CardStatus.ERROR,
+		})
+		await pushToolResult(formatResponse.toolError(errorString), block)
 	}
 }

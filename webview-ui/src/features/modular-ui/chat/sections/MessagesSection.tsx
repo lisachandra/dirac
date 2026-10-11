@@ -7,7 +7,7 @@ export const MessagesSection: ChatSection = {
 	render: (context: ChatViewContext) => (
 		<MessagesArea
 			chatState={context.chatState}
-			renderedMessages={context.renderedMessages}
+			renderedMessageIds={context.renderedMessageIds}
 			messageHandlers={context.messageHandlers}
 			scrollBehavior={context.scrollBehavior}
 			task={context.task!}

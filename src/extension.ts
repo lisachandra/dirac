@@ -18,7 +18,7 @@ import { isDev } from "@shared/config/environment"
 import type { ExtensionContext } from "vscode"
 import { HostProvider } from "@/hosts/host-provider"
 import { vscodeHostBridgeClient } from "@/hosts/vscode/hostbridge/client/host-grpc-client"
-import { toError } from "@/shared/errors"
+import { getErrorMessage, toError } from "@/shared/errors"
 import { createStorageContext } from "@/shared/storage/storage-context"
 import { readTextFromClipboard, writeTextToClipboard } from "@/utils/env"
 import { initialize, tearDown } from "./common"
@@ -746,6 +746,7 @@ async function cleanupLegacyVSCodeStorage(context: ExtensionContext): Promise<vo
 
 		Logger.info("[VS Code Storage Migrations] Completed")
 	} catch (error) {
-		Logger.warn("[VS Code Storage Migrations] Failed" + (error instanceof Error ? `: ${error.message}` : ""))
+		const errorMessage = getErrorMessage(error, "")
+		Logger.warn(`[VS Code Storage Migrations] Failed${errorMessage ? `: ${errorMessage}` : ""}`)
 	}
 }

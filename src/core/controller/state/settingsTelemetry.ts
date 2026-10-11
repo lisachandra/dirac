@@ -29,30 +29,22 @@ export function applyTelemetrySettingsWebview(controller: Controller, request: U
 	}
 }
 
-/** Apply CLI telemetry-gated toggle settings: yolo, autoCondense, webTools, worktrees, subagents */
+/** Publish CLI telemetry for settings already persisted and committed to the active Task. */
 export function applyTelemetrySettingsCli(controller: Controller, fields: any): void {
-	if (fields.yoloModeToggled !== undefined) {
-		if (controller.task) telemetryService.captureYoloModeToggle(controller.task.ulid, fields.yoloModeToggled)
-		controller.stateManager.setGlobalState("yoloModeToggled", fields.yoloModeToggled)
+	if (fields.yoloModeToggled !== undefined && controller.task) {
+		telemetryService.captureYoloModeToggle(controller.task.ulid, fields.yoloModeToggled)
 	}
-	if (fields.useAutoCondense !== undefined) {
-		if (controller.task)
-			telemetryService.captureAutoCondenseToggle(
-				controller.task.ulid,
-				fields.useAutoCondense,
-				controller.task.api.getModel().id,
-			)
-		controller.stateManager.setGlobalState("useAutoCondense", fields.useAutoCondense)
+	if (fields.useAutoCondense !== undefined && controller.task) {
+		telemetryService.captureAutoCondenseToggle(
+			controller.task.ulid,
+			fields.useAutoCondense,
+			controller.task.api.getModel().id,
+		)
 	}
-	if (fields.diracWebToolsEnabled !== undefined) {
-		if (controller.task) telemetryService.captureDiracWebToolsToggle(controller.task.ulid, fields.diracWebToolsEnabled)
-		controller.stateManager.setGlobalState("diracWebToolsEnabled", fields.diracWebToolsEnabled)
+	if (fields.diracWebToolsEnabled !== undefined && controller.task) {
+		telemetryService.captureDiracWebToolsToggle(controller.task.ulid, fields.diracWebToolsEnabled)
 	}
-	if (fields.worktreesEnabled !== undefined) controller.stateManager.setGlobalState("worktreesEnabled", fields.worktreesEnabled)
 	if (fields.subagentsEnabled !== undefined) {
-		const wasEnabled = controller.stateManager.getGlobalSettingsKey("subagentsEnabled") ?? false
-		const isEnabled = !!fields.subagentsEnabled
-		controller.stateManager.setGlobalState("subagentsEnabled", isEnabled)
-		if (wasEnabled !== isEnabled) telemetryService.captureSubagentToggle(isEnabled)
+		telemetryService.captureSubagentToggle(!!fields.subagentsEnabled)
 	}
 }

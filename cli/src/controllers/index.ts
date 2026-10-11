@@ -15,6 +15,7 @@ import { StateManager } from "@/core/storage/StateManager"
 import { DiracClient } from "@/shared/dirac"
 import { version as CLI_VERSION } from "../../package.json"
 import { printError, printInfo, printWarning } from "../utils/display"
+import { openUrlInBrowser } from "../utils/browser"
 
 /**
  * CLI implementation of DiffService - handles diff operations for terminal
@@ -127,7 +128,7 @@ export class CliEnvServiceClient implements EnvServiceClientInterface {
 			}),
 		)
 		// Return unsubscribe function
-		return () => {}
+		return () => { }
 	}
 
 	debugLog(request: proto.dirac.StringRequest): Promise<proto.dirac.Empty> {
@@ -144,26 +145,7 @@ export class CliEnvServiceClient implements EnvServiceClientInterface {
 	}
 
 	async openExternal(request: proto.dirac.StringRequest): Promise<proto.dirac.Empty> {
-		const url = request.value || ""
-		if (url) {
-			// In CLI mode, we don't want to throw if the browser fails to open.
-			// We just print a message and let the user open it manually.
-			try {
-				// Dynamically import 'open' to open URL in default browser
-				const { default: open } = await import("open")
-				const cp = await open(url)
-
-				// Handle potential errors from the child process (e.g. spawn ENOENT)
-				// that might not be caught by the promise rejection.
-				cp.on("error", (err) => {
-					printWarning(`Could not open browser automatically: ${err.message}`)
-					printInfo("Please open the URL manually if it didn't open.")
-				})
-			} catch (error) {
-				printWarning(`Could not open browser automatically: ${error instanceof Error ? error.message : String(error)}`)
-				printInfo("Please open the URL manually if it didn't open.")
-			}
-		}
+		if (request.value) await openUrlInBrowser(request.value)
 		return proto.dirac.Empty.create()
 	}
 }

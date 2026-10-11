@@ -10,11 +10,11 @@
   <a href="https://discord.gg/wcYTx9BGea"><strong>Discord</strong></a>
 </p>
 
-It is a well studied phenomenon that any given model's reasoning ability degrades with the context length. If we can keep context tightly curated, we improve both accuracy and cost while making larger changes tractable in a single task.
+## What is Dirac?
 
-Dirac is an open-source coding agent built with this in mind. It reduces API costs by **64.8%** on average while producing better and faster work through hash-anchored parallel edits, AST manipulation, and a suite of advanced optimizations. Oh, and no MCP.
+Dirac is an efficiency-focused open-source coding agent built for complex, real-world codebases. It supports **dozens of providers and hundreds of models**, and combines long-running autonomous work with hash-anchored editing, AST inspection and refactoring, parallel operations, subagents, continuous steering, and configurable permission controls.
 
-Our goal: Optimize for bang-for-the-buck on tooling with bare minimum prompting instead of going blindly minimalistic.
+The CLI provides an interactive terminal UI as well as scriptable plain-text and JSON modes. See the [full Dirac overview](https://github.com/dirac-run/dirac#what-is-dirac) for the feature walkthrough and reproducible harness comparison.
 
 ## Requirements
 
@@ -54,6 +54,26 @@ dirac --plan "Design an implementation"
 
 Interactive mode supports task approvals, follow-up messages, history, settings, model selection, skills, file mentions, image paste, and task resumption. `--auto-approve-all` keeps this interface while automatically approving actions.
 
+### Goals, custom tools, and steering
+
+Start a long-running Goal directly from an interactive terminal:
+
+```bash
+dirac "/goal Upgrade the application to the next major framework version"
+```
+
+Dirac can continue working toward that objective for hours or days, create and coordinate its own tasks, and pause when it needs input. Goals require the interactive Ink CLI; plain-text mode and ACP do not support them.
+
+Build a reusable tool without leaving the conversation:
+
+```bash
+dirac "/new-tool Build a workspace-scoped tool that checks our deployment status"
+```
+
+Dirac generates, compiles, validates, and smoke-tests the tool. Task-scoped tools are immediately available; workspace and global tools appear in the **Tools** settings and default to disabled until you enable them.
+
+While a regular task or Goal is working, type and submit another message to steer it. Dirac queues the message for the next safe model turn instead of cancelling the active work. Use `/settings` to configure low-verbosity responses, the Utility model, approval behavior, subagents, and other task features.
+
 ### Standalone mode
 
 Dirac uses plain output when `--yolo` or `--json` is present, stdin is piped, or either terminal stream is redirected. `--yolo` auto-approves actionable cards and is intended for unattended execution:
@@ -92,7 +112,7 @@ The generic `DIRAC_*` variables select one provider explicitly for both Act and 
 
 ```bash
 DIRAC_PROVIDER=deepseek \
-DIRAC_MODEL=deepseek-chat \
+DIRAC_MODEL=deepseek-flash \
 DIRAC_API_KEY="$DEEPSEEK_API_KEY" \
 dirac --acp
 ```
@@ -136,8 +156,10 @@ Use the executable's absolute path if the editor cannot resolve `dirac` from `PA
 ```bash
 dirac auth                         # Configure a provider and model
 dirac --acp                        # Run as an ACP agent for an editor
+dirac "/askDirac How does edit_file work?" # Ask about this installed Dirac build
 dirac history                      # Browse and resume prior tasks
 dirac config                       # Show active configuration
+dirac tools                        # List effective workspace tools
 dirac update                       # Check for a newer CLI release
 dirac --continue                   # Resume this workspace's latest task
 dirac --taskId <id> "Follow up"    # Resume a specific task
@@ -155,6 +177,9 @@ Frequently used task options include:
 | `--auto-approve-all` | Auto-approve actions while retaining the interactive interface. |
 | `--model <id>` | Override the configured model. |
 | `--provider <id-or-url>` | Override the provider; requires `--model`. |
+| `--enable-tool <ids>` | Enable comma-separated tool IDs over the saved configuration. Repeatable. |
+| `--disable-tool <ids>` | Disable comma-separated tool IDs over the saved configuration. Repeatable. |
+| `--only-tools <ids>` | Use exactly these configurable tool IDs; cannot be combined with either delta option. |
 | `--images <paths...>` | Attach PNG, JPEG, GIF, or WebP images. |
 | `--thinking [tokens]` | Enable extended thinking; the default budget is 1024. |
 | `--reasoning-effort <level>` | Set `none`, `low`, `medium`, `high`, or `xhigh`. |
@@ -162,6 +187,15 @@ Frequently used task options include:
 | `--api-error-max-retries <count>` | Maximum API error retries before prompting (0 = retry forever). |
 | `--verbose` | Expand reasoning and task diagnostics. |
 | `--json` | Emit newline-delimited JSON events. |
+
+Tool selections apply only to ordinary CLI tasks for the current invocation and are never persisted. They cannot be used with ACP, detached listen mode, Kanban, or Goals, and they never alter task-scoped tools. `--enable-tool` and `--disable-tool` may be combined when their resolved tool sets are disjoint. Lists accept canonical tool IDs or unambiguous tool names separated by commas, and each option may be repeated. Unknown, non-configurable, or conflicting tools stop startup with an error.
+
+```bash
+dirac --yolo --enable-tool read_file,edit_file --disable-tool use_subagents "Fix the issue"
+dirac --only-tools read_file,search_files,respond "Analyze the workspace"
+```
+
+Run `dirac tools` to print the current configuration as copy-pasteable comma-separated `--enable-tool` and `--disable-tool` options.
 
 Images can also be mentioned inline. `@/images/screenshot.png` is relative to the selected workspace; ordinary absolute and `./relative` paths are also accepted when the file exists.
 

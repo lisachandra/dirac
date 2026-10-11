@@ -1,12 +1,16 @@
 import * as cheerio from "cheerio"
 import { Browser, Page } from "puppeteer-core"
 import TurndownService from "turndown"
-import { StateManager } from "@/core/storage/StateManager"
+import type { BrowserSettings } from "@shared/BrowserSettings"
 import { ensureChromiumExists } from "./utils"
 
 export class UrlContentFetcher {
 	private browser?: Browser
 	private page?: Page
+
+	constructor(private readonly getBrowserSettings: () => BrowserSettings = () => {
+		throw new Error("UrlContentFetcher requires task-owned browser settings")
+	}) {}
 
 	async launchBrowser(): Promise<void> {
 		if (this.browser) {
@@ -14,7 +18,7 @@ export class UrlContentFetcher {
 		}
 		const stats = await ensureChromiumExists()
 		// Read browser settings from globalState for custom args only
-		const browserSettings = StateManager.get().getGlobalSettingsKey("browserSettings")
+		const browserSettings = this.getBrowserSettings()
 		const customArgsStr = browserSettings.customArgs || ""
 		const customArgs = customArgsStr.trim() ? customArgsStr.split(/\s+/) : []
 		this.browser = await stats.puppeteer.launch({

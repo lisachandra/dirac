@@ -71,6 +71,7 @@ describe("Controller — Auth delegate", () => {
 		globalSettings = { toolToggles: {} }
 		sandbox.stub(StateManager, "get").returns({
 			getGlobalSettingsKey: sandbox.stub().callsFake((k) => globalSettings[k] ?? undefined),
+			getSystemDefaultSettingsKey: sandbox.stub().callsFake((k) => globalSettings[k] ?? globalState[k] ?? undefined),
 			getGlobalStateKey: sandbox.stub().callsFake((k) => globalState[k] ?? undefined),
 			getWorkspaceStateKey: sandbox.stub().returns(undefined),
 			setGlobalState: sandbox.stub().callsFake((k, v) => {
@@ -82,6 +83,8 @@ describe("Controller — Auth delegate", () => {
 			getApiConfiguration: sandbox.stub().returns({}),
 			setApiConfiguration: sandbox.stub(),
 			setSessionOverride: sandbox.stub(),
+			hasSessionOverride: sandbox.stub().returns(false),
+			clearSessionOverride: sandbox.stub(),
 			getModelsCache: sandbox.stub().returns(null),
 			registerCallbacks: sandbox.stub(),
 			getSecretKey: sandbox.stub().returns(undefined),

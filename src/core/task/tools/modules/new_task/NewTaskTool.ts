@@ -126,8 +126,7 @@ export class NewTaskTool implements IDiracTool {
 			const { response, value, text, images, files: newTaskFiles } = await cardHandle.waitForInteraction()
 			this.throwIfCancelled(signal)
 
-			const apiConfig = env.config.services.stateManager.getApiConfiguration()
-			const provider = (env.config.mode === "plan" ? apiConfig.planModeApiProvider : apiConfig.actModeApiProvider) as string
+			const provider = env.config.providerId
 			const hasFeedback = !!text || !!images?.length || !!newTaskFiles?.length
 			const approvedReplacement = response === "approve" && value === DiracDefaultTool.NEW_TASK
 
@@ -182,7 +181,7 @@ export class NewTaskTool implements IDiracTool {
 		telemetryService.captureToolUsage(
 			env.config.ulid,
 			this.spec().id,
-			env.config.api.getModel().id,
+			env.config.model.id,
 			provider,
 			false,
 			false,

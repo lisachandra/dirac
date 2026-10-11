@@ -17,7 +17,7 @@ describe("deleteAllTaskHistory", () => {
 	let storagePath: string
 	let showMessage: sinon.SinonStub
 	let clearTask: sinon.SinonStub
-	let setGlobalState: sinon.SinonStub
+	let replaceTaskHistory: sinon.SinonStub
 	let postStateToWebview: sinon.SinonStub
 	let taskHistory: TaskHistoryEntry[]
 
@@ -25,7 +25,7 @@ describe("deleteAllTaskHistory", () => {
 		storagePath = await fs.mkdtemp(path.join(os.tmpdir(), "dirac-delete-history-"))
 		showMessage = sinon.stub()
 		clearTask = sinon.stub().resolves()
-		setGlobalState = sinon.stub()
+		replaceTaskHistory = sinon.stub()
 		postStateToWebview = sinon.stub().resolves()
 		taskHistory = []
 
@@ -49,7 +49,8 @@ describe("deleteAllTaskHistory", () => {
 					.stub()
 					.withArgs("taskHistory")
 					.callsFake(() => taskHistory),
-				setGlobalState,
+				replaceTaskHistory,
+				flushPendingState: sinon.stub().resolves(),
 			},
 		} as any
 	}
@@ -80,7 +81,7 @@ describe("deleteAllTaskHistory", () => {
 
 		assert.equal(result.tasksDeleted, 0)
 		sinon.assert.notCalled(clearTask)
-		sinon.assert.notCalled(setGlobalState)
+		sinon.assert.notCalled(replaceTaskHistory)
 		sinon.assert.notCalled(postStateToWebview)
 		assert.equal(await exists(path.join(storagePath, "tasks", "active-task")), true)
 	})
@@ -95,7 +96,7 @@ describe("deleteAllTaskHistory", () => {
 
 		assert.equal(result.tasksDeleted, 0)
 		sinon.assert.notCalled(clearTask)
-		sinon.assert.notCalled(setGlobalState)
+		sinon.assert.notCalled(replaceTaskHistory)
 		sinon.assert.notCalled(postStateToWebview)
 		assert.equal(await exists(path.join(storagePath, "tasks", "active-task")), true)
 	})
@@ -116,7 +117,7 @@ describe("deleteAllTaskHistory", () => {
 
 		assert.equal(result.tasksDeleted, 0)
 		sinon.assert.calledOnce(clearTask)
-		sinon.assert.notCalled(setGlobalState)
+		sinon.assert.notCalled(replaceTaskHistory)
 		sinon.assert.calledOnce(postStateToWebview)
 		sinon.assert.calledTwice(showMessage)
 		assert.equal(await exists(path.join(storagePath, "tasks", "favorite")), true)
@@ -142,7 +143,7 @@ describe("deleteAllTaskHistory", () => {
 
 		assert.equal(result.tasksDeleted, 1)
 		sinon.assert.calledOnce(clearTask)
-		sinon.assert.calledOnceWithExactly(setGlobalState, "taskHistory", [taskHistory[0], taskHistory[1]])
+		sinon.assert.calledOnceWithExactly(replaceTaskHistory, [taskHistory[0], taskHistory[1]])
 		sinon.assert.calledOnce(postStateToWebview)
 		assert.equal(await exists(path.join(storagePath, "tasks", "favorite")), true)
 		assert.equal(await exists(path.join(storagePath, "tasks", "late-favorite")), true)
@@ -164,7 +165,7 @@ describe("deleteAllTaskHistory", () => {
 
 		assert.equal(result.tasksDeleted, 2)
 		sinon.assert.calledOnce(clearTask)
-		sinon.assert.calledOnceWithExactly(setGlobalState, "taskHistory", [])
+		sinon.assert.calledOnceWithExactly(replaceTaskHistory, [])
 		sinon.assert.calledOnce(postStateToWebview)
 		assert.equal(await exists(path.join(storagePath, "tasks")), false)
 		assert.equal(await exists(path.join(storagePath, "checkpoints")), false)

@@ -37,7 +37,10 @@ export class Initializer {
 	 * Returns a config object that Controller can use to set its private properties.
 	 */
 	createConfig(
-		controller: Pick<Controller, "task" | "postStateToWebview" | "toggleActModeForYoloMode" | "cancelTask">,
+		controller: Pick<
+			Controller,
+			"task" | "postStateToWebview" | "postPresentationToWebview" | "toggleActModeForYoloMode" | "cancelTask"
+		>,
 		workspaceCwd?: string,
 	): InitializerConfig {
 		Session.reset() // Reset session on controller initialization
@@ -65,6 +68,7 @@ export class Initializer {
 				backgroundCommandRunning: false,
 				cancelInProgress: false,
 				postStateToWebview: () => controller.postStateToWebview(),
+				postPresentationToWebview: () => controller.postPresentationToWebview(),
 				updateTaskHistory: (item: any) => taskHistoryController.updateTaskHistory(item),
 				deleteTaskFromState: (id: string) => taskHistoryController.deleteTaskFromState(id),
 				getTaskWithId: (id: string) => taskHistoryController.getTaskWithId(id),

@@ -6,6 +6,8 @@ import { DiracDefaultTool, DiracToolSpec } from "../../../../../shared/tools"
 import { IDiracTool } from "../../interfaces/IDiracTool"
 import { IToolEnvironment } from "../../interfaces/IToolEnvironment"
 import { SurfaceType } from "../../interfaces/SurfaceType"
+import { ToolExecutionDeadline, ToolTimeoutError } from "../../runtime/ToolExecutionDeadline"
+import { presentToolTimeout } from "../../runtime/ToolTimeoutPresentation"
 
 export interface ListFilesArgs {
 	paths: string[]
@@ -49,6 +51,7 @@ export class ListFilesTool implements IDiracTool<ListFilesArgs, string> {
 	async processCall(args: ListFilesArgs, env: IToolEnvironment): Promise<string> {
 		const paths = Array.isArray(args.paths) ? args.paths : args.paths ? [args.paths] : []
 		const recursive = String(args.recursive ?? "").toLowerCase() === "true"
+		const deadline = new ToolExecutionDeadline(this.spec().name)
 
 		if (paths.length === 0) {
 			env.orchestration.setTaskState(
@@ -63,7 +66,14 @@ export class ListFilesTool implements IDiracTool<ListFilesArgs, string> {
 		const resolvedPaths: { relPath: string; absolutePath: string; displayPath: string }[] = []
 		const seenAbsPaths = new Set<string>()
 		for (const relPath of paths) {
-			const { absolutePath, displayPath } = await env.workspace.resolvePath(relPath)
+			let resolved: Awaited<ReturnType<IToolEnvironment["workspace"]["resolvePath"]>>
+			try {
+				resolved = await deadline.run(`resolving ${relPath}`, async () => await env.workspace.resolvePath(relPath))
+			} catch (error) {
+				if (error instanceof ToolTimeoutError) return await presentToolTimeout(env, error)
+				throw error
+			}
+			const { absolutePath, displayPath } = resolved
 			if (seenAbsPaths.has(absolutePath)) continue
 			seenAbsPaths.add(absolutePath)
 			resolvedPaths.push({ relPath, absolutePath, displayPath })
@@ -96,10 +106,14 @@ export class ListFilesTool implements IDiracTool<ListFilesArgs, string> {
 			}
 
 			try {
-				const [fileInfos, didHitLimit] = await env.workspace.listFiles(
-					absolutePath,
-					recursive,
-					ListFilesTool.MAX_FILES_LIMIT,
+				const [fileInfos, didHitLimit] = await deadline.run(
+					`listing ${displayPath}`,
+					async () =>
+						await env.workspace.listFiles(
+							absolutePath,
+							recursive,
+							ListFilesTool.MAX_FILES_LIMIT,
+						),
 				)
 
 				displayPaths.push(displayPath)
@@ -118,6 +132,9 @@ export class ListFilesTool implements IDiracTool<ListFilesArgs, string> {
 				results.push(`Contents of ${relPath}:\n${formattedList}`)
 				totalFilesFound += fileInfos.length
 			} catch (error) {
+				if (error instanceof ToolTimeoutError) {
+					return await presentToolTimeout(env, error, card ? [...card.values()].map((entry) => entry.card) : [])
+				}
 				hasError = true
 				const errorMessage = getErrorMessage(error)
 				results.push(`Error listing files in ${relPath}: ${errorMessage}`)

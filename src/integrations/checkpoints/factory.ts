@@ -1,13 +1,11 @@
 import type { FileContextTracker } from "@core/context/context-tracking/FileContextTracker"
 import type { MessageStateHandler } from "@core/task/message-state"
 import type { TaskState } from "@core/task/TaskState"
-import { isMultiRootEnabled } from "@core/workspace/multi-root-utils"
 import { WorkspaceRootManager } from "@core/workspace/WorkspaceRootManager"
 // lazy import to break circular dependency: task/index → factory → checkpoints/index → task/message-state
 import { MultiRootCheckpointManager } from "@integrations/checkpoints/MultiRootCheckpointManager"
 import type { ICheckpointManager } from "@integrations/checkpoints/types"
 import type { DiffViewProvider } from "@integrations/editor/DiffViewProvider"
-import { StateManager } from "@/core/storage/StateManager"
 
 /**
  * Simple predicate abstracting our multi-root decision.
@@ -15,15 +13,12 @@ import { StateManager } from "@/core/storage/StateManager"
 export function shouldUseMultiRoot({
 	workspaceManager,
 	enableCheckpoints,
-	stateManager,
-	multiRootEnabledOverride,
+	multiRootEnabled,
 }: {
 	workspaceManager?: WorkspaceRootManager
 	enableCheckpoints: boolean
-	stateManager: StateManager
-	multiRootEnabledOverride?: boolean
+	multiRootEnabled: boolean
 }): boolean {
-	const multiRootEnabled = multiRootEnabledOverride ?? isMultiRootEnabled(stateManager)
 	return Boolean(multiRootEnabled && enableCheckpoints && workspaceManager && workspaceManager.getRoots().length > 1)
 }
 
@@ -49,7 +44,8 @@ type BuildArgs = {
 	initialConversationHistoryDeletedRange?: [number, number]
 	initialCheckpointManagerErrorMessage?: string
 
-	stateManager: StateManager
+	enableCheckpoints: boolean
+	multiRootEnabled: boolean
 }
 
 /**
@@ -72,12 +68,11 @@ export function buildCheckpointManager(args: BuildArgs): ICheckpointManager {
 		resetTransientState,
 		initialConversationHistoryDeletedRange,
 		initialCheckpointManagerErrorMessage,
-		stateManager,
+		enableCheckpoints,
+		multiRootEnabled,
 	} = args
 
-	const enableCheckpoints = stateManager.getGlobalSettingsKey("enableCheckpointsSetting")
-
-	if (shouldUseMultiRoot({ workspaceManager, enableCheckpoints, stateManager })) {
+	if (shouldUseMultiRoot({ workspaceManager, enableCheckpoints, multiRootEnabled })) {
 		// Multi-root manager (init should be kicked off externally, non-blocking)
 		return new MultiRootCheckpointManager(workspaceManager!, taskId, enableCheckpoints, messageStateHandler)
 	}

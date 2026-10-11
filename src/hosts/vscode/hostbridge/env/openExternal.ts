@@ -3,6 +3,7 @@ import * as vscode from "vscode"
 
 export async function openExternal(request: StringRequest): Promise<Empty> {
 	const uri = vscode.Uri.parse(request.value)
-	await vscode.env.openExternal(uri) // ← Routes to local browser in remote setups!
+	const opened = await vscode.env.openExternal(uri)
+	if (!opened) throw new Error("Could not open the URL in the browser")
 	return Empty.create({})
 }

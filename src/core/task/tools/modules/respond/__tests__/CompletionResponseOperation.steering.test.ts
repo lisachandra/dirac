@@ -10,13 +10,14 @@ describe("completion response operation steering arbitration", () => {
 		const createCard = sinon.stub()
 		const saveCheckpoint = sinon.stub()
 		const runHook = sinon.stub()
-		const commitAttemptCompletion = sinon.stub().resolves(false)
+		const commitAttemptCompletion = sinon.stub().resolves({ committed: false, error: "steered" })
 		const state = {
 			consecutiveMistakeCount: 0,
 			doubleCheckCompletionPending: false,
 		}
 		const env = {
 			config: {
+				executionProfile: "standalone",
 				doubleCheckCompletionEnabled: false,
 				isSubagentExecution: false,
 				autoApprovalSettings: { enableNotifications: false },
@@ -35,7 +36,7 @@ describe("completion response operation steering arbitration", () => {
 
 		const result = await new CompletionResponseOperation().execute("Done", env)
 
-		assert.equal(result, "Done")
+		assert.equal(result, "Completion rejected: steered")
 		assert.equal(commitAttemptCompletion.calledOnce, true)
 		assert.equal(createCard.notCalled, true)
 		assert.equal(saveCheckpoint.notCalled, true)
@@ -50,6 +51,7 @@ describe("completion response operation steering arbitration", () => {
 		}
 		const env = {
 			config: {
+				executionProfile: "standalone",
 				doubleCheckCompletionEnabled: false,
 				isSubagentExecution: false,
 				autoApprovalSettings: { enableNotifications: false },
@@ -65,7 +67,7 @@ describe("completion response operation steering arbitration", () => {
 				commitAttemptCompletion: sinon.stub().callsFake(async () => {
 					state.completionCommitted = true
 					state.didAttemptCompletion = true
-					return true
+					return { committed: true }
 				}),
 				runHook: sinon.stub(),
 			},
@@ -86,6 +88,7 @@ describe("completion response operation steering arbitration", () => {
 		const state = { doubleCheckCompletionPending: false }
 		const env = {
 			config: {
+				executionProfile: "standalone",
 				doubleCheckCompletionEnabled: false,
 				isSubagentExecution: false,
 				autoApprovalSettings: { enableNotifications: true },
@@ -100,7 +103,7 @@ describe("completion response operation steering arbitration", () => {
 			orchestration: {
 				getTaskState: (key: keyof typeof state) => state[key],
 				setTaskState: (key: keyof typeof state, value: boolean) => (state[key] = value),
-				commitAttemptCompletion: sinon.stub().resolves(true),
+				commitAttemptCompletion: sinon.stub().resolves({ committed: true }),
 				saveCheckpoint,
 				runHook,
 			},

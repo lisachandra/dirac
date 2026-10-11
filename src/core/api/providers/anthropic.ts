@@ -7,16 +7,17 @@ import { Tool as AnthropicTool } from "@anthropic-ai/sdk/resources/index"
 import type { MessageCreateParamsStreaming as AnthropicMessageCreateParamsStreaming } from "@anthropic-ai/sdk/resources/messages/messages"
 import { Stream as AnthropicStream } from "@anthropic-ai/sdk/streaming"
 import {
-	ANTHROPIC_FAST_MODE_SUFFIX,
 	AnthropicModelId,
 	anthropicDefaultModelId,
 	anthropicModels,
 	isAnthropicAdaptiveThinkingSupported,
 	ModelInfo,
 } from "@shared/api"
+import { type InferenceSpeed, normalizeInferenceSpeed } from "@shared/storage/types"
 import { buildExternalBasicHeaders } from "@/services/EnvUtils"
 import { DiracStorageMessage } from "@/shared/messages/content"
 import { fetch } from "@/shared/net"
+import { getModelInfoForInferenceSpeed } from "@/utils/cost"
 import { ApiHandler, CommonApiHandlerOptions } from "../index"
 import { withRetry } from "../retry"
 import { sanitizeAnthropicMessages } from "../transform/anthropic-format"
@@ -38,9 +39,18 @@ interface AnthropicHandlerOptions extends CommonApiHandlerOptions {
 export class AnthropicHandler implements ApiHandler {
 	private options: AnthropicHandlerOptions
 	private client: Anthropic | undefined
+	private deliveredInferenceSpeed: InferenceSpeed | undefined
 
 	constructor(options: AnthropicHandlerOptions) {
 		this.options = options
+	}
+
+	private shouldUseFastMode(modelInfo: ModelInfo): boolean {
+		const useFastMode = normalizeInferenceSpeed(this.options.inferenceSpeed) === "fast"
+		if (useFastMode && !modelInfo.supportsFastMode) {
+			throw new Error("The selected Anthropic model does not support Fast mode")
+		}
+		return useFastMode
 	}
 
 	private ensureClient(): Anthropic {
@@ -56,9 +66,9 @@ export class AnthropicHandler implements ApiHandler {
 						...buildExternalBasicHeaders(),
 						...this.options.anthropicHeaders,
 					},
-					fetch, // Use configured fetch with proxy support
+					fetch,
 				})
-			} catch (error) {
+			} catch (error: any) {
 				throw new Error(`Error creating Anthropic client: ${error.message}`)
 			}
 		}
@@ -68,12 +78,11 @@ export class AnthropicHandler implements ApiHandler {
 	@withRetry()
 	async *createMessage(systemPrompt: string, messages: DiracStorageMessage[], tools?: AnthropicTool[]): ApiStream {
 		const client = this.ensureClient()
-
+		this.deliveredInferenceSpeed = undefined
 		const model = this.getModel()
 		let stream: AnthropicStream<Anthropic.RawMessageStreamEvent> | AsyncIterable<BetaRawMessageStreamEvent>
 
-		const useFastMode = model.id.endsWith(ANTHROPIC_FAST_MODE_SUFFIX)
-		const modelId = useFastMode ? model.id.slice(0, -ANTHROPIC_FAST_MODE_SUFFIX.length) : model.id
+		const useFastMode = this.shouldUseFastMode(model.info)
 		const createFastModeMessage = (
 			body: AnthropicMessageCreateParamsStreaming,
 		): Promise<AsyncIterable<BetaRawMessageStreamEvent>> => {
@@ -89,27 +98,23 @@ export class AnthropicHandler implements ApiHandler {
 		}
 
 		const budget_tokens = this.options.thinkingBudgetTokens || 0
-
-		// Tools are available only when native tools are enabled.
 		const nativeToolsOn = (tools?.length ?? 0) > 0
 		const reasoningOn = (model.info.supportsReasoning ?? false) && budget_tokens !== 0
-		const useAdaptive = isAnthropicAdaptiveThinkingSupported(modelId, model.info)
+		const useAdaptive = isAnthropicAdaptiveThinkingSupported(model.id, model.info)
 
 		if (model.info.supportsPromptCache) {
 			const anthropicMessages = sanitizeAnthropicMessages(messages, true)
 			const requestBody: AnthropicMessageCreateParamsStreaming = {
-				model: modelId,
+				model: model.id,
 				thinking: reasoningOn
 					? useAdaptive
 						? { type: "adaptive", display: "summarized" }
-						: { type: "enabled", budget_tokens: budget_tokens }
+						: { type: "enabled", budget_tokens }
 					: undefined,
 				...(reasoningOn && useAdaptive
 					? { output_config: { effort: (this.options.reasoningEffort as AnthropicEffort) || "high" } }
 					: {}),
 				max_tokens: model.info.maxTokens || 8192,
-				// "Thinking isn’t compatible with temperature, top_p, or top_k modifications as well as forced tool use."
-				// (https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking#important-considerations-when-using-extended-thinking)
 				temperature: reasoningOn ? undefined : (model.info.temperature ?? undefined),
 				system: [
 					{
@@ -117,28 +122,22 @@ export class AnthropicHandler implements ApiHandler {
 						type: "text",
 						cache_control: { type: "ephemeral" },
 					},
-				], // setting cache breakpoint for system prompt so new tasks can reuse it
+				],
 				messages: anthropicMessages,
-				// tools, // cache breakpoints go from tools > system > messages, and since tools dont change, we can just set the breakpoint at the end of system (this avoids having to set a breakpoint at the end of tools which by itself does not meet min requirements for haiku caching)
 				stream: true,
 				tools: nativeToolsOn ? tools : undefined,
-				// tool_choice options:
-				// - none: disables tool use, even if tools are provided. Claude will not call any tools.
-				// - auto: allows Claude to decide whether to call any provided tools or not. This is the default value when tools are provided.
-				// - any: tells Claude that it must use one of the provided tools, but doesn’t force a particular tool.
-				// NOTE: Forcing tool use when tools are provided will result in error when thinking is also enabled.
 				tool_choice: nativeToolsOn && !reasoningOn ? { type: "any" } : undefined,
 			}
 
 			stream = useFastMode ? await createFastModeMessage(requestBody) : await client.messages.create(requestBody)
 		} else {
 			const requestBody: AnthropicMessageCreateParamsStreaming = {
-				model: modelId,
+				model: model.id,
 				max_tokens: model.info.maxTokens || 8192,
 				thinking: reasoningOn
 					? useAdaptive
 						? { type: "adaptive", display: "summarized" }
-						: { type: "enabled", budget_tokens: budget_tokens }
+						: { type: "enabled", budget_tokens }
 					: undefined,
 				...(reasoningOn && useAdaptive
 					? { output_config: { effort: (this.options.reasoningEffort as AnthropicEffort) || "high" } }
@@ -155,13 +154,11 @@ export class AnthropicHandler implements ApiHandler {
 		}
 
 		const lastStartedToolCall = { id: "", name: "", arguments: "" }
-
 		for await (const chunk of stream) {
 			yield* this.parseAnthropicChunk(chunk, lastStartedToolCall)
 		}
 	}
 
-	// Parses a single Anthropic stream chunk into Dirac ApiStreamChunk(s).
 	private *parseAnthropicChunk(
 		chunk: any,
 		lastStartedToolCall: { id: string; name: string; arguments: string },
@@ -194,12 +191,15 @@ export class AnthropicHandler implements ApiHandler {
 
 	private parseAnthropicMessageStart(chunk: any): any {
 		const usage = chunk.message.usage
+		const inferenceSpeed = usage.speed === "fast" ? "fast" : usage.speed === "standard" ? "standard" : undefined
+		this.deliveredInferenceSpeed = inferenceSpeed
 		return {
 			type: "usage",
 			inputTokens: usage.input_tokens || 0,
 			outputTokens: usage.output_tokens || 0,
 			cacheWriteTokens: usage.cache_creation_input_tokens || undefined,
 			cacheReadTokens: usage.cache_read_input_tokens || undefined,
+			...(inferenceSpeed ? { inferenceSpeed } : {}),
 		}
 	}
 
@@ -273,14 +273,18 @@ export class AnthropicHandler implements ApiHandler {
 	}
 
 	getModel(): { id: AnthropicModelId; info: ModelInfo } {
+		const inferenceSpeed = this.deliveredInferenceSpeed ?? normalizeInferenceSpeed(this.options.inferenceSpeed)
 		const modelId = this.options.apiModelId
 		if (modelId && modelId in anthropicModels) {
 			const id = modelId as AnthropicModelId
-			return { id, info: anthropicModels[id] }
+			return {
+				id,
+				info: getModelInfoForInferenceSpeed(anthropicModels[id], inferenceSpeed),
+			}
 		}
 		return {
 			id: anthropicDefaultModelId,
-			info: anthropicModels[anthropicDefaultModelId],
+			info: getModelInfoForInferenceSpeed(anthropicModels[anthropicDefaultModelId], inferenceSpeed),
 		}
 	}
 }

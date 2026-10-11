@@ -1,5 +1,4 @@
 import { ChevronDownIcon, ChevronRightIcon, ArrowUpIcon, ArrowDownIcon, ArrowLeftIcon, ArrowRightIcon } from "lucide-react"
-import { DiracMessageType } from "@shared/ExtensionMessage"
 
 import React, { memo, useCallback, useMemo, useState } from "react"
 import { useChatStore } from "@/features/chat/store/chatStore"
@@ -104,28 +103,14 @@ export const ContextWindowSummary: React.FC<TaskContextWindowButtonsProps> = ({
 	autoCompactThreshold = 0,
 }) => {
 	const { apiConfiguration, mode } = useSettingsStore()
-	const { diracMessages } = useChatStore()
-
-	const lastApiReqStartedMessage = useMemo(() => {
-		return [...diracMessages].reverse().find((m) => {
-			if (m.content.type !== DiracMessageType.API_STATUS) {
-				return false
-			}
-
-			const info = (m.content as any).status
-
-			return info.tokensIn != null
-		})
-	}, [diracMessages])
+	const lastApiReqInfo = useChatStore((state) => state.lastApiReqInfo)
 
 	const [tokensIn, tokensOut, cacheWrites, cacheReads] = useMemo(() => {
-		if (lastApiReqStartedMessage) {
-			const info = (lastApiReqStartedMessage.content as any).status
-
-			return [info.tokensIn, info.tokensOut, info.cacheWrites, info.cacheReads]
+		if (lastApiReqInfo) {
+			return [lastApiReqInfo.tokensIn, lastApiReqInfo.tokensOut, lastApiReqInfo.cacheWrites, lastApiReqInfo.cacheReads]
 		}
 		return [0, 0, 0, 0]
-	}, [lastApiReqStartedMessage])
+	}, [lastApiReqInfo])
 	// Accordion state
 	const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set())
 

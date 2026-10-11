@@ -1,34 +1,36 @@
 export type StatePublisher<TState> = (state: TState, sequenceNumber: number) => Promise<void>
 
-interface PublicationWaiter {
-	targetGeneration: number
+interface PublicationCompletion {
+	promise: Promise<void>
 	resolve: () => void
 	reject: (error: unknown) => void
 }
 
-/** Serializes whole-state assembly and publication while coalescing redundant requests. */
-export class StatePublicationQueue<TState> {
+export class StatePublicationQueue<TState, TRequest = undefined> {
 	private requestedGeneration = 0
 	private publishedGeneration = 0
 	private isDraining = false
-	private readonly waiters: PublicationWaiter[] = []
+	private pendingCompletion?: PublicationCompletion
+	private activeCompletion?: PublicationCompletion
+	private pendingRequest?: TRequest
 	private sequenceNumber = 0
 
 	constructor(
-		private readonly readState: () => Promise<TState>,
+		private readonly readState: (request: TRequest) => Promise<TState>,
 		private readonly publishState: StatePublisher<TState>,
+		private readonly mergeRequests: (pending: TRequest, requested: TRequest) => TRequest = (_pending, requested) => requested,
 	) {}
 
-	requestPublication(): Promise<void> {
-		const targetGeneration = ++this.requestedGeneration
-		const completion = new Promise<void>((resolve, reject) => {
-			this.waiters.push({ targetGeneration, resolve, reject })
-		})
+	requestPublication(...args: TRequest extends undefined ? [] : [request: TRequest]): Promise<void> {
+		const request = args[0] as TRequest
+		this.requestedGeneration++
+		this.pendingRequest = this.pendingRequest === undefined ? request : this.mergeRequests(this.pendingRequest, request)
+		this.pendingCompletion ??= createPublicationCompletion()
 		if (!this.isDraining) {
 			this.isDraining = true
 			void this.drainPublications()
 		}
-		return completion
+		return this.pendingCompletion.promise
 	}
 
 	private async drainPublications(): Promise<void> {
@@ -36,30 +38,37 @@ export class StatePublicationQueue<TState> {
 		try {
 			while (this.publishedGeneration < this.requestedGeneration) {
 				const targetGeneration = this.requestedGeneration
-				const state = await this.readState()
-				const sequenceNumber = ++this.sequenceNumber
-				await this.publishState(state, sequenceNumber)
+				const request = this.pendingRequest as TRequest
+				const state = await this.readState(request)
+				// State assembly is asynchronous. Merge a superseding request into a new
+				// snapshot rather than publishing control or presentation state out of order.
+				if (targetGeneration !== this.requestedGeneration) continue
+				this.activeCompletion = this.pendingCompletion
+				this.pendingCompletion = undefined
+				this.pendingRequest = undefined
+				await this.publishState(state, ++this.sequenceNumber)
 				this.publishedGeneration = targetGeneration
-				this.resolvePublishedWaiters()
+				this.activeCompletion?.resolve()
+				this.activeCompletion = undefined
 			}
 		} catch (error) {
-			this.rejectPendingWaiters(error)
+			this.activeCompletion?.reject(error)
+			this.pendingCompletion?.reject(error)
+			this.activeCompletion = undefined
+			this.pendingCompletion = undefined
+			this.pendingRequest = undefined
 		} finally {
 			this.isDraining = false
 		}
 	}
+}
 
-	private resolvePublishedWaiters(): void {
-		const pending: PublicationWaiter[] = []
-		for (const waiter of this.waiters) {
-			if (waiter.targetGeneration <= this.publishedGeneration) waiter.resolve()
-			else pending.push(waiter)
-		}
-		this.waiters.splice(0, this.waiters.length, ...pending)
-	}
-
-	private rejectPendingWaiters(error: unknown): void {
-		const waiters = this.waiters.splice(0)
-		for (const waiter of waiters) waiter.reject(error)
-	}
+function createPublicationCompletion(): PublicationCompletion {
+	let resolve!: () => void
+	let reject!: (error: unknown) => void
+	const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+		resolve = resolvePromise
+		reject = rejectPromise
+	})
+	return { promise, resolve, reject }
 }

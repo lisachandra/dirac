@@ -9,7 +9,7 @@ import {
 } from "@google/genai"
 import { GeminiModelId, geminiDefaultModelId, geminiModels, ModelInfo } from "@shared/api"
 import { isRateLimited } from "@shared/net"
-import { GEMINI_MAX_OUTPUT_TOKENS } from "@utils/model-utils"
+import { GEMINI_DEFAULT_MAX_OUTPUT_TOKENS } from "@utils/model-utils"
 import { buildExternalBasicHeaders } from "@/services/EnvUtils"
 import { telemetryService } from "@/services/telemetry"
 import { DiracStorageMessage } from "@/shared/messages/content"
@@ -17,6 +17,7 @@ import { Logger } from "@/shared/services/Logger"
 import { ApiHandler, CommonApiHandlerOptions } from "../"
 import { RetriableError, withRetry } from "../retry"
 import { convertAnthropicMessagesToGemini } from "../transform/gemini-format"
+import { resolveGeminiImageSources } from "./gemini-image-resolver"
 import { ApiStream } from "../transform/stream"
 
 const rateLimitPatterns = [/got status: 429/i, /429 Too Many Requests/i, /rate limit exceeded/i, /too many requests/i]
@@ -53,10 +54,10 @@ function mapReasoningEffortToGeminiThinkingLevel(effort: string): ThinkingLevel 
 
 function getGeminiMaxOutputTokens(modelId: string, modelMaxTokens?: number): number | undefined {
 	if (modelMaxTokens && modelMaxTokens > 0) {
-		return Math.min(modelMaxTokens, GEMINI_MAX_OUTPUT_TOKENS)
+		return modelMaxTokens
 	}
 
-	return GEMINI_MAX_OUTPUT_TOKENS
+	return GEMINI_DEFAULT_MAX_OUTPUT_TOKENS
 }
 
 /**
@@ -152,7 +153,8 @@ export class GeminiHandler implements ApiHandler {
 		this.abortController = abortController
 
 		try {
-			yield* this.createMessageWithSignal(systemPrompt, messages, tools, abortController.signal)
+			const resolvedMessages = await resolveGeminiImageSources(messages, abortController.signal)
+			yield* this.createMessageWithSignal(systemPrompt, resolvedMessages, tools, abortController.signal)
 		} finally {
 			if (this.abortController === abortController) this.abortController = undefined
 		}
@@ -171,7 +173,7 @@ export class GeminiHandler implements ApiHandler {
 	): ApiStream {
 		const client = this.ensureClient()
 		const { id: modelId, info } = this.getModel()
-		const contents = convertAnthropicMessagesToGemini(messages)
+		const contents = convertAnthropicMessagesToGemini(messages, modelId)
 		// Gemini may emit multiple function calls under the same responseId and without functionCall.id.
 		// Track a local sequence so each emitted tool call has a stable unique ID.
 		const responseToolCallCount = new Map<string, number>()
@@ -186,7 +188,7 @@ export class GeminiHandler implements ApiHandler {
 		let thinkingLevel: ThinkingLevel | undefined
 		const rawReasoningEffort = (this.options.reasoningEffort || "").toLowerCase()
 		const normalizedReasoningEffort = !rawReasoningEffort
-			? "high"
+			? (info.thinkingConfig?.geminiThinkingLevel ?? "high")
 			: rawReasoningEffort === "none"
 				? "low"
 				: rawReasoningEffort

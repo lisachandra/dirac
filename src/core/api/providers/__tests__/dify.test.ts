@@ -527,6 +527,75 @@ describe("DifyHandler", () => {
 			body.query.should.equal("line1\nline2")
 		})
 
+
+		it("sends URL images through Dify files instead of dropping them", async () => {
+			const handler = makeHandler()
+			handler.setConversationId("conv")
+			const fetchStub = sinon.stub(netModule, "fetch").resolves(makeResponse(makeStream([sse({ event: "message_end" })])))
+			await collect(
+				handler.createMessage("sys", [
+					{
+						role: "user",
+						content: [
+							{ type: "text", text: "inspect this" },
+							{ type: "image", source: { type: "url", url: "https://example.com/image.png" } as any },
+						],
+					},
+				]),
+			)
+			const body = JSON.parse((fetchStub.firstCall.args[1] as any).body)
+			body.query.should.equal("inspect this")
+			body.files.should.deepEqual([
+				{ type: "image", transfer_method: "remote_url", url: "https://example.com/image.png" },
+			])
+		})
+
+		it("uploads base64 images nested in tool results and keeps base64 out of the chat request", async () => {
+			const handler = makeHandler()
+			handler.setConversationId("conv")
+			const uploadResponse = makeResponse(null)
+			uploadResponse.json.resolves({ id: "uploaded-image-1" })
+			const fetchStub = sinon.stub(netModule, "fetch")
+			fetchStub.onFirstCall().resolves(uploadResponse)
+			fetchStub.onSecondCall().resolves(makeResponse(makeStream([sse({ event: "message_end" })])))
+
+			await collect(
+				handler.createMessage("sys", [
+					{
+						role: "user",
+						content: [
+							{
+								type: "tool_result",
+								tool_use_id: "tool-1",
+								content: [
+									{ type: "text", text: "image contents" },
+									{
+										type: "image",
+										source: { type: "base64", media_type: "image/png", data: "aW1hZ2UtYnl0ZXM=" },
+									},
+								],
+							},
+						],
+					},
+				]),
+			)
+
+			fetchStub.firstCall.args[0].should.equal("https://dify.test/files/upload")
+			const uploadBody = (fetchStub.firstCall.args[1] as any).body as FormData
+			const uploadedFile = uploadBody.get("file") as File
+			uploadedFile.name.should.equal("image-1.png")
+			Buffer.from(await uploadedFile.arrayBuffer()).toString().should.equal("image-bytes")
+
+			const body = JSON.parse((fetchStub.secondCall.args[1] as any).body)
+			body.query.should.equal(
+				"[Tool Result: tool-1]\nimage contents\n[1 image(s) attached from tool result: tool-1]\n[/Tool Result]",
+			)
+			body.files.should.deepEqual([
+				{ type: "image", transfer_method: "local_file", upload_file_id: "uploaded-image-1" },
+			])
+			expect(JSON.stringify(body)).not.to.include("aW1hZ2UtYnl0ZXM=")
+		})
+
 		it("sends streaming response_mode and dirac-user in request body", async () => {
 			const handler = makeHandler()
 			const fetchStub = sinon.stub(netModule, "fetch").resolves(makeResponse(makeStream([sse({ event: "message_end" })])))

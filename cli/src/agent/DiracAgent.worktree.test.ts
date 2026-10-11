@@ -47,7 +47,7 @@ const mocks = vi.hoisted(() => {
 			EXTENSION_DIR: "/tmp/dirac-test",
 			DATA_DIR: "/tmp/dirac-test-data",
 		})),
-		initCoreServices: vi.fn(async () => {}),
+		initCoreServices: vi.fn(async () => { }),
 		setRuntimeHooksDir: vi.fn(),
 		hostProviderInitialize: vi.fn(),
 	}
@@ -60,10 +60,8 @@ vi.mock("@/core/storage/disk", () => ({ setRuntimeHooksDir: mocks.setRuntimeHook
 vi.mock("@/hosts/host-provider.js", () => ({ HostProvider: { initialize: mocks.hostProviderInitialize } }))
 vi.mock("@/core/storage/StateManager", () => ({
 	StateManager: {
-		initialize: vi.fn(async () => {}),
+		initialize: vi.fn(async () => { }),
 		get: vi.fn(() => ({
-			getSessionOverrideCache: vi.fn(() => ({})),
-			setSessionOverrideCache: vi.fn(),
 			getGlobalSettingsKey: vi.fn(() => "act"),
 			getSystemDefaultSettingsKey: vi.fn((key: string) => {
 				if (key === "mode") return "act"
@@ -76,10 +74,19 @@ vi.mock("@/core/storage/StateManager", () => ({
 				actModeThinkingBudgetTokens: 1024,
 				planModeThinkingBudgetTokens: 1024,
 			})),
+			captureEffectiveTaskConfiguration: vi.fn((overrides: Record<string, unknown>) => ({
+				apiConfiguration: {
+					actModeApiProvider: "anthropic",
+					planModeApiProvider: "anthropic",
+					actModeThinkingBudgetTokens: 1024,
+					planModeThinkingBudgetTokens: 1024,
+					...overrides,
+				},
+			})),
 			getGlobalStateKey: vi.fn((key: string) => (key === "taskHistory" ? mocks.taskHistory : undefined)),
 			setGlobalState: vi.fn(),
-			flushPendingState: vi.fn(async () => {}),
-			subscribe: vi.fn(() => () => {}),
+			flushPendingState: vi.fn(async () => { }),
+			subscribe: vi.fn(() => () => { }),
 		})),
 	},
 }))

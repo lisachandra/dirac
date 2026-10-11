@@ -366,6 +366,8 @@ export interface CommandExecutionMetadata {
 	exitCode?: number | null
 	signal?: NodeJS.Signals | null
 	logFilePath?: string
+	/** Resolves when a command handed off to the background actually exits. */
+	backgroundCompletion?: Promise<void>
 }
 
 export type CommandExecutionResult = [
@@ -432,7 +434,7 @@ export interface OrchestrationOptions {
 		existingOutput: string[],
 		existingLogFilePath?: string,
 		existingOutputReady?: Promise<void>,
-	) => { logFilePath: string; outputReady?: Promise<void> } | undefined
+	) => { logFilePath: string; outputReady?: Promise<void>; completion?: Promise<void> } | undefined
 	/**
 	 * The type of terminal being used for telemetry tracking.
 	 * Defaults to "vscode" for backward compatibility.
@@ -463,4 +465,6 @@ export interface OrchestrationResult {
 	exitCode?: number | null
 	/** Process termination signal when available */
 	signal?: NodeJS.Signals | null
+	/** Resolves when a command handed off to the background actually exits. */
+	backgroundCompletion?: Promise<void>
 }

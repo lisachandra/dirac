@@ -8,7 +8,6 @@ import {
 	buildDeviceAuthUnavailableError,
 	deviceAuthorizationResponseSchema,
 	deviceTokenResponseSchema,
-	exchangeCodeForTokens,
 	exchangeCodeForTokensWithRedirectUri,
 	generateCodeChallenge,
 	generateCodeVerifier,
@@ -28,6 +27,7 @@ export class OAuthFlowHandler {
 	private pendingAuth: {
 		codeVerifier: string
 		state: string
+		abortController: AbortController
 		server?: http.Server
 	} | null = null
 
@@ -36,7 +36,7 @@ export class OAuthFlowHandler {
 	/**
 	 * Initiate OAuth device-code authentication for remote/headless CLI environments.
 	 */
-	async initiateDeviceFlow(): Promise<OpenAiCodexDeviceAuthorization> {
+	async initiateDeviceFlow(signal?: AbortSignal): Promise<OpenAiCodexDeviceAuthorization> {
 		const body = JSON.stringify({
 			client_id: OPENAI_CODEX_OAUTH_CONFIG.clientId,
 		})
@@ -47,7 +47,7 @@ export class OAuthFlowHandler {
 				...jsonHeaders(),
 			},
 			body,
-			signal: AbortSignal.timeout(30000),
+			signal: AbortSignal.any([AbortSignal.timeout(30000), ...(signal ? [signal] : [])]),
 		})
 
 		if (!response.ok) {
@@ -55,7 +55,7 @@ export class OAuthFlowHandler {
 			const { errorCode, errorMessage } = parseOAuthErrorDetails(errorText)
 			if (
 				response.status === 404 ||
-				/unsupported|disabled|not[_ -]?enabled|device/i.test(`${errorCode ?? ""} ${errorMessage ?? ""}`)
+				/unsupported|disabled|not[_ -]?enabled/i.test(`${errorCode ?? ""} ${errorMessage ?? ""}`)
 			) {
 				throw buildDeviceAuthUnavailableError()
 			}
@@ -85,21 +85,24 @@ export class OAuthFlowHandler {
 		signal?: AbortSignal,
 		expiresInMs: number = 15 * 60 * 1000,
 	): Promise<OpenAiCodexCredentials> {
-		let currentInterval = interval
+		let currentInterval = Math.max(interval, 0.1)
 		const expiresAt = Date.now() + expiresInMs
 
 		while (true) {
 			if (signal?.aborted) {
 				throw new Error("Device authentication was cancelled.")
 			}
+			if (Date.now() >= expiresAt) throw new Error("The device code has expired. Please try again.")
 
 			const body = JSON.stringify({
 				device_auth_id: deviceCode,
 				user_code: userCode,
 			})
 
-			// Use a per-request timeout signal if no overall signal is provided
-			const fetchSignal = signal ?? AbortSignal.timeout(30000)
+			const fetchSignal = AbortSignal.any([
+				AbortSignal.timeout(Math.max(1, Math.min(30000, expiresAt - Date.now()))),
+				...(signal ? [signal] : []),
+			])
 			const response = await fetch(OPENAI_CODEX_OAUTH_CONFIG.deviceTokenEndpoint, {
 				method: "POST",
 				headers: {
@@ -127,23 +130,16 @@ export class OAuthFlowHandler {
 					deviceTokenResponse.authorization_code,
 					deviceTokenResponse.code_verifier,
 					OPENAI_CODEX_OAUTH_CONFIG.deviceRedirectUri,
+					fetchSignal,
 				)
+				fetchSignal.throwIfAborted()
 				await this.tokenManager.saveCredentials(credentials)
 				return credentials
 			}
 
-			if (isAuthError(response.status) || response.status === 404 || error === "authorization_pending") {
-				if (Date.now() >= expiresAt) {
-					throw new Error("The device code has expired. Please try again.")
-				}
-				// Safety: ensure we don't loop too fast if interval is 0
-				await waitForDevicePollInterval(Math.max(currentInterval, 0.1), signal)
-				continue
-			}
-
 			if (error === "slow_down") {
 				currentInterval += 5
-				await waitForDevicePollInterval(Math.max(currentInterval, 0.1), signal)
+				await waitForDevicePollInterval(Math.min(currentInterval, (expiresAt - Date.now()) / 1000), signal)
 				continue
 			}
 
@@ -155,8 +151,18 @@ export class OAuthFlowHandler {
 				throw new Error("Access denied by user.")
 			}
 
-			if (/unsupported|disabled|not[_ -]?enabled|device/i.test(`${error ?? ""} ${errorDescription ?? ""}`)) {
+			if (error === "authorization_pending") {
+				await waitForDevicePollInterval(Math.min(currentInterval, (expiresAt - Date.now()) / 1000), signal)
+				continue
+			}
+
+			if (/unsupported|disabled|not[_ -]?enabled/i.test(`${error ?? ""} ${errorDescription ?? ""}`)) {
 				throw buildDeviceAuthUnavailableError()
+			}
+
+			if (!error && (isAuthError(response.status) || response.status === 404)) {
+				await waitForDevicePollInterval(Math.min(currentInterval, (expiresAt - Date.now()) / 1000), signal)
+				continue
 			}
 
 			throw new Error(`OAuth error: ${errorDescription || error || responseText}`)
@@ -178,78 +184,61 @@ export class OAuthFlowHandler {
 		this.pendingAuth = {
 			codeVerifier,
 			state,
+			abortController: new AbortController(),
 		}
 
 		return buildAuthorizationUrl(codeChallenge, state)
 	}
 
-	/**
-	 * Start a local server to receive the OAuth callback
-	 * Returns a promise that resolves when authentication is complete
-	 */
+	/** Listen for the browser callback; cancellation settles the pending promise. */
 	async waitForCallback(): Promise<OpenAiCodexCredentials> {
-		if (!this.pendingAuth) {
-			throw new Error("No pending authorization flow")
-		}
-
-		// Close any existing server before starting a new one
-		if (this.pendingAuth.server) {
-			try {
-				this.pendingAuth.server.close()
-			} catch {
-				// Ignore errors when closing
-			}
-			this.pendingAuth.server = undefined
-		}
+		const pending = this.pendingAuth
+		if (!pending) throw new Error("No pending authorization flow")
+		if (pending.server) throw new Error("Already waiting for browser sign-in")
+		const signal = pending.abortController.signal
 
 		return new Promise((resolve, reject) => {
+			let settled = false
+			let exchanging = false
+			const finish = (error?: Error, credentials?: OpenAiCodexCredentials) => {
+				if (settled) return
+				settled = true
+				clearTimeout(timeout)
+				signal.removeEventListener("abort", onAbort)
+				pending.abortController.abort()
+				server.close()
+				if (this.pendingAuth === pending) this.pendingAuth = null
+				if (error) reject(error)
+				else resolve(credentials!)
+			}
+			const onAbort = () => finish(new Error("Browser authentication was cancelled."))
 			const server = http.createServer(async (req, res) => {
 				try {
-					const url = new URL(req.url || "", `http://localhost:${OPENAI_CODEX_OAUTH_CONFIG.callbackPort}`)
-
+					const url = new URL(req.url || "", OPENAI_CODEX_OAUTH_CONFIG.redirectUri)
 					if (url.pathname !== "/auth/callback") {
-						res.writeHead(404)
-						res.end("Not Found")
+						res.writeHead(404).end("Not Found")
 						return
 					}
-
+					if (settled || exchanging) {
+						res.writeHead(409).end("Sign-in is already being completed.")
+						return
+					}
+					exchanging = true
 					const code = url.searchParams.get("code")
-					const state = url.searchParams.get("state")
+					if (url.searchParams.get("state") !== pending.state) throw new Error("State mismatch")
 					const error = url.searchParams.get("error")
-
-					if (error) {
-						res.writeHead(400)
-						res.end(`Authentication failed: ${error}`)
-						reject(new Error(`OAuth error: ${error}`))
-						server.close()
-						return
-					}
-
-					if (!code || !state) {
-						res.writeHead(400)
-						res.end("Missing code or state parameter")
-						reject(new Error("Missing code or state parameter"))
-						server.close()
-						return
-					}
-
-					if (state !== this.pendingAuth?.state) {
-						res.writeHead(400)
-						res.end("State mismatch - possible CSRF attack")
-						reject(new Error("State mismatch"))
-						server.close()
-						return
-					}
-
-					try {
-						// Note: state is validated above but not passed to exchangeCodeForTokens
-						// per the implementation guide (OpenAI rejects it)
-						const credentials = await exchangeCodeForTokens(code, this.pendingAuth.codeVerifier)
-
-						await this.tokenManager.saveCredentials(credentials)
-
-						res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" })
-						res.end(`<!DOCTYPE html>
+					if (error) throw new Error(`OAuth error: ${error}`)
+					if (!code) throw new Error("Missing authorization code")
+					const credentials = await exchangeCodeForTokensWithRedirectUri(
+						code,
+						pending.codeVerifier,
+						OPENAI_CODEX_OAUTH_CONFIG.redirectUri,
+						signal,
+					)
+					signal.throwIfAborted()
+					await this.tokenManager.saveCredentials(credentials)
+					res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" })
+					res.end(`<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -291,65 +280,36 @@ export class OAuthFlowHandler {
 <script>setTimeout(() => window.close(), 3000);</script>
 </body>
 </html>`)
-
-						this.pendingAuth = null
-						server.close()
-						resolve(credentials)
-					} catch (exchangeError) {
-						res.writeHead(500)
-						res.end(`Token exchange failed: ${exchangeError}`)
-						reject(exchangeError)
-						server.close()
-					}
-				} catch (err) {
-					res.writeHead(500)
-					res.end("Internal server error")
-					reject(err)
-					server.close()
+					finish(undefined, credentials)
+				} catch (error) {
+					res.writeHead(400).end("Authentication failed. Return to Dirac to retry.")
+					finish(error instanceof Error ? error : new Error(String(error)))
 				}
 			})
-
-			// Set a timeout for the callback
 			const timeout = setTimeout(
 				() => {
-					server.close()
-					reject(new Error("Authentication timed out"))
+					finish(new Error("Authentication timed out"))
 				},
 				5 * 60 * 1000,
-			) // 5 minutes
-
-			// Clear timeout when server closes or errors
-			server.on("close", () => clearTimeout(timeout))
-			server.on("error", (err: NodeJS.ErrnoException) => {
-				clearTimeout(timeout)
-				this.pendingAuth = null
-				if (err.code === "EADDRINUSE") {
-					reject(
-						new Error(
-							`Port ${OPENAI_CODEX_OAUTH_CONFIG.callbackPort} is already in use. ` +
-								`Please close any other applications using this port and try again.`,
-						),
-					)
-				} else {
-					reject(err)
-				}
+			)
+			server.on("error", (error: NodeJS.ErrnoException) => {
+				finish(
+					error.code === "EADDRINUSE"
+						? new Error(
+								`Port ${OPENAI_CODEX_OAUTH_CONFIG.callbackPort} is already in use. Close the other sign-in attempt or use device code.`,
+							)
+						: error,
+				)
 			})
-
-			// Store server reference before listen to avoid race with cancelAuthorizationFlow
-			if (this.pendingAuth) {
-				this.pendingAuth.server = server
-			}
-			server.listen(OPENAI_CODEX_OAUTH_CONFIG.callbackPort)
+			pending.server = server
+			signal.addEventListener("abort", onAbort, { once: true })
+			server.listen(OPENAI_CODEX_OAUTH_CONFIG.callbackPort, "127.0.0.1")
 		})
 	}
 
-	/**
-	 * Cancel any pending authorization flow
-	 */
+	/** Cancel only the currently pending browser authorization. */
 	cancelAuthorizationFlow(): void {
-		if (this.pendingAuth?.server) {
-			this.pendingAuth.server.close()
-		}
+		this.pendingAuth?.abortController.abort()
 		this.pendingAuth = null
 	}
 }

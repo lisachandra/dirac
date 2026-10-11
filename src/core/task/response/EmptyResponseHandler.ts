@@ -104,7 +104,7 @@ export class EmptyResponseHandler {
 				failed: true,
 				errorMessage: NO_RESPONSE_ERROR_MESSAGE,
 			}),
-			status: CardStatus.ERROR,
+			status: CardStatus.WAITING_FOR_INPUT,
 			requireApproval: true,
 			actions: [
 				{ label: "Retry", value: DiracAskResponse.APPROVE, primary: true },

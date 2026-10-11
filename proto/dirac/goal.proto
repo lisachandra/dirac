@@ -1,0 +1,36 @@
+syntax = "proto3";
+
+package dirac;
+
+import "dirac/common.proto";
+
+option go_package = "github.com/dirac/grpc-go/dirac";
+option java_multiple_files = true;
+option java_package = "bot.dirac.proto";
+
+service GoalService {
+  rpc selectGoal(GoalControlRequest) returns (Empty);
+  rpc resumeGoal(GoalControlRequest) returns (Empty);
+  rpc pauseGoal(GoalControlRequest) returns (Empty);
+  rpc stopGoal(GoalControlRequest) returns (Empty);
+  rpc steerGoal(GoalSteerRequest) returns (Empty);
+  rpc sendGoalMessage(GoalMessageRequest) returns (Empty);
+}
+
+message GoalControlRequest {
+  Metadata metadata = 1;
+  string goal_id = 2;
+  optional string reason = 3;
+}
+
+message GoalSteerRequest {
+  Metadata metadata = 1;
+  string goal_id = 2;
+  string message = 3;
+}
+
+message GoalMessageRequest {
+  Metadata metadata = 1;
+  string goal_id = 2;
+  string message = 3;
+}

@@ -5,6 +5,7 @@
  * Phase 0 — Prerequisite coverage for refactoring
  */
 import { afterEach, beforeEach, describe, it } from "mocha"
+import { expect } from "chai"
 import "should"
 import * as fs from "fs/promises"
 import * as os from "os"
@@ -17,6 +18,12 @@ import type { StorageContext } from "@/shared/storage/storage-context"
 import { StateManager } from "../StateManager"
 import { TEST_MODEL_IDS } from "@test/fixtures/model-ids"
 
+import {
+	buildEffectiveApiConfigurationFromCache,
+	buildEffectiveSettingsFromCache,
+	type StateManagerSettingsCaches,
+} from "../StateManagerSettings"
+import { ApiHandlerSettingsKeys, SettingsKeys, type GlobalStateAndSettings, type Secrets, type Settings } from "@shared/storage/state-keys"
 describe("StateManager", () => {
 	let sandbox: sinon.SinonSandbox
 	let tempDir: string
@@ -74,7 +81,7 @@ describe("StateManager", () => {
 			await (StateManager as any).instance.persistence.dispose()
 		}
 		// Reset singleton
-		;(StateManager as any).instance = undefined
+		; (StateManager as any).instance = undefined
 	})
 
 	afterEach(async () => {
@@ -85,8 +92,8 @@ describe("StateManager", () => {
 		sandbox.restore()
 		try {
 			await fs.rm(tempDir, { recursive: true, force: true })
-		} catch {}
-		;(StateManager as any).instance = undefined
+		} catch { }
+		; (StateManager as any).instance = undefined
 	})
 
 	// ---------------------------------------------------------------
@@ -105,7 +112,7 @@ describe("StateManager", () => {
 		})
 
 		it("get throws before initialize", () => {
-			;(() => StateManager.get()).should.throw()
+			; (() => StateManager.get()).should.throw()
 		})
 
 		it("initialize twice throws", async () => {
@@ -204,7 +211,7 @@ describe("StateManager", () => {
 
 		it("getGlobalSettingsKey returns undefined for unknown key", () => {
 			const v = sm.getGlobalSettingsKey("nonexistent" as any)
-			;(v === undefined).should.be.true()
+				; (v === undefined).should.be.true()
 		})
 	})
 
@@ -257,7 +264,7 @@ describe("StateManager", () => {
 
 		it("getSecretKey returns undefined for unknown key", () => {
 			const v = sm.getSecretKey("nonexistent" as any)
-			;(v === undefined).should.be.true()
+				; (v === undefined).should.be.true()
 		})
 	})
 
@@ -300,7 +307,7 @@ describe("StateManager", () => {
 			sm.setSessionOverride("actModeApiModelId", undefined)
 
 			const value = sm.getGlobalSettingsKey("actModeApiModelId")
-			;(value === undefined).should.be.true()
+				; (value === undefined).should.be.true()
 		})
 
 		it("system-default reads ignore task and session runtime state", () => {
@@ -309,6 +316,14 @@ describe("StateManager", () => {
 			sm.setSessionOverride("actModeApiModelId", "session-model")
 
 			sm.getSystemDefaultSettingsKey("actModeApiModelId")!.should.equal("global-model")
+		})
+
+		it("reports and clears session override ownership", () => {
+			sm.hasSessionOverride("mode").should.equal(false)
+			sm.setSessionOverride("mode", "act")
+			sm.hasSessionOverride("mode").should.equal(true)
+			sm.clearSessionOverride("mode")
+			sm.hasSessionOverride("mode").should.equal(false)
 		})
 	})
 
@@ -326,7 +341,205 @@ describe("StateManager", () => {
 		})
 
 		it("setApiConfiguration does not throw", () => {
-			;(() => sm.setApiConfiguration({ apiProvider: "anthropic" } as any)).should.not.throw()
+			; (() => sm.setApiConfiguration({ apiProvider: "anthropic" } as any)).should.not.throw()
+		})
+	})
+
+	// ---------------------------------------------------------------
+	describe("task working configuration capture", () => {
+		let sm: StateManager
+
+		beforeEach(async () => {
+			sm = await StateManager.initialize(storage)
+		})
+
+		it("captures effective precedence without installing explicit runtime overrides", () => {
+			sm.setGlobalState("mode", "act")
+			sm.setTaskSettings("task1", "mode", "plan")
+			sm.setSessionOverride("preferredLanguage", "French")
+
+			const captured = sm.captureEffectiveTaskConfiguration({ mode: "act", actModeApiModelId: undefined })
+
+			captured.settings.mode.should.equal("act")
+			captured.settings.preferredLanguage.should.equal("French")
+			Object.hasOwn(captured.settings, "actModeApiModelId").should.equal(true)
+				; (captured.settings.actModeApiModelId === undefined).should.equal(true)
+			// Pure explicit resolution must not change the live cache.
+			sm.getGlobalSettingsKey("mode").should.equal("plan")
+		})
+
+		it("deeply detaches settings, workspace configuration, and credentials", () => {
+			const browserSettings = { viewport: { width: 1200, height: 800 }, customArgs: "--test" }
+			const localSkillsToggles = { skill: true }
+			sm.setGlobalState("browserSettings", browserSettings)
+			sm.setWorkspaceState("localSkillsToggles", localSkillsToggles)
+			sm.setSecret("apiKey", "captured-secret")
+
+			const captured = sm.captureEffectiveTaskConfiguration()
+			browserSettings.viewport.width = 1
+			localSkillsToggles.skill = false
+			sm.setSecret("apiKey", "new-secret")
+
+			captured.settings.browserSettings.viewport.width.should.equal(1200)
+			captured.workspaceConfiguration.localSkillsToggles.skill.should.equal(true)
+			captured.apiConfiguration.apiKey!.should.equal("captured-secret")
+			Object.isFrozen(captured.settings.browserSettings.viewport).should.equal(true)
+		})
+
+		it("captures explicit execution options independently of later global writes", () => {
+			const captured = sm.captureEffectiveTaskConfiguration(undefined, {
+				terminalReuseEnabled: false,
+				vscodeTerminalExecutionMode: "backgroundExec",
+				multiRootEnabled: false,
+			})
+			sm.setGlobalState("terminalReuseEnabled", true)
+			sm.setGlobalState("multiRootEnabled", true)
+
+			captured.executionOptions.should.deepEqual({
+				terminalReuseEnabled: false,
+				vscodeTerminalExecutionMode: "backgroundExec",
+				multiRootEnabled: false,
+			})
+		})
+
+		it("matches the live effective getters across a precedence matrix", () => {
+			const scenarios: Array<{
+				global?: Partial<Settings>
+				task?: Partial<Settings>
+				session?: Partial<Settings>
+				explicit?: Partial<Settings>
+			}> = [
+					{ global: { mode: "act", preferredLanguage: "Global" } },
+					{ global: { mode: "act" }, task: { mode: "plan", preferredLanguage: "Task" } },
+					{ global: { mode: "act" }, task: { mode: "plan" }, session: { mode: "act" } },
+					{
+						global: { actModeApiModelId: "global-model" },
+						task: { actModeApiModelId: "task-model" },
+						session: { actModeApiModelId: undefined },
+					},
+					{
+						global: { mode: "plan", preferredLanguage: "Global" },
+						task: { mode: "act", preferredLanguage: "Task" },
+						session: { preferredLanguage: "Session" },
+						explicit: { mode: "plan", preferredLanguage: undefined },
+					},
+				]
+
+			for (const scenario of scenarios) {
+				if (scenario.global) sm.setGlobalStateBatch(scenario.global)
+				if (scenario.task) sm.setTaskSettingsBatch("task1", scenario.task)
+				for (const [key, value] of Object.entries(scenario.session ?? {})) {
+					sm.setSessionOverride(key as keyof Settings, value as never)
+				}
+
+				const captured = sm.captureEffectiveTaskConfiguration(scenario.explicit)
+				for (const key of SettingsKeys) {
+					const expected = scenario.explicit && Object.hasOwn(scenario.explicit, key)
+						? scenario.explicit[key]
+						: sm.getGlobalSettingsKey(key)
+					expect(captured.settings[key]).to.deep.equal(expected)
+				}
+			}
+		})
+
+		it("pure builders match capture and API getters without mutating caches", () => {
+			sm.setGlobalStateBatch({
+				mode: "act",
+				actModeApiProvider: "openai",
+				actModeOpenAiModelId: "global-model:1m",
+				preferredLanguage: "Global",
+			})
+			sm.setTaskSettingsBatch("task1", {
+				actModeOpenAiModelId: "task-model:1m",
+				preferredLanguage: "Task",
+			})
+			sm.setSessionOverride("preferredLanguage", "Session")
+			sm.setSecret("openAiApiKey", "persisted-secret")
+
+			const internals = sm as any
+			const caches: StateManagerSettingsCaches = {
+				sessionOverrideCache: internals.sessionOverrideCache,
+				taskStateCache: internals.taskStateCache,
+				globalStateCache: internals.globalStateCache as GlobalStateAndSettings,
+				secretsCache: internals.secretsCache as Secrets,
+			}
+			const explicit: Partial<Settings> = { mode: "plan", preferredLanguage: undefined }
+			const settings = buildEffectiveSettingsFromCache(caches, explicit)
+			const api = buildEffectiveApiConfigurationFromCache(caches, explicit)
+			const captured = sm.captureEffectiveTaskConfiguration(explicit)
+
+			settings.should.deepEqual(captured.settings)
+			api.should.deepEqual(captured.apiConfiguration)
+			buildEffectiveSettingsFromCache(caches).should.deepEqual(
+				Object.fromEntries(SettingsKeys.map((key) => [key, sm.getGlobalSettingsKey(key)])),
+			)
+			buildEffectiveApiConfigurationFromCache(caches).should.deepEqual(sm.getApiConfiguration())
+			sm.captureEffectiveTaskConfiguration().apiConfiguration.should.deepEqual(sm.getApiConfiguration())
+			for (const key of ApiHandlerSettingsKeys) expect(api[key]).to.deep.equal(settings[key])
+			api.openAiApiKey!.should.equal("persisted-secret")
+			settings.actModeOpenAiModelId!.should.equal("task-model")
+			Object.hasOwn(settings, "preferredLanguage").should.equal(true)
+				; (settings.preferredLanguage === undefined).should.equal(true)
+			// Explicit resolution is pure and does not install overrides.
+			sm.getGlobalSettingsKey("mode").should.equal("act")
+			sm.getGlobalSettingsKey("preferredLanguage")!.should.equal("Session")
+		})
+
+		it("preserves API secret and environment precedence exactly", () => {
+			const envKeys = [
+				"OPENAI_API_KEY",
+				"OPENAI_API_BASE",
+				"DIRAC_PROVIDER",
+				"DIRAC_API_KEY",
+				"DIRAC_MODEL",
+				"DIRAC_BASE_URL",
+			] as const
+			const previousEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]))
+			try {
+				process.env.OPENAI_API_KEY = "legacy-secret"
+				process.env.OPENAI_API_BASE = "https://legacy.example"
+				delete process.env.DIRAC_PROVIDER
+				delete process.env.DIRAC_API_KEY
+				delete process.env.DIRAC_MODEL
+				delete process.env.DIRAC_BASE_URL
+
+				let captured = sm.captureEffectiveTaskConfiguration()
+				captured.apiConfiguration.openAiApiKey!.should.equal("legacy-secret")
+				captured.settings.openAiBaseUrl!.should.equal("https://legacy.example")
+
+				sm.setSecret("openAiApiKey", "persisted-secret")
+				sm.setGlobalState("openAiBaseUrl", "https://persisted.example")
+				captured = sm.captureEffectiveTaskConfiguration()
+				captured.apiConfiguration.openAiApiKey!.should.equal("persisted-secret")
+
+				sm.setSecret("openAiApiKey", "")
+				captured = sm.captureEffectiveTaskConfiguration()
+				captured.apiConfiguration.openAiApiKey!.should.equal("legacy-secret")
+				sm.setSecret("openAiApiKey", "persisted-secret")
+				captured.settings.openAiBaseUrl!.should.equal("https://persisted.example")
+
+				process.env.DIRAC_PROVIDER = "openai"
+				process.env.DIRAC_API_KEY = "explicit-secret"
+				process.env.DIRAC_MODEL = "explicit-model:1m"
+				process.env.DIRAC_BASE_URL = "https://explicit.example"
+				captured = sm.captureEffectiveTaskConfiguration()
+				captured.apiConfiguration.openAiApiKey!.should.equal("explicit-secret")
+				captured.settings.actModeApiProvider.should.equal("openai")
+				captured.settings.planModeApiProvider.should.equal("openai")
+				captured.settings.actModeOpenAiModelId!.should.equal("explicit-model")
+				captured.settings.planModeOpenAiModelId!.should.equal("explicit-model")
+				captured.settings.openAiBaseUrl!.should.equal("https://explicit.example")
+
+				const ownedUndefined = sm.captureEffectiveTaskConfiguration({ openAiBaseUrl: undefined })
+				Object.hasOwn(ownedUndefined.settings, "openAiBaseUrl").should.equal(true)
+					; (ownedUndefined.settings.openAiBaseUrl === undefined).should.equal(true)
+			} finally {
+				for (const key of envKeys) {
+					const value = previousEnv[key]
+					if (value === undefined) delete process.env[key]
+					else process.env[key] = value
+				}
+			}
 		})
 	})
 
@@ -345,7 +558,7 @@ describe("StateManager", () => {
 		})
 
 		it("getModelsCache returns null for uncached provider", () => {
-			;(sm.getModelsCache("dirac") === null).should.be.true() // null is valid for uncached provider
+			; (sm.getModelsCache("dirac") === null).should.be.true() // null is valid for uncached provider
 		})
 	})
 
@@ -400,7 +613,7 @@ describe("StateManager", () => {
 			sm.setGlobalState("mode", "act")
 			await sm.reInitialize()
 			const v = sm.getGlobalSettingsKey("mode")
-			;(v === undefined).should.be.true()
+				; (v === undefined).should.be.true()
 		})
 	})
 })

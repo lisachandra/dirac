@@ -1,8 +1,21 @@
+import { type GoalHistoryItem, isGoalHistoryItem } from "@shared/HistoryItem"
 import { StringRequest } from "@shared/proto/dirac/common"
 import { TaskResponse } from "@shared/proto/dirac/task"
 import { Logger } from "@/shared/services/Logger"
 import { Controller } from ".."
 import { sendChatButtonClickedEvent } from "../ui/subscribeToChatButtonClicked"
+
+export function goalHistoryItemToTaskResponse(historyItem: GoalHistoryItem): TaskResponse {
+	return TaskResponse.create({
+		id: historyItem.id,
+		task: historyItem.initialDisplayText,
+		ts: historyItem.ts,
+		isFavorited: historyItem.isFavorited ?? false,
+		size: historyItem.size ?? 0,
+		runKind: "goal",
+		accounting: historyItem.accounting,
+	})
+}
 
 /**
  * Shows a task with the specified ID
@@ -17,6 +30,11 @@ export async function showTaskWithId(controller: Controller, request: StringRequ
 		// First check if task exists in global state for faster access
 		const taskHistory = controller.stateManager.getGlobalStateKey("taskHistory")
 		const historyItem = taskHistory.find((item) => item.id === id)
+		if (historyItem && isGoalHistoryItem(historyItem)) {
+			await controller.selectGoal(id)
+			await sendChatButtonClickedEvent()
+			return goalHistoryItemToTaskResponse(historyItem)
+		}
 
 		// We need to initialize the task before returning data
 		if (historyItem) {
@@ -43,6 +61,7 @@ export async function showTaskWithId(controller: Controller, request: StringRequ
 
 		// If not in global state, fetch from storage
 		const { historyItem: fetchedItem } = await controller.getTaskWithId(id)
+		if (isGoalHistoryItem(fetchedItem)) throw new Error(`Run ${id} was loaded as a Goal through Task storage`)
 
 		// Initialize the task with the fetched item
 		await controller.initTask(undefined, undefined, undefined, fetchedItem)

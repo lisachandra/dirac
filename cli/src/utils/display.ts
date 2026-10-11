@@ -4,7 +4,7 @@
  * For interactive rendering, see the Ink components in cli/src/components/.
  */
 
-import { CardStatus, DiracMessageType } from "@shared/ExtensionMessage"
+import { CardStatus, DiracMessageType, isFinalStatus } from "@shared/ExtensionMessage"
 import type { DiracMessage, ExtensionState } from "@shared/ExtensionMessage"
 import { originalConsoleError, originalConsoleLog } from "./console"
 
@@ -171,11 +171,11 @@ function formatCardMessage(message: DiracMessage, prefix: string, verbose: boole
 		}
 	}
 
-	if (card.requireApproval) {
+	if (!isFinalStatus(card.status) && card.requireApproval) {
 		lines.push(`${" ".repeat(prefix.length + 1)}${style.warning("Approval required")}`)
 	}
 
-	if (card.requireFeedback) {
+	if (!isFinalStatus(card.status) && card.requireFeedback) {
 		lines.push(`${" ".repeat(prefix.length + 1)}${style.info("Feedback required")}`)
 	}
 

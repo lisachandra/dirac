@@ -28,10 +28,10 @@ describe("convertToOpenAIResponsesInput", () => {
 
 		it("defaults empty text to empty string", () => {
 			const result = convertToOpenAIResponsesInput([{ role: "user", content: [{ type: "text" }] }] as any)
-				; (result.input[0] as any).content[0].text.should.equal("")
+			;(result.input[0] as any).content[0].text.should.equal("")
 		})
 
-		it("converts base64 image to input_image with data url", () => {
+		it("uses automatic detail for direct base64 image input", () => {
 			const result = convertToOpenAIResponsesInput([
 				{ role: "user", content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: "abc" } }] },
 			] as any)
@@ -45,7 +45,8 @@ describe("convertToOpenAIResponsesInput", () => {
 			const result = convertToOpenAIResponsesInput([
 				{ role: "user", content: [{ type: "image", source: { type: "url", url: "https://x.com/i.png" } as any }] },
 			] as any)
-				; (result.input[0] as any).content[0].image_url.should.equal("https://x.com/i.png")
+			;(result.input[0] as any).content[0].image_url.should.equal("https://x.com/i.png")
+			;(result.input[0] as any).content[0].detail.should.equal("auto")
 		})
 
 		it("converts tool_result with string content to function_call_output", () => {
@@ -55,13 +56,41 @@ describe("convertToOpenAIResponsesInput", () => {
 			result.input[0].should.deepEqual({ type: "function_call_output", call_id: "t1", output: "result" })
 		})
 
-		it("converts tool_result with array content to JSON string output", () => {
+		it("preserves mixed text and image tool results as structured function output", () => {
 			const result = convertToOpenAIResponsesInput([
-				{ role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: [{ type: "text", text: "x" }] }] },
+				{
+					role: "user",
+					content: [
+						{
+							type: "tool_result",
+							tool_use_id: "t1",
+							content: [
+								{ type: "text", text: "Successfully read image" },
+								{
+									type: "image",
+									source: { type: "base64", media_type: "image/png", data: "BASE64_SENTINEL" },
+								},
+							],
+						},
+					],
+				},
 			] as any)
-			const output = (result.input[0] as any).output
-			output.should.be.a.String()
-			expect(output).to.include("text")
+
+			result.input.should.deepEqual([
+				{
+					type: "function_call_output",
+					call_id: "t1",
+					output: [
+						{ type: "input_text", text: "Successfully read image" },
+						{
+							type: "input_image",
+							detail: "high",
+							image_url: "data:image/png;base64,BASE64_SENTINEL",
+						},
+					],
+				},
+			])
+			expect(typeof (result.input[0] as any).output).not.to.equal("string")
 		})
 
 		it("flushes pending text content before tool_result", () => {
@@ -97,7 +126,7 @@ describe("convertToOpenAIResponsesInput", () => {
 			const result = convertToOpenAIResponsesInput([
 				{ role: "user", content: [{ type: "tool_result", tool_use_id: "t1", call_id: "call_x", content: "r" }] },
 			] as any)
-				; (result.input[0] as any).call_id.should.equal("call_x")
+			;(result.input[0] as any).call_id.should.equal("call_x")
 		})
 
 		it("resolves call_id from prior assistant tool_use mapping", () => {
@@ -109,14 +138,14 @@ describe("convertToOpenAIResponsesInput", () => {
 				{ role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "r" }] },
 			] as any)
 			const outputItem = result.input.find((i: any) => i.type === "function_call_output")!
-				; (outputItem as any).call_id.should.equal("call_99")
+			;(outputItem as any).call_id.should.equal("call_99")
 		})
 
 		it("falls back to tool_use_id when no call_id mapping exists", () => {
 			const result = convertToOpenAIResponsesInput([
 				{ role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "r" }] },
 			] as any)
-				; (result.input[0] as any).call_id.should.equal("t1")
+			;(result.input[0] as any).call_id.should.equal("t1")
 		})
 	})
 
@@ -136,7 +165,7 @@ describe("convertToOpenAIResponsesInput", () => {
 			const result = convertToOpenAIResponsesInput([
 				{ role: "assistant", content: [{ type: "text", call_id: "c1" }] },
 			] as any)
-				; (result.input[0] as any).content[0].text.should.equal("")
+			;(result.input[0] as any).content[0].text.should.equal("")
 		})
 
 		it("converts thinking block with thinking content to reasoning summary_text", () => {
@@ -151,29 +180,29 @@ describe("convertToOpenAIResponsesInput", () => {
 			const result = convertToOpenAIResponsesInput([
 				{ role: "assistant", content: [{ type: "thinking", thinking: "ignored", summary, call_id: "c1" }] },
 			] as any)
-				; (result.input[0] as any).summary.should.equal(summary)
+			;(result.input[0] as any).summary.should.equal(summary)
 		})
 
 		it("creates reasoning with empty summary when thinking content is whitespace only", () => {
 			const result = convertToOpenAIResponsesInput([
 				{ role: "assistant", content: [{ type: "thinking", thinking: "   ", signature: "s", call_id: "c1" }] },
 			] as any)
-				; (result.input[0] as any).summary.should.deepEqual([])
+			;(result.input[0] as any).summary.should.deepEqual([])
 		})
 
 		it("converts redacted_thinking to reasoning with encrypted_content", () => {
 			const result = convertToOpenAIResponsesInput([
 				{ role: "assistant", content: [{ type: "redacted_thinking", data: "encrypted", call_id: "c1" }] },
 			] as any)
-				; (result.input[0] as any).type.should.equal("reasoning")
-				; (result.input[0] as any).encrypted_content.should.equal("encrypted")
+			;(result.input[0] as any).type.should.equal("reasoning")
+			;(result.input[0] as any).encrypted_content.should.equal("encrypted")
 		})
 
 		it("creates reasoning with empty summary when redacted_thinking has no data", () => {
 			const result = convertToOpenAIResponsesInput([
 				{ role: "assistant", content: [{ type: "redacted_thinking", call_id: "c1" }] },
 			] as any)
-				; (result.input[0] as any).summary.should.deepEqual([])
+			;(result.input[0] as any).summary.should.deepEqual([])
 			should.equal((result.input[0] as any).encrypted_content, undefined)
 		})
 
@@ -215,14 +244,14 @@ describe("convertToOpenAIResponsesInput", () => {
 			const result = convertToOpenAIResponsesInput([
 				{ role: "assistant", content: [{ type: "tool_use", id: "c1", name: "fn" }] },
 			] as any)
-				; (result.input[0] as any).arguments.should.equal("{}")
+			;(result.input[0] as any).arguments.should.equal("{}")
 		})
 
 		it("uses id as call_id when call_id absent on tool_use", () => {
 			const result = convertToOpenAIResponsesInput([
 				{ role: "assistant", content: [{ type: "tool_use", id: "toolu_5", name: "fn", input: {} }] },
 			] as any)
-				; (result.input[0] as any).call_id.should.equal("toolu_5")
+			;(result.input[0] as any).call_id.should.equal("toolu_5")
 		})
 
 		it("skips assistant parts without call_id or id", () => {
@@ -239,7 +268,7 @@ describe("convertToOpenAIResponsesInput", () => {
 					content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: "d" }, call_id: "c1" }],
 				},
 			] as any)
-				; (result.input[0] as any).content[0].text.should.equal("[image:image/png]")
+			;(result.input[0] as any).content[0].text.should.equal("[image:image/png]")
 		})
 	})
 
@@ -334,7 +363,7 @@ describe("convertToOpenAIResponsesInput", () => {
 			expect(result.previousResponseId).to.equal("resp_123")
 			// only the message after the assistant turn is sent
 			result.input.should.have.length(1)
-				; (result.input[0] as any).content[0].text.should.equal("new")
+			;(result.input[0] as any).content[0].text.should.equal("new")
 		})
 
 		it("preserves an omitted anchor's Responses call_id for incremental tool output", () => {
@@ -354,7 +383,6 @@ describe("convertToOpenAIResponsesInput", () => {
 			expect(result.previousResponseId).to.equal("resp_anchor")
 			result.input.should.deepEqual([{ type: "function_call_output", call_id: "call_server", output: "contents" }])
 		})
-
 
 		it("chains from a stored assistant response regardless of local message age", () => {
 			const oldTs = Date.now() - 30 * 24 * 60 * 60 * 1000

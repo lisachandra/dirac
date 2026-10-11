@@ -23,6 +23,7 @@ import { IDiracTool } from "../../interfaces/IDiracTool"
 import { ICardHandle, IToolEnvironment } from "../../interfaces/IToolEnvironment"
 import { AgentConfigLoader } from "../../subagent/AgentConfigLoader"
 import { waitForPresentationOperation } from "../../subagent/PresentationDeadline"
+import { LatestPresentationQueue } from "../../subagent/LatestPresentationQueue"
 import { DEFAULT_SUBAGENT_TIMEOUT_SECONDS, resolveSubagentTimeoutSeconds } from "../../subagent/SubagentExecutionPolicy"
 
 interface SubagentRequest {
@@ -171,21 +172,12 @@ export class UseSubagentsTool implements IDiracTool {
 			}
 		}
 
-		let discardQueuedAggregatePresentation = false
-		let aggregatePresentationUpdates = Promise.resolve()
-		const enqueueAggregatePresentation = (present: () => Promise<void>) => {
-			aggregatePresentationUpdates = aggregatePresentationUpdates
-				.then(async () => {
-					if (discardQueuedAggregatePresentation) return
-					await present()
-				})
-				.catch((error) => {
-					reportPresentationIssue(
-						{ scope: "aggregate", phase: "intermediate_update", cardId: card?.id, timedOut: false },
-						error,
-					)
-				})
-		}
+		const aggregatePresentation = new LatestPresentationQueue((error) => {
+			reportPresentationIssue(
+				{ scope: "aggregate", phase: "intermediate_update", cardId: card?.id, timedOut: false },
+				error,
+			)
+		})
 		const emitStatus = (status: SubagentExecutionStatus) => {
 			if (!card) return
 			const payload = this.calculateStatusPayload(status, entries)
@@ -200,7 +192,7 @@ export class UseSubagentsTool implements IDiracTool {
 					? { header: `Wrapping up ${wrappingUpCount} subagent${wrappingUpCount === 1 ? "" : "s"}` }
 					: {}),
 			}
-			enqueueAggregatePresentation(() => card!.update(patch))
+			aggregatePresentation.enqueue(() => card!.update(patch))
 		}
 		const runAggregateOperation = async (
 			operation: Promise<void>,
@@ -258,9 +250,11 @@ export class UseSubagentsTool implements IDiracTool {
 					"Aggregate subagent card finalization timed out.",
 				)
 			}
-			const intermediateUpdates = await waitForPresentationOperation(aggregatePresentationUpdates)
+			aggregatePresentation.stopAcceptingUpdates()
+			const intermediateUpdates = await waitForPresentationOperation(
+				aggregatePresentation.waitForInFlightPresentation(),
+			)
 			if (intermediateUpdates.timedOut) {
-				discardQueuedAggregatePresentation = true
 				reportPresentationIssue(
 					{
 						scope: "aggregate",
@@ -440,8 +434,6 @@ export class UseSubagentsTool implements IDiracTool {
 				agentId: entry.index,
 				agentName: entry.name,
 			}
-			let discardQueuedPresentationUpdates = false
-			let presentationUpdates = Promise.resolve()
 			let subagentCard: ICardHandle | undefined
 			const reportAgentIssue = (
 				phase: PresentationIssuePhase,
@@ -452,16 +444,9 @@ export class UseSubagentsTool implements IDiracTool {
 			) => {
 				reportPresentationIssue({ ...issueContext, phase, cardId, executionStatus, timedOut }, error)
 			}
-			const enqueuePresentationUpdate = (present: () => Promise<void>) => {
-				presentationUpdates = presentationUpdates
-					.then(async () => {
-						if (discardQueuedPresentationUpdates) return
-						await present()
-					})
-					.catch((error) => {
-						reportAgentIssue("intermediate_update", false, error)
-					})
-			}
+			const presentation = new LatestPresentationQueue((error) => {
+				reportAgentIssue("intermediate_update", false, error)
+			})
 			const runCardOperation = async (
 				operation: Promise<void>,
 				phase: "terminal_update" | "finalize",
@@ -591,7 +576,7 @@ export class UseSubagentsTool implements IDiracTool {
 							),
 							rawOutput: createSubagentCardOutput(status, trajectory),
 						}
-						enqueuePresentationUpdate(() => subagentCard!.update(cardUpdate))
+						presentation.enqueue(() => subagentCard!.update(cardUpdate))
 					},
 				})
 				runSettled = true
@@ -611,10 +596,11 @@ export class UseSubagentsTool implements IDiracTool {
 								taskTitle: entry.taskTitle,
 								prompt: entry.prompt,
 								status: runResult.status,
+								usage: runResult.stats,
 								trajectory,
 							}),
 						),
-						rawOutput: createSubagentCardOutput(runResult.status, trajectory),
+						rawOutput: createSubagentCardOutput(runResult.status, trajectory, runResult.stats),
 					}
 					const applyTerminalCardState = async () => {
 						await runCardOperation(
@@ -630,9 +616,11 @@ export class UseSubagentsTool implements IDiracTool {
 							runResult.status,
 						)
 					}
-					const intermediateUpdates = await waitForPresentationOperation(presentationUpdates)
+					presentation.stopAcceptingUpdates()
+					const intermediateUpdates = await waitForPresentationOperation(
+						presentation.waitForInFlightPresentation(),
+					)
 					if (intermediateUpdates.timedOut) {
-						discardQueuedPresentationUpdates = true
 						reportAgentIssue(
 							"intermediate_update",
 							true,
@@ -679,9 +667,11 @@ export class UseSubagentsTool implements IDiracTool {
 							SubagentExecutionStatus.FAILED,
 						)
 					}
-					const intermediateUpdates = await waitForPresentationOperation(presentationUpdates)
+					presentation.stopAcceptingUpdates()
+					const intermediateUpdates = await waitForPresentationOperation(
+						presentation.waitForInFlightPresentation(),
+					)
 					if (intermediateUpdates.timedOut) {
-						discardQueuedPresentationUpdates = true
 						reportAgentIssue(
 							"intermediate_update",
 							true,

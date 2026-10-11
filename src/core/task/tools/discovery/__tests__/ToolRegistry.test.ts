@@ -35,11 +35,12 @@ function makeTool(overrides: Partial<DiscoveredTool> = {}): DiscoveredTool {
 					return ["all" as const]
 				},
 				async processCall() {
-					return undefined
+					return "ok"
 				},
 			})),
 		modulePath: overrides.modulePath ?? `modules/${id}/tool.ts`,
 		sourceHash: overrides.sourceHash,
+		ownerTaskId: overrides.ownerTaskId,
 	}
 }
 
@@ -368,27 +369,48 @@ describe("ToolRegistry", () => {
 
 		it("enables a new tool only when requested", () => {
 			const registry = ToolRegistry.getInstance()
-			assert.strictEqual(
-				registry.replaceUserTool(makeTool({ id: "user_tool", source: "workspace" }), true),
-				true,
-			)
+			assert.strictEqual(registry.replaceUserTool(makeTool({ id: "user_tool", source: "workspace" }), true), true)
 			assert.strictEqual(registry.isEnabled("user_tool"), true)
 		})
 
 		it("rejects a lower-priority replacement without mutating the existing tool", () => {
 			const registry = ToolRegistry.getInstance()
-			const existing = makeTool({ id: "user_tool", source: "task", modulePath: "task" })
+			const existing = makeTool({ id: "user_tool", source: "workspace", modulePath: "workspace" })
 			registry.registerUserTool(existing)
 			registry.enable("user_tool")
 			const version = registry.getVersion()
 
 			assert.strictEqual(
-				registry.replaceUserTool(makeTool({ id: "user_tool", source: "workspace", modulePath: "workspace" })),
+				registry.replaceUserTool(makeTool({ id: "user_tool", source: "global", modulePath: "global" })),
 				false,
 			)
 			assert.strictEqual(registry.getAllTools()[0], existing)
 			assert.strictEqual(registry.isEnabled("user_tool"), true)
 			assert.strictEqual(registry.getVersion(), version)
+		})
+
+		it("rejects a user tool that would shadow a built-in by name", () => {
+			const registry = ToolRegistry.getInstance()
+			registry.registerBuiltin(makeTool({ id: "read_file_builtin", name: "read_file", source: "builtin" }))
+
+			assert.strictEqual(
+				registry.replaceUserTool(makeTool({ id: "my_tool", name: "read_file", source: "workspace" }), true),
+				false,
+			)
+			assert.strictEqual(registry.getAllTools().length, 1)
+			assert.strictEqual(registry.getAllTools()[0].source, "builtin")
+		})
+
+		it("rejects a user tool that would shadow a built-in by id", () => {
+			const registry = ToolRegistry.getInstance()
+			registry.registerBuiltin(makeTool({ id: "execute_command", name: "execute_command", source: "builtin" }))
+
+			assert.strictEqual(
+				registry.replaceUserTool(makeTool({ id: "execute_command", name: "my_custom", source: "workspace" }), true),
+				false,
+			)
+			assert.strictEqual(registry.getAllTools().length, 1)
+			assert.strictEqual(registry.getAllTools()[0].source, "builtin")
 		})
 	})
 
@@ -505,11 +527,17 @@ describe("ToolRegistry", () => {
 		it("removes stale disk tools while preserving task-scoped tools", () => {
 			const registry = ToolRegistry.getInstance()
 			registry.registerUserTool(makeTool({ id: "workspace_tool", source: "workspace", sourceHash: "hash-1" }))
-			registry.registerUserTool(makeTool({ id: "task_tool", source: "task", sourceHash: "task-hash" }))
+			registry.registerUserTool(
+				makeTool({ id: "task_tool", source: "task", sourceHash: "task-hash", ownerTaskId: "owner-task" }),
+			)
 
 			registry.reconcileWorkspaceUserTools([])
 
-			assert.deepStrictEqual(registry.getAllTools().map((tool) => tool.id), ["task_tool"])
+			assert.deepStrictEqual(registry.getAllTools(), [])
+			assert.deepStrictEqual(
+				registry.getAllTools("owner-task").map((tool) => tool.id),
+				["task_tool"],
+			)
 		})
 
 		it("allows a manual reload to invalidate an unchanged inventory", () => {
@@ -619,5 +647,4 @@ describe("ToolRegistry", () => {
 			)
 		})
 	})
-
 })

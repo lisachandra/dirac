@@ -10,20 +10,21 @@ import path from "path"
 export async function refreshWorkflowToggles(
 	stateManager: StateManager,
 	workingDirectory: string,
+	configuration?: { globalWorkflowToggles: DiracRulesToggles; localWorkflowToggles: DiracRulesToggles },
 ): Promise<{
 	globalWorkflowToggles: DiracRulesToggles
 	localWorkflowToggles: DiracRulesToggles
 }> {
 	// Global workflows
-	const globalWorkflowToggles = stateManager.getGlobalSettingsKey("globalWorkflowToggles")
+	const globalWorkflowToggles = configuration?.globalWorkflowToggles ?? stateManager.getGlobalSettingsKey("globalWorkflowToggles")
 	const globalDiracWorkflowsFilePath = await ensureWorkflowsDirectoryExists()
 	const updatedGlobalWorkflowToggles = await synchronizeRuleToggles(globalDiracWorkflowsFilePath, globalWorkflowToggles)
-	stateManager.setGlobalState("globalWorkflowToggles", updatedGlobalWorkflowToggles)
+	if (!configuration) stateManager.setGlobalState("globalWorkflowToggles", updatedGlobalWorkflowToggles)
 
-	const workflowRulesToggles = stateManager.getWorkspaceStateKey("workflowToggles")
+	const workflowRulesToggles = configuration?.localWorkflowToggles ?? stateManager.getWorkspaceStateKey("workflowToggles")
 	const workflowsDirPath = path.resolve(workingDirectory, GlobalFileNames.workflows)
 	const updatedWorkflowToggles = await synchronizeRuleToggles(workflowsDirPath, workflowRulesToggles)
-	stateManager.setWorkspaceState("workflowToggles", updatedWorkflowToggles)
+	if (!configuration) stateManager.setWorkspaceState("workflowToggles", updatedWorkflowToggles)
 
 	return {
 		globalWorkflowToggles: updatedGlobalWorkflowToggles,

@@ -1,6 +1,7 @@
 import type { ModelInfo } from "@shared/api"
 import { Empty, EmptyRequest } from "@shared/proto/dirac/common"
 import { OpenRouterCompatibleModelInfo } from "@shared/proto/dirac/models"
+import { toProtobufModels } from "@shared/proto-conversions/models/typeConversion"
 import { telemetryService } from "@/services/telemetry"
 import { Logger } from "@/shared/services/Logger"
 import { GlobalStateAndSettings } from "@/shared/storage/state-keys"
@@ -58,7 +59,7 @@ export async function initializeWebview(controller: Controller, _request: EmptyR
 async function postCachedOpenRouterModels(controller: Controller): Promise<void> {
 	const cached = await controller.readOpenRouterModels()
 	if (!cached) return
-	await sendOpenRouterModelsEvent(OpenRouterCompatibleModelInfo.create({ models: cached }))
+	await sendOpenRouterModelsEvent(OpenRouterCompatibleModelInfo.create({ models: toProtobufModels(cached) }))
 	await syncProviderModelInfo(controller, cached, {
 		planId: "planModeOpenRouterModelId",
 		planInfo: "planModeOpenRouterModelInfo",

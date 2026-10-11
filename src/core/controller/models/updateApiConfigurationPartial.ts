@@ -40,7 +40,10 @@ export async function updateApiConfigurationPartial(
 			;(updatedConfig as Record<string, any>)[field] = (newConfigValues as Record<string, any>)[field]
 		}
 
-		applyApiConfigurationTransaction(controller, updatedConfig)
+		const explicitPatch = Object.fromEntries(
+			request.updateMask.map((field) => [field, (newConfigValues as Record<string, any>)[field]]),
+		)
+		await applyApiConfigurationTransaction(controller, updatedConfig, undefined, undefined, explicitPatch)
 
 		// Notify webview
 		await controller.postStateToWebview()

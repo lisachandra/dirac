@@ -1,5 +1,6 @@
 import { strict as assert } from "node:assert"
 import { afterEach, describe, it } from "mocha"
+import { MAX_ANCHORED_FILE_LINES } from "@shared/anchor-limits"
 import { AnchorStateManager } from "../AnchorStateManager"
 
 describe("AnchorStateManager persistence", () => {
@@ -89,13 +90,14 @@ describe("AnchorStateManager persistence", () => {
 		assert.deepEqual(AnchorStateManager.getAnchors(otherPath, taskId), ["Apple"])
 	})
 
-	it("allocates unique opaque IDs beyond the former large-file threshold", () => {
-		const lines = Array.from({ length: 50_001 }, (_, index) => `line ${index}`)
-		const anchors = AnchorStateManager.reconcile(absolutePath, lines, taskId)
+	it("rejects files above the hash-anchoring line limit without tracking them", () => {
+		const lines = Array.from({ length: MAX_ANCHORED_FILE_LINES + 1 }, (_, index) => `line ${index}`)
 
-		assert.equal(new Set(anchors).size, lines.length)
-		assert.ok(anchors.every((anchor) => /^[A-Z][a-zA-Z]*$/.test(anchor)))
-		assert.ok(anchors.every((anchor) => !/^L\d+$/.test(anchor)))
+		assert.throws(
+			() => AnchorStateManager.reconcile(absolutePath, lines, taskId),
+			/hash anchors.*limit/i,
+		)
+		assert.equal(AnchorStateManager.isTracking(absolutePath, taskId), false)
 	})
 
 })

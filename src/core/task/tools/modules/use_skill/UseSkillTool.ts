@@ -4,6 +4,8 @@ import { DiracToolSpec, DiracDefaultTool } from "@shared/tools"
 import { CardStatus } from "../../../../../shared/ExtensionMessage"
 import { DiracIcon } from "@shared/icons"
 import { SurfaceType } from "../../interfaces/SurfaceType"
+import { ToolExecutionDeadline, ToolTimeoutError } from "../../runtime/ToolExecutionDeadline"
+import { presentToolTimeout } from "../../runtime/ToolTimeoutPresentation"
 
 export const use_skill_spec: DiracToolSpec = {
 	id: DiracDefaultTool.USE_SKILL,
@@ -34,6 +36,7 @@ export class UseSkillTool implements IDiracTool {
 		if (!skill_name) {
 			throw new Error("Missing required parameter 'skill_name'. Please provide the name of the skill to activate.")
 		}
+		const deadline = new ToolExecutionDeadline(this.spec().name)
 
 		const card = !env.config.isSubagentExecution
 			? await env.ui.createCard({
@@ -44,17 +47,22 @@ export class UseSkillTool implements IDiracTool {
 			: undefined
 
 		try {
-			const availableSkills = await env.skills.getAvailableSkills()
-			const skillContent = await env.skills.getSkillContent(skill_name, availableSkills)
+			const availableSkills = await deadline.run("discovering available skills", async () =>
+				await env.skills.getAvailableSkills())
+			const skillContent = await deadline.run(`loading skill ${skill_name}`, async () =>
+				await env.skills.getSkillContent(skill_name, availableSkills))
 
 			if (!skillContent) {
 				const availableNames = availableSkills.map((s) => s.name).join(", ")
 				const errorMsg = `Error: Skill "${skill_name}" not found. Available skills: ${availableNames || "none"}`
 				if (card) {
 					await card.update({ status: CardStatus.ERROR, body: errorMsg })
+					await card.finalize(CardStatus.ERROR)
 				}
 				return errorMsg
 			}
+			const { docs, scripts } = await deadline.run(`listing support files for ${skill_name}`, async () =>
+				await env.skills.listSupportingFiles(skillContent.path))
 
 			const activeSkillIds = env.orchestration.getTaskState("activeSkillIds")
 			const alreadyActive = activeSkillIds.includes(skillContent.name)
@@ -71,8 +79,6 @@ export class UseSkillTool implements IDiracTool {
 				skillsAvailableGlobal: globalCount,
 				skillsAvailableProject: projectCount,
 			})
-
-			const { docs, scripts } = await env.skills.listSupportingFiles(skillContent.path)
 
 			const activationState = alreadyActive ? "already active; instructions reloaded" : "now active"
 			let activationMessage = `# Skill "${skillContent.name}" is ${activationState}\n\n${skillContent.instructions}\n\n---\n`
@@ -101,6 +107,9 @@ export class UseSkillTool implements IDiracTool {
 			}
 			return activationMessage
 		} catch (error: any) {
+			if (error instanceof ToolTimeoutError) {
+				return await presentToolTimeout(env, error, card ? [card] : [])
+			}
 			if (card) {
 				await card.update({ status: CardStatus.ERROR, body: `✕ ${error.message}` })
 				await card.finalize(CardStatus.ERROR)

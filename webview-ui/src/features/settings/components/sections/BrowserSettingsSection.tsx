@@ -1,4 +1,5 @@
-import { BROWSER_VIEWPORT_PRESETS } from "@shared/BrowserSettings"
+import { BROWSER_VIEWPORT_PRESETS, type BrowserSettings } from "@shared/BrowserSettings"
+import { SETTINGS_HELP } from "@shared/settings-presentation"
 import { EmptyRequest, StringRequest } from "@shared/proto/dirac/common"
 import { VSCodeButton, VSCodeCheckbox, VSCodeDropdown, VSCodeOption } from "@vscode/webview-ui-toolkit/react"
 import React, { useCallback, useEffect, useState } from "react"
@@ -9,6 +10,13 @@ import CollapsibleContent from "../CollapsibleContent"
 import { DebouncedTextField } from "../common/DebouncedTextField"
 import Section from "../Section"
 import { updateSetting } from "../utils/settingsHandlers"
+
+export const isBrowserToolEnabled = (settings: Pick<BrowserSettings, "disableToolUse">): boolean =>
+	settings.disableToolUse !== true
+
+export const browserToolEnabledUpdate = (enabled: boolean): Pick<BrowserSettings, "disableToolUse"> => ({
+	disableToolUse: !enabled,
+})
 
 interface BrowserSettingsSectionProps {
 	renderSectionHeader: (tabId: string) => JSX.Element | null
@@ -153,7 +161,7 @@ export const BrowserSettingsSection: React.FC<BrowserSettingsSectionProps> = ({ 
 	// Determine if we should show the relaunch button
 	const isRemoteEnabled = Boolean(browserSettings.remoteBrowserEnabled)
 	const shouldShowRelaunchButton = isRemoteEnabled && connectionStatus === false
-	const isSubSettingsOpen = !(browserSettings.disableToolUse || false)
+	const isSubSettingsOpen = isBrowserToolEnabled(browserSettings)
 
 	return (
 		<div>
@@ -163,9 +171,11 @@ export const BrowserSettingsSection: React.FC<BrowserSettingsSectionProps> = ({ 
 					{/* Master Toggle */}
 					<div style={{ marginBottom: isSubSettingsOpen ? 0 : 10 }}>
 						<VSCodeCheckbox
-							checked={browserSettings.disableToolUse || false}
-							onClick={(e: any) => updateSetting("browserSettings", { disableToolUse: e.target.checked === true })}>
-							Disable browser tool usage
+							checked={isBrowserToolEnabled(browserSettings)}
+							onClick={(e: any) =>
+								updateSetting("browserSettings", browserToolEnabledUpdate(e.target.checked === true))
+							}>
+							Enable browser tool
 						</VSCodeCheckbox>
 						<p
 							style={{
@@ -173,7 +183,7 @@ export const BrowserSettingsSection: React.FC<BrowserSettingsSectionProps> = ({ 
 								color: "var(--vscode-descriptionForeground)",
 								margin: "4px 0 0 0px",
 							}}>
-							Prevent Dirac from using browser actions (e.g. launch, click, type).
+							Allow Dirac to launch and interact with browser pages.
 						</p>
 					</div>
 
@@ -206,7 +216,7 @@ export const BrowserSettingsSection: React.FC<BrowserSettingsSectionProps> = ({ 
 									color: "var(--vscode-descriptionForeground)",
 									margin: 0,
 								}}>
-								Set the size of the browser viewport for screenshots and interactions.
+								Size used for screenshots and browser interactions.
 							</p>
 						</div>
 
@@ -265,6 +275,7 @@ export const BrowserSettingsSection: React.FC<BrowserSettingsSectionProps> = ({ 
 							{/* Moved remote-specific settings to appear directly after enabling remote connection */}
 							{browserSettings.remoteBrowserEnabled && (
 								<div style={{ marginLeft: 0, marginTop: 8 }}>
+									<p className="text-xs text-(--vscode-errorForeground)">{SETTINGS_HELP.remoteBrowser}</p>
 									<DebouncedTextField
 										initialValue={browserSettings.remoteBrowserHost || ""}
 										onChange={(value) =>
@@ -319,7 +330,7 @@ export const BrowserSettingsSection: React.FC<BrowserSettingsSectionProps> = ({ 
 								<label
 									htmlFor="chrome-executable-path"
 									style={{ fontWeight: "500", display: "block", marginBottom: 5 }}>
-									Chrome Executable Path (Optional)
+									Chrome executable path
 								</label>
 								<DebouncedTextField
 									id="chrome-executable-path"
@@ -344,7 +355,7 @@ export const BrowserSettingsSection: React.FC<BrowserSettingsSectionProps> = ({ 
 								<label
 									htmlFor="custom-browser-args"
 									style={{ fontWeight: "500", display: "block", marginBottom: 5 }}>
-									Custom Browser Arguments (Optional)
+									Custom browser arguments
 								</label>
 								<DebouncedTextField
 									id="custom-browser-args"

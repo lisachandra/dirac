@@ -4,8 +4,14 @@
  */
 
 import type { ApiProvider } from "@shared/api"
-import { getProviderModelIdKey, ProviderToApiKeyMap, ProviderToBaseUrlKeyMap } from "@shared/storage"
-import { buildCandidateApiHandler } from "@/core/controller/models/apiConfigurationTransaction"
+import {
+	getProviderModelIdKey,
+	isSecretKey,
+	ProviderToApiKeyMap,
+	ProviderToBaseUrlKeyMap,
+	type SecretKey,
+} from "@shared/storage"
+import { applyApiConfigurationTransaction } from "@/core/controller/models/apiConfigurationTransaction"
 import type { Controller } from "@/core/controller"
 import { refreshOpenRouterModels } from "@/core/controller/models/refreshOpenRouterModels"
 import { refreshVercelAiGatewayModels } from "@/core/controller/models/refreshVercelAiGatewayModels"
@@ -13,6 +19,38 @@ import { StateManager } from "@/core/storage/StateManager"
 import type { BedrockConfig } from "../components/BedrockSetup"
 import { getDefaultModelId, getModelList } from "./model-metadata"
 
+/**
+ * Persist only the addressed provider fields and restore those same fields if
+ * the durable flush fails. The active Task transition is owned by
+ * applyApiConfigurationTransaction and therefore remains unchanged on failure.
+ */
+async function persistProviderConfigurationWithRollback(
+	stateManager: StateManager,
+	config: Record<string, unknown>,
+): Promise<void> {
+	const previousApiConfiguration = structuredClone(stateManager.getApiConfiguration()) as Record<string, unknown>
+	const rollbackConfiguration = Object.fromEntries(
+		Object.keys(config).map((key) => [
+			key,
+			isSecretKey(key)
+				? stateManager.getSecretKey(key as SecretKey)
+				: previousApiConfiguration[key],
+		]),
+	)
+
+	stateManager.setApiConfiguration(config as Record<string, string>)
+	try {
+		await stateManager.flushPendingState()
+	} catch (error) {
+		try {
+			stateManager.setApiConfiguration(rollbackConfiguration as Record<string, string>)
+			await stateManager.flushPendingState()
+		} catch (rollbackError) {
+			throw new AggregateError([error, rollbackError], "Provider configuration persistence and rollback failed")
+		}
+		throw error
+	}
+}
 export interface ApplyProviderConfigOptions {
 	providerId: string
 	apiKey?: string
@@ -29,7 +67,7 @@ export async function applyProviderConfig(options: ApplyProviderConfigOptions): 
 	const { providerId, apiKey, modelId, baseUrl, azureApiVersion, controller } = options
 	const stateManager = StateManager.get()
 
-	const config: Record<string, string> = {
+	const config: Record<string, unknown> = {
 		actModeApiProvider: providerId,
 		planModeApiProvider: providerId,
 	}
@@ -77,13 +115,13 @@ export async function applyProviderConfig(options: ApplyProviderConfigOptions): 
 			if (finalActModelId) {
 				const modelInfo = openRouterModels?.[finalActModelId]
 				if (modelInfo) {
-					stateManager.setGlobalState("actModeOpenRouterModelInfo", modelInfo)
+					config.actModeOpenRouterModelInfo = modelInfo
 				}
 			}
 			if (finalPlanModelId) {
 				const modelInfo = openRouterModels?.[finalPlanModelId]
 				if (modelInfo) {
-					stateManager.setGlobalState("planModeOpenRouterModelInfo", modelInfo)
+					config.planModeOpenRouterModelInfo = modelInfo
 				}
 			}
 		} else if (providerId === "vercel-ai-gateway" && controller) {
@@ -91,13 +129,13 @@ export async function applyProviderConfig(options: ApplyProviderConfigOptions): 
 			if (finalActModelId) {
 				const modelInfo = vercelModels?.[finalActModelId]
 				if (modelInfo) {
-					stateManager.setGlobalState("actModeVercelAiGatewayModelInfo", modelInfo)
+					config.actModeVercelAiGatewayModelInfo = modelInfo
 				}
 			}
 			if (finalPlanModelId) {
 				const modelInfo = vercelModels?.[finalPlanModelId]
 				if (modelInfo) {
-					stateManager.setGlobalState("planModeVercelAiGatewayModelInfo", modelInfo)
+					config.planModeVercelAiGatewayModelInfo = modelInfo
 				}
 			}
 		}
@@ -137,16 +175,18 @@ export async function applyProviderConfig(options: ApplyProviderConfigOptions): 
 	}
 
 	const candidateConfiguration = { ...stateManager.getApiConfiguration(), ...config }
-	const candidateHandler = controller ? buildCandidateApiHandler(controller, candidateConfiguration) : undefined
-
-	// Save via StateManager
-	stateManager.setApiConfiguration(config)
-	await stateManager.flushPendingState()
-
-	// Rebuild API handler on active task if one exists
-	if (controller?.task && candidateHandler) {
-		controller.task.setApiHandler(candidateHandler)
+	if (controller) {
+		await applyApiConfigurationTransaction(
+			controller,
+			candidateConfiguration,
+			async () => persistProviderConfigurationWithRollback(stateManager, config),
+			undefined,
+			config,
+		)
 		await controller.postStateToWebview()
+	} else {
+		stateManager.setApiConfiguration(config as Record<string, string>)
+		await stateManager.flushPendingState()
 	}
 }
 
@@ -264,14 +304,17 @@ export async function applyBedrockConfig(options: ApplyBedrockConfigOptions): Pr
 	if (bedrockConfig.awsSessionToken) config.awsSessionToken = bedrockConfig.awsSessionToken
 
 	const candidateConfiguration = { ...stateManager.getApiConfiguration(), ...config }
-	const candidateHandler = controller ? buildCandidateApiHandler(controller, candidateConfiguration) : undefined
-
-	// Save via StateManager
-	stateManager.setApiConfiguration(config as Record<string, string>)
-	await stateManager.flushPendingState()
-
-	// Rebuild API handler on active task if one exists
-	if (controller?.task && candidateHandler) controller.task.setApiHandler(candidateHandler)
-
-	await controller?.postStateToWebview()
+	if (controller) {
+		await applyApiConfigurationTransaction(
+			controller,
+			candidateConfiguration,
+			async () => persistProviderConfigurationWithRollback(stateManager, config),
+			undefined,
+			config,
+		)
+		await controller.postStateToWebview()
+	} else {
+		stateManager.setApiConfiguration(config as Record<string, string>)
+		await stateManager.flushPendingState()
+	}
 }

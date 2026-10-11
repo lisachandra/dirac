@@ -1,5 +1,3 @@
-import { useChatStore } from "@/features/chat/store/chatStore"
-
 import { useMount } from "react-use"
 import { InteractionStateProvider } from "@/features/modular-ui/chat/context/InteractionStateContext"
 import { ModularChatView } from "@/features/modular-ui/chat/ModularChatView"
@@ -12,8 +10,7 @@ import { useChatState } from "@/features/modular-ui/chat/hooks/useChatState"
 // ChatViewProps is now imported from types/chatTypes
 
 const ChatViewContent = ({ isHidden, showAnnouncement, hideAnnouncement, showHistoryView }: ChatViewProps) => {
-	const messages = useChatStore((state) => state.diracMessages)
-	const chatState = useChatState(messages)
+	const chatState = useChatState()
 	const { textAreaRef } = chatState
 
 	useMount(() => {

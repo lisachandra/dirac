@@ -1,6 +1,7 @@
 import { ModelInfo } from "@shared/api"
-import { normalizeOpenaiReasoningEffort } from "@shared/storage/types"
-import { calculateApiCostOpenAI } from "@utils/cost"
+import type { InferenceSpeed } from "@shared/storage/types"
+import { normalizeInferenceSpeed, normalizeOpenaiReasoningEffort } from "@shared/storage/types"
+import { calculateApiCostOpenAI, getModelInfoForInferenceSpeed } from "@utils/cost"
 import OpenAI from "openai"
 import { ChatCompletionReasoningEffort, ChatCompletionTool } from "openai/resources/chat/completions"
 import { MessageEvent as UndiciMessageEvent, WebSocket as UndiciWebSocket } from "undici"
@@ -16,6 +17,28 @@ interface WebSearchChatTool {
 	external_web_access?: boolean
 }
 
+export type OpenAIServiceTier = "default" | "fast" | "priority"
+
+export function getOpenAIServiceTier(
+	speed?: InferenceSpeed,
+	fastTier: "fast" | "priority" = "fast",
+): OpenAIServiceTier | undefined {
+	switch (normalizeInferenceSpeed(speed)) {
+		case "fast":
+			return fastTier
+		case "standard":
+			return "default"
+		case "default":
+			return undefined
+	}
+}
+
+export function normalizeOpenAIServiceTier(serviceTier: unknown): InferenceSpeed | undefined {
+	if (serviceTier === "fast" || serviceTier === "priority") return "fast"
+	if (serviceTier === "default") return "standard"
+	return undefined
+}
+
 function isWebSearchTool(tool: ChatCompletionTool | WebSearchChatTool): tool is WebSearchChatTool {
 	return tool.type === "web_search"
 }
@@ -27,27 +50,34 @@ export interface ResponsesWebsocketOptions {
 	extraHeaders?: Record<string, string>
 }
 
-export async function* yieldUsage(info: ModelInfo, usage: any, id?: string): AsyncGenerator<any> {
+export async function* yieldUsage(info: ModelInfo, usage: any, id?: string, serviceTier?: unknown): AsyncGenerator<any> {
 	if (!usage) return
 	const inputTokens = usage.input_tokens || 0
 	const outputTokens = usage.output_tokens || 0
 	const cacheReadTokens = usage.input_tokens_details?.cached_tokens || 0
 	const cacheWriteTokens = usage.input_tokens_details?.cache_creation_tokens || 0
 	const reasoningTokens = usage.output_tokens_details?.reasoning_tokens || 0
-	const totalTokens = usage.total_tokens || 0
+	const inferenceSpeed = normalizeOpenAIServiceTier(serviceTier)
 
-	const totalCost = calculateApiCostOpenAI(info, inputTokens, outputTokens, cacheWriteTokens, cacheReadTokens)
+	const totalCost = calculateApiCostOpenAI(
+		getModelInfoForInferenceSpeed(info, inferenceSpeed),
+		inputTokens,
+		outputTokens,
+		cacheWriteTokens,
+		cacheReadTokens,
+	)
 
 	const nonCachedInputTokens = Math.max(0, inputTokens - cacheReadTokens - cacheWriteTokens)
 
 	yield {
 		type: "usage",
 		inputTokens: nonCachedInputTokens,
-		outputTokens: outputTokens,
-		cacheWriteTokens: cacheWriteTokens,
-		cacheReadTokens: cacheReadTokens,
-		reasoningTokens: reasoningTokens,
-		totalCost: totalCost,
+		outputTokens,
+		cacheWriteTokens,
+		cacheReadTokens,
+		reasoningTokens,
+		totalCost,
+		...(inferenceSpeed ? { inferenceSpeed } : {}),
 		...(id ? { id } : {}),
 	}
 }
@@ -90,16 +120,17 @@ export function buildResponseCreateParams(args: {
 	store?: boolean
 	enableParallelToolCalling?: boolean
 	reasoningContext?: "all_turns"
+	serviceTier?: OpenAIServiceTier
 }): OpenAI.Responses.ResponseCreateParamsStreaming {
 	const requestedEffort = normalizeOpenaiReasoningEffort(args.reasoningEffort)
 	const reasoning: { effort?: ChatCompletionReasoningEffort; summary: "auto"; context?: "all_turns" } | undefined =
 		requestedEffort === "none" && !args.reasoningContext
 			? undefined
 			: {
-				summary: "auto",
-				...(requestedEffort !== "none" ? { effort: requestedEffort as ChatCompletionReasoningEffort } : {}),
-				...(args.reasoningContext ? { context: args.reasoningContext } : {}),
-			}
+					summary: "auto",
+					...(requestedEffort !== "none" ? { effort: requestedEffort as ChatCompletionReasoningEffort } : {}),
+					...(args.reasoningContext ? { context: args.reasoningContext } : {}),
+				}
 
 	return {
 		model: args.modelId,
@@ -107,13 +138,14 @@ export function buildResponseCreateParams(args: {
 		input: args.input,
 		stream: true,
 		tools: args.tools,
+		...(args.serviceTier ? { service_tier: args.serviceTier } : {}),
 		...(args.tools.length > 0 && args.enableParallelToolCalling !== undefined
 			? { parallel_tool_calls: args.enableParallelToolCalling }
 			: {}),
 		...(args.store !== undefined ? { store: args.store } : { store: !args.previousResponseId }),
 		...(args.previousResponseId ? { previous_response_id: args.previousResponseId } : {}),
 		...(reasoning ? { reasoning: reasoning as any } : {}),
-	}
+	} as OpenAI.Responses.ResponseCreateParamsStreaming
 }
 
 export async function* parseSseResponse(body: ReadableStream<Uint8Array>): AsyncIterable<any> {
@@ -226,7 +258,9 @@ async function* processResponseEvent(
 		}
 		case "response.completed":
 			options.onResponseCompleted?.(chunk.response)
-			if (chunk.response?.usage) yield* yieldUsage(modelInfo, chunk.response.usage, chunk.response.id)
+			if (chunk.response?.usage) {
+				yield* yieldUsage(modelInfo, chunk.response.usage, chunk.response.id, chunk.response.service_tier)
+			}
 			break
 		case "error": {
 			const errMsg = chunk.message || chunk.error?.message || "Unknown API error"
@@ -247,10 +281,7 @@ async function* processResponseEvent(
 }
 
 // Handles response.output_item.added: function_call, reasoning (redacted), web_search_call.
-function* handleOutputItemAdded(
-	item: any,
-	functionCallByItemId: Map<string, FunctionCallStreamState>,
-): Generator<any> {
+function* handleOutputItemAdded(item: any, functionCallByItemId: Map<string, FunctionCallStreamState>): Generator<any> {
 	if (item.type === "function_call" && item.id) {
 		functionCallByItemId.set(item.id, {
 			call_id: item.call_id,
@@ -273,10 +304,7 @@ function* handleOutputItemAdded(
 }
 
 // Handles response.output_item.done: function_call (final), reasoning (summary).
-function* handleOutputItemDone(
-	item: any,
-	functionCallByItemId: Map<string, FunctionCallStreamState>,
-): Generator<any> {
+function* handleOutputItemDone(item: any, functionCallByItemId: Map<string, FunctionCallStreamState>): Generator<any> {
 	if (item.type === "function_call") {
 		const pendingCall = item.id ? functionCallByItemId.get(item.id) : undefined
 		if (!pendingCall || (!pendingCall.didEmitArgumentContent && item.arguments)) {
@@ -333,7 +361,7 @@ export class ResponsesWebsocketManager {
 	private readyPromise: Promise<UndiciWebSocket> | undefined
 	private requestInFlight = false
 
-	constructor(private options: ResponsesWebsocketOptions) { }
+	constructor(private options: ResponsesWebsocketOptions) {}
 
 	async ensureWebsocket(): Promise<UndiciWebSocket> {
 		if (this.ws && this.ws.readyState === UndiciWebSocket.OPEN) {

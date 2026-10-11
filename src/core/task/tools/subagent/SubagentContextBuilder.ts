@@ -10,7 +10,7 @@ import { HostRegistryInfo } from "@/registry"
 import type { DiscoveredTool } from "../discovery/DiscoveredTool"
 import { ToolRegistry } from "../registry/ToolRegistry"
 import { ToolExecutorCoordinator } from "../ToolExecutorCoordinator"
-import type { TaskConfig } from "../types/TaskConfig"
+import type { SubagentRuntime, TaskConfig } from "../types/TaskConfig"
 import { SubagentBuilder } from "./SubagentBuilder"
 
 // Builds the system prompt context and tool request snapshot for subagent runs.
@@ -19,8 +19,8 @@ export class SubagentContextBuilder {
 		private baseConfig: TaskConfig,
 		private agent: SubagentBuilder,
 		private allowedTools: string[],
-		private apiHandler: any,
-	) {}
+		private runtime: SubagentRuntime,
+	) { }
 
 	// Builds the full system prompt context for the subagent run.
 	async buildContext(): Promise<{
@@ -29,16 +29,16 @@ export class SubagentContextBuilder {
 		requestSnapshot: ToolRequestSnapshot
 		useNativeToolCalls: boolean
 	}> {
-		const mode = this.baseConfig.services.stateManager.getGlobalSettingsKey("mode")
-		const api = this.apiHandler
+		const mode = this.baseConfig.mode
+		const runtime = this.runtime
 		const providerId = this.agent.getProviderId()
 		const providerInfo = {
 			providerId,
 			phone: undefined,
-			model: api.getModel(),
+			model: structuredClone(runtime.model) as any,
 			mode,
-			customPrompt: this.baseConfig.services.stateManager.getGlobalSettingsKey("customPrompt"),
-			supportsNativeWebSearch: api.supportsNativeWebSearch?.() === true,
+			customPrompt: this.baseConfig.customPrompt,
+			supportsNativeWebSearch: runtime.supportsNativeWebSearch,
 		}
 		const host = HostRegistryInfo.get()
 		const availableSkills = await getOrDiscoverSkills(this.baseConfig.cwd, this.baseConfig.taskState)
@@ -53,14 +53,14 @@ export class SubagentContextBuilder {
 			skills,
 			browserSettings: this.baseConfig.browserSettings,
 			yoloModeToggled: false,
-			enableParallelToolCalling: false,
+			lowVerbosityEnabled: this.baseConfig.lowVerbosityEnabled,
 			isSubagentRun: true,
 			isMultiRootEnabled: this.baseConfig.isMultiRootEnabled,
 			workspaceRoots: this.baseConfig.workspaceManager
 				?.getRoots()
 				.map((root) => ({ path: root.path, name: root.name || path.basename(root.path), vcs: root.vcs })),
 		}
-		const requestSnapshot = this.buildSubagentRequestSnapshot(context)
+		const requestSnapshot = await this.buildSubagentRequestSnapshot(context)
 		const promptRegistry = PromptRegistry.getInstance()
 		const generatedSystemPrompt = await promptRegistry.get(context, requestSnapshot)
 		const systemPrompt = this.agent.buildSystemPrompt(generatedSystemPrompt)
@@ -87,12 +87,17 @@ export class SubagentContextBuilder {
 			.filter((skill): skill is any => Boolean(skill))
 	}
 
-	buildSubagentRequestSnapshot(context: SystemPromptContext): ToolRequestSnapshot {
-		const parentTools =
-			this.baseConfig.activeToolSnapshot?.inventoryEnabledTools ?? ToolRegistry.getInstance().getEnabledTools()
-		const activeSkillIds = new Set(this.baseConfig.taskState.activeSkillIds)
+	async buildSubagentRequestSnapshot(context: SystemPromptContext): Promise<ToolRequestSnapshot> {
+		const parentSnapshot = this.baseConfig.activeToolSnapshot
+		const workspaceRoot = this.baseConfig.workspaceManager?.getPrimaryRoot()?.path
+		const activeSkillIds = new Set(parentSnapshot?.activeSkillIds ?? this.baseConfig.taskState.activeSkillIds)
 		const activeSkills = this.baseConfig.taskState.availableSkills.filter((skill) => activeSkillIds.has(skill.name))
-		const skillTools = ToolRegistry.getInstance().resolveSkillDependencyTools(activeSkills)
+		const { parentTools, skillTools } = parentSnapshot
+			? { parentTools: parentSnapshot.inventoryEnabledTools, skillTools: [] as DiscoveredTool[] }
+			: await ToolRegistry.withExclusiveAccess((registry) => ({
+				parentTools: registry.getEnabledTools(this.baseConfig.taskId, workspaceRoot),
+				skillTools: registry.resolveSkillDependencyTools(activeSkills, this.baseConfig.taskId, workspaceRoot),
+			}))
 		const enabledTools = this.mergeTools(parentTools, skillTools)
 		const registry = ToolRegistry.getInstance()
 		const allowedEnabledTools = enabledTools
@@ -123,7 +128,7 @@ export class SubagentContextBuilder {
 		return [...tools.values()]
 	}
 	private buildSubagentCoordinator(enabledTools: DiscoveredTool[]): ToolExecutorCoordinator {
-		const coordinator = new ToolExecutorCoordinator()
+		const coordinator = this.baseConfig.coordinator.createEmptySibling()
 		for (const tool of enabledTools) coordinator.registerModularTool(tool.factory(this.baseConfig))
 		return coordinator
 	}

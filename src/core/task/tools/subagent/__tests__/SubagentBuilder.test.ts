@@ -1,5 +1,4 @@
 import { strict as assert } from "node:assert"
-import * as api from "@core/api"
 import type { TaskConfig } from "@core/task/tools/types/TaskConfig"
 import { RESPOND_TOOL_NAME, ResponseOperation } from "@shared/responseTool"
 import { afterEach, describe, it } from "mocha"
@@ -14,22 +13,27 @@ import {
 } from "../SubagentBuilder"
 
 function createTaskConfig(mode: "act" | "plan", provider: string): TaskConfig {
+	const apiHandler = { getModel: sinon.stub(), createMessage: sinon.stub() }
 	return {
 		ulid: "ulid-123",
-		services: {
-			stateManager: {
-				getGlobalSettingsKey: (key: string) => (key === "mode" ? mode : undefined),
-				getApiConfiguration: () => ({
-					actModeApiProvider: provider,
-					planModeApiProvider: provider,
-					actModeApiModelId: "act-default",
-					planModeApiModelId: "plan-default",
-					actModeOpenAiModelId: "openai-act-default",
-					planModeOpenRouterModelId: "openrouter-plan-default",
-				}),
-			},
+		mode,
+		providerId: provider,
+		callbacks: {
+			createSubagentRuntime: sinon
+				.stub()
+				.callsFake((options: { modelId?: string; utilityModelSelection?: { provider: string } }) => ({
+					providerId: options.utilityModelSelection?.provider ?? provider,
+					model: { id: "test-model", info: {} },
+					supportsNativeWebSearch: false,
+					createMessage: apiHandler.createMessage,
+					abort: sinon.stub(),
+				}))
 		},
 	} as unknown as TaskConfig
+}
+
+function createRuntimeStub(config: TaskConfig): sinon.SinonStub {
+	return config.callbacks.createSubagentRuntime as sinon.SinonStub
 }
 
 describe("SubagentBuilder", () => {
@@ -42,26 +46,23 @@ describe("SubagentBuilder", () => {
 			getCachedConfig: (subagentName?: string) =>
 				subagentName === "cached-agent"
 					? {
-							name: "cached-agent",
-							description: "cached description",
-							tools: [DiracDefaultTool.LIST_FILES],
-							modelId: "gpt-5",
-							systemPrompt: "cached system prompt",
-						}
+						name: "cached-agent",
+						description: "cached description",
+						tools: [DiracDefaultTool.LIST_FILES],
+						modelId: "gpt-5",
+						systemPrompt: "cached system prompt",
+					}
 					: undefined,
 		} as unknown as AgentConfigLoader)
 
-		const fakeHandler = { getModel: sinon.stub(), createMessage: sinon.stub() }
-		const buildApiHandlerStub = sinon.stub(api, "buildApiHandler").returns(fakeHandler as never)
+		const config = createTaskConfig("act", "openai")
+		const builder = new SubagentBuilder(config, "cached-agent")
 
-		const builder = new SubagentBuilder(createTaskConfig("act", "openai"), "cached-agent")
-
-		assert.equal(buildApiHandlerStub.callCount, 1)
-		const [effectiveApiConfig, selectedMode] = buildApiHandlerStub.firstCall.args
-		assert.equal(selectedMode, "act")
-		assert.equal((effectiveApiConfig as Record<string, unknown>).ulid, "ulid-123")
-		assert.equal((effectiveApiConfig as Record<string, unknown>).actModeOpenAiModelId, "gpt-5")
-		assert.equal((effectiveApiConfig as Record<string, unknown>).actModeApiModelId, "act-default")
+		sinon.assert.calledOnceWithExactly(createRuntimeStub(config), {
+			modelId: "gpt-5",
+			utilityModelSelection: undefined,
+		})
+		assert.equal(builder.getProviderId(), "openai")
 
 		assert.deepEqual(builder.getAllowedTools(), [
 			DiracDefaultTool.LIST_FILES,
@@ -83,8 +84,12 @@ describe("SubagentBuilder", () => {
 			getCachedConfig: () => undefined,
 		} as unknown as AgentConfigLoader)
 
-		sinon.stub(api, "buildApiHandler").returns({ getModel: sinon.stub(), createMessage: sinon.stub() } as never)
-		const builder = new SubagentBuilder(createTaskConfig("act", "anthropic"))
+		const config = createTaskConfig("act", "anthropic")
+		const builder = new SubagentBuilder(config)
+		sinon.assert.calledOnceWithExactly(createRuntimeStub(config), {
+			modelId: undefined,
+			utilityModelSelection: undefined,
+		})
 
 		assert.deepEqual(builder.getAllowedTools(), SUBAGENT_DEFAULT_ALLOWED_TOOLS)
 		assert.equal(builder.getAllowedTools().includes(DiracDefaultTool.NEW_TASK), false)
@@ -97,27 +102,22 @@ describe("SubagentBuilder", () => {
 			getCachedConfig: (subagentName?: string) =>
 				subagentName === "openrouter-agent"
 					? {
-							name: "openrouter-agent",
-							description: "openrouter plan agent",
-							tools: [DiracDefaultTool.FILE_READ],
-							modelId: "openrouter/custom-model",
-							systemPrompt: "plan system",
-						}
+						name: "openrouter-agent",
+						description: "openrouter plan agent",
+						tools: [DiracDefaultTool.FILE_READ],
+						modelId: "openrouter/custom-model",
+						systemPrompt: "plan system",
+					}
 					: undefined,
 		} as unknown as AgentConfigLoader)
 
-		const buildApiHandlerStub = sinon.stub(api, "buildApiHandler").returns({
-			getModel: sinon.stub(),
-			createMessage: sinon.stub(),
-		} as never)
+		const config = createTaskConfig("plan", "openrouter")
+		new SubagentBuilder(config, "openrouter-agent")
 
-		new SubagentBuilder(createTaskConfig("plan", "openrouter"), "openrouter-agent")
-
-		const [effectiveApiConfig, selectedMode] = buildApiHandlerStub.firstCall.args
-		assert.equal(selectedMode, "plan")
-		assert.equal((effectiveApiConfig as Record<string, unknown>).planModeOpenRouterModelId, "openrouter/custom-model")
-		assert.equal((effectiveApiConfig as Record<string, unknown>).planModeApiModelId, "plan-default")
-		assert.equal((effectiveApiConfig as Record<string, unknown>).actModeApiModelId, "act-default")
+		sinon.assert.calledOnceWithExactly(createRuntimeStub(config), {
+			modelId: "openrouter/custom-model",
+			utilityModelSelection: undefined,
+		})
 	})
 
 	it("supports explicit runtime tool allowlist and system suffix overrides", () => {
@@ -129,8 +129,6 @@ describe("SubagentBuilder", () => {
 				systemPrompt: "configured system",
 			}),
 		} as unknown as AgentConfigLoader)
-		sinon.stub(api, "buildApiHandler").returns({ getModel: sinon.stub(), createMessage: sinon.stub() } as never)
-
 		const builder = new SubagentBuilder(createTaskConfig("act", "anthropic"), "configured-agent", {
 			allowedTools: [],
 			systemSuffix: "\n\n# Custom Builder Mode",
@@ -156,22 +154,15 @@ describe("SubagentBuilder", () => {
 				systemPrompt: "configured system",
 			}),
 		} as unknown as AgentConfigLoader)
-		const fakeHandler = { getModel: sinon.stub(), createMessage: sinon.stub() }
-		const buildApiHandlerStub = sinon.stub(api, "buildApiHandler")
-		const buildUtilityHandlerStub = sinon.stub(api, "buildApiHandlerForSelection").returns(fakeHandler as never)
 		const utilityModelSelection = { provider: "openrouter" as const, modelId: "utility/model" }
 		const config = createTaskConfig("act", "openai")
 
 		const builder = new SubagentBuilder(config, "configured-agent", { utilityModelSelection })
 
-		sinon.assert.notCalled(buildApiHandlerStub)
-		sinon.assert.calledOnceWithExactly(
-			buildUtilityHandlerStub,
-			config.services.stateManager.getApiConfiguration(),
+		sinon.assert.calledOnceWithExactly(createRuntimeStub(config), {
+			modelId: "primary-provider-override",
 			utilityModelSelection,
-			{ ulid: "ulid-123" },
-		)
-		assert.equal(builder.getApiHandler(), fakeHandler)
+		})
 		assert.equal(builder.getProviderId(), "openrouter")
 		assert.deepEqual(builder.getAllowedTools(), [
 			DiracDefaultTool.LIST_FILES,

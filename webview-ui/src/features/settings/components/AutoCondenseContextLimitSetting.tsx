@@ -31,7 +31,7 @@ export const AutoCondenseContextLimitSetting = ({ providerId }: AutoCondenseCont
 			<label
 				htmlFor={`auto-condense-context-limit-${providerId}`}
 				style={{ display: "block", fontWeight: 500, marginBottom: 5 }}>
-				Auto-condense conversation at
+				Condense threshold
 			</label>
 			<div style={{ display: "flex", alignItems: "center", gap: 8 }}>
 				<VSCodeTextField
@@ -50,7 +50,7 @@ export const AutoCondenseContextLimitSetting = ({ providerId }: AutoCondenseCont
 			<p className="text-xs text-description" style={{ margin: "5px 0 0" }}>
 				{useAutoCondense
 					? "Conversation history is condensed at this provider-specific limit. Models with smaller context windows may condense sooner."
-					: "Enable Auto Compact in Feature settings to use this provider-specific limit."}
+					: "Enable Auto-condense conversations above to use this provider-specific limit."}
 			</p>
 		</div>
 	)

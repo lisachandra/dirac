@@ -9,6 +9,10 @@ import { WorkspacePathAdapter } from "../../../../workspace/WorkspacePathAdapter
 import { IDiracTool } from "../../interfaces/IDiracTool"
 import { IToolEnvironment } from "../../interfaces/IToolEnvironment"
 import { SurfaceType } from "../../interfaces/SurfaceType"
+import { ToolExecutionDeadline, ToolTimeoutError } from "../../runtime/ToolExecutionDeadline"
+import { presentToolTimeout } from "../../runtime/ToolTimeoutPresentation"
+
+const SEARCHABLE_NODE_MODULE_SCOPES = ["@nrbx", "@rbxts", "@rbxts-js", "@lisachandra", "@isentinel", "@flamework"]
 
 const SEARCHABLE_NODE_MODULE_SCOPES = ["@nrbx", "@rbxts", "@rbxts-js", "@lisachandra", "@isentinel", "@flamework"]
 
@@ -86,6 +90,8 @@ export class SearchFilesTool implements IDiracTool<SearchFilesArgs, string> {
 	async processCall(args: SearchFilesArgs, env: IToolEnvironment): Promise<string> {
 		const { paths, regex, file_pattern, context_lines } = args
 		const includeAnchors = args.include_anchors === true
+		const cancellationSignal = env.orchestration.getTaskState("abortSignal")
+		const deadline = new ToolExecutionDeadline(this.spec().name, { cancellationSignal })
 		if (!paths || paths.length === 0) {
 			env.orchestration.setTaskState(
 				"consecutiveMistakeCount",
@@ -100,7 +106,13 @@ export class SearchFilesTool implements IDiracTool<SearchFilesArgs, string> {
 			)
 			return `Error: Missing required parameter: regex`
 		}
-		const contextLines = typeof context_lines === "string" ? Number.parseInt(context_lines, 10) : context_lines
+		// Clamp to a valid 0..10 integer; NaN/Infinity fall back to the default (undefined)
+		const parsedContextLines =
+			typeof context_lines === "string" ? Number.parseInt(context_lines, 10) : (context_lines as number | undefined)
+		const contextLines =
+			parsedContextLines !== undefined && Number.isFinite(parsedContextLines)
+				? Math.max(0, Math.min(10, Math.trunc(parsedContextLines)))
+				: undefined
 		const headerPath = paths.length === 1 ? paths[0] : `${paths[0]} (+${paths.length - 1} more)`
 		const isSubagent = env.config.isSubagentExecution
 		const card = !isSubagent
@@ -113,7 +125,7 @@ export class SearchFilesTool implements IDiracTool<SearchFilesArgs, string> {
 
 		try {
 			// 1. Resolve paths
-			const { allSearchPaths, anyUsedWorkspaceHint } = await this.resolveSearchPaths(paths, env)
+			const { allSearchPaths, anyUsedWorkspaceHint } = await this.resolveSearchPaths(paths, env, deadline)
 
 			// 2. Execute search
 			const { searchResults, searchDurationMs } = await this.executeSearch(
@@ -124,6 +136,7 @@ export class SearchFilesTool implements IDiracTool<SearchFilesArgs, string> {
 				env,
 				card,
 				includeAnchors,
+				deadline,
 			)
 
 			// 3. Surface total failures before formatting. Empty successful searches are
@@ -164,7 +177,23 @@ export class SearchFilesTool implements IDiracTool<SearchFilesArgs, string> {
 
 			return finalResult
 		} catch (error) {
+			if (error instanceof ToolTimeoutError) {
+				return await presentToolTimeout(env, error, card ? [card] : [])
+			}
 			const errorMessage = getErrorMessage(error)
+			if (cancellationSignal.aborted) {
+				if (card) {
+					await card.update({
+						header: `Cancelled search for '${regex}'`,
+						status: CardStatus.CANCELLED,
+						body: "Search cancelled.",
+						rawOutput: { error: errorMessage, outcome: "cancelled" },
+						outcome: "cancelled",
+					})
+					await card.finalize(CardStatus.CANCELLED)
+				}
+				throw error
+			}
 			if (card) {
 				await card.update({
 					status: CardStatus.ERROR,
@@ -176,7 +205,7 @@ export class SearchFilesTool implements IDiracTool<SearchFilesArgs, string> {
 		}
 	}
 
-	private async resolveSearchPaths(paths: string[], env: IToolEnvironment) {
+	private async resolveSearchPaths(paths: string[], env: IToolEnvironment, deadline: ToolExecutionDeadline) {
 		const allSearchPaths: Array<{ absolutePath: string; workspaceName?: string; workspaceRoot?: string }> = []
 		let anyUsedWorkspaceHint = false
 
@@ -209,7 +238,8 @@ export class SearchFilesTool implements IDiracTool<SearchFilesArgs, string> {
 					})
 				}
 			} else {
-				const { absolutePath } = await env.workspace.resolvePath(relPath)
+				const { absolutePath } = await deadline.run(`resolving ${relPath}`, async () =>
+					await env.workspace.resolvePath(relPath))
 				allSearchPaths.push({ absolutePath, workspaceRoot: env.config.cwd })
 			}
 		}
@@ -262,8 +292,10 @@ export class SearchFilesTool implements IDiracTool<SearchFilesArgs, string> {
 		env: IToolEnvironment,
 		card: any,
 		includeAnchors: boolean,
+		deadline: ToolExecutionDeadline,
 	): Promise<{ searchResults: SearchExecutionResult[]; searchDurationMs: number }> {
 		const searchStartTime = Date.now()
+		const cancellationSignal = env.orchestration.getTaskState("abortSignal")
 		const effectiveSearchPaths = allSearchPaths.flatMap((info) => this.expandNodeModuleSearchPaths(info))
 		if (effectiveSearchPaths.length === 0) {
 			const fallbackPath = allSearchPaths[0]?.absolutePath || ""
@@ -287,8 +319,9 @@ export class SearchFilesTool implements IDiracTool<SearchFilesArgs, string> {
 			// Check if directory exists before searching.
 			// Non-existent paths are a valid user input, not a tool error.
 			try {
-				await fs.access(absolutePath)
-			} catch {
+				await deadline.run(`checking ${absolutePath}`, async () => await fs.access(absolutePath))
+			} catch (error) {
+				if (error instanceof ToolTimeoutError || cancellationSignal.aborted) throw error
 				return {
 					absolutePath,
 					workspaceName,
@@ -298,14 +331,17 @@ export class SearchFilesTool implements IDiracTool<SearchFilesArgs, string> {
 				}
 			}
 			try {
-				const results = await env.system.searchFiles(absolutePath, regex, {
-					filePattern: filePattern,
-					contextLines,
-					excludeFilePatterns: ["!.*", "!**/.*"],
-					includeAnchors,
-					noIgnore: searchIgnored === true,
-					allowedNodeModuleScopes: searchIgnored === true ? SEARCHABLE_NODE_MODULE_SCOPES : undefined,
-				})
+				const results = await deadline.run(`searching ${absolutePath}`, async (signal) =>
+					await env.system.searchFiles(absolutePath, regex, {
+						filePattern: filePattern,
+						contextLines,
+						excludeFilePatterns: ["!.*", "!**/.*"],
+						includeAnchors,
+						signal,
+						noIgnore: searchIgnored === true,
+						allowedNodeModuleScopes: searchIgnored === true ? SEARCHABLE_NODE_MODULE_SCOPES : undefined,
+					}),
+				)
 
 				const firstLine = results.split("\n")[0]
 
@@ -325,6 +361,7 @@ export class SearchFilesTool implements IDiracTool<SearchFilesArgs, string> {
 					success: true,
 				}
 			} catch (error) {
+				if (error instanceof ToolTimeoutError || cancellationSignal.aborted) throw error
 				const errorMessage = getErrorMessage(error)
 				if (card) {
 					await card.appendBody(`❌ Search failed in ${workspaceName || absolutePath}: ${errorMessage}\n`)

@@ -17,7 +17,7 @@ describe("GeminiHandler", () => {
 		},
 	})
 
-	it("caps maxOutputTokens to 32768 for Flash models", async () => {
+	it("sets maxOutputTokens to the model's maxTokens for Flash models", async () => {
 		const handler = new GeminiHandler({
 			geminiApiKey: "test-api-key",
 			apiModelId: TEST_MODEL_IDS.GEMINI_FLASH,
@@ -44,8 +44,9 @@ describe("GeminiHandler", () => {
 			// Consume stream to trigger request execution.
 		}
 
+		const { info } = handler.getModel()
 		const requestArgs = generateContentStream.firstCall.args[0] as Record<string, any>
-		requestArgs.config.should.have.property("maxOutputTokens", 32_768)
+		requestArgs.config.should.have.property("maxOutputTokens", info.maxTokens)
 	})
 
 	it("sets maxOutputTokens for non-Flash models", async () => {
@@ -75,8 +76,9 @@ describe("GeminiHandler", () => {
 			// Consume stream to trigger request execution.
 		}
 
+		const { info } = handler.getModel()
 		const requestArgs = generateContentStream.firstCall.args[0] as Record<string, any>
-		requestArgs.config.should.have.property("maxOutputTokens", 32_768)
+		requestArgs.config.should.have.property("maxOutputTokens", info.maxTokens)
 	})
 
 	it("aborts a stalled generation request", async () => {
@@ -95,6 +97,7 @@ describe("GeminiHandler", () => {
 			[Symbol.asyncIterator]()
 			.next()
 
+		await new Promise((resolve) => setImmediate(resolve))
 		sinon.assert.calledOnce(generateContentStream)
 		handler.abort()
 

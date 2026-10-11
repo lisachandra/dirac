@@ -11,6 +11,7 @@ import OpenAI from "openai"
 import type { ChatCompletionTool as OpenAITool } from "openai/resources/chat/completions"
 import { DiracStorageMessage } from "@/shared/messages/content"
 import { createOpenAIClient } from "@/shared/net"
+import { resolveReasoningEffortForModel } from "@/shared/utils/reasoning-support"
 import { version as extensionVersion } from "../../../../package.json"
 import { ApiHandler, CommonApiHandlerOptions } from ".."
 import { withRetry } from "../retry"
@@ -22,7 +23,7 @@ interface ZAiHandlerOptions extends CommonApiHandlerOptions {
 	zaiApiLine?: string
 	zaiApiKey?: string
 	apiModelId?: string
-	thinkingBudgetTokens?: number
+	reasoningEffort?: string
 }
 
 export class ZAiHandler implements ApiHandler {
@@ -101,23 +102,22 @@ export class ZAiHandler implements ApiHandler {
 			...convertToOpenAiMessages(messages, undefined, this.getModel().info.supportsImages !== false),
 		]
 
-		const thinkingBudgetTokens = this.options.thinkingBudgetTokens || 0
-
+		const reasoningEffort = resolveReasoningEffortForModel(model.id, model.info, this.options.reasoningEffort)
+		const reasoningParams = reasoningEffort
+			? {
+					thinking: { type: "enabled" },
+					reasoning_effort: reasoningEffort,
+				}
+			: {}
 		const stream = (await client.chat.completions.create(
 			{
 				model: model.id,
 				max_tokens: model.info.maxTokens,
 				messages: openAiMessages,
-				temperature: 0,
+				...(model.info.temperature !== undefined ? { temperature: model.info.temperature } : {}),
 				stream: true,
 				stream_options: { include_usage: true },
-				...(thinkingBudgetTokens > 0
-					? {
-							thinking: {
-								type: "enabled",
-							},
-						}
-					: {}),
+				...reasoningParams,
 				tool_stream: true,
 				...getOpenAIToolParams(tools),
 			} as any,

@@ -137,6 +137,16 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapabilities> = {
 		supportsImages: false,
 		supportsReasoning: true,
 	},
+	"deepseek-flash": {
+		maxTokens: 384_000,
+		contextWindow: 1_048_576,
+		supportsImages: true,
+		supportsReasoning: true,
+		supportsReasoningEffort: true,
+		reasoningEffortOptions: ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+		defaultReasoningEffort: "high",
+		supportsTools: true,
+	},
 	"doubao-1-5-pro-256k-250115": {
 		maxTokens: 12_288,
 		contextWindow: 256_000,
@@ -153,7 +163,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapabilities> = {
 		supportsImages: true,
 	},
 	"gemini-2.5-flash": {
-		maxTokens: 65536,
+		maxTokens: 65_536,
 		contextWindow: 1_048_576,
 		supportsImages: true,
 		thinkingConfig: {
@@ -169,7 +179,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapabilities> = {
 		},
 	},
 	"gemini-2.5-pro": {
-		maxTokens: 65536,
+		maxTokens: 65_536,
 		contextWindow: 1_048_576,
 		supportsImages: true,
 		thinkingConfig: {
@@ -177,12 +187,12 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapabilities> = {
 		},
 	},
 	"gemini-2.5-pro-exp-03-25": {
-		maxTokens: 65536,
+		maxTokens: 65_536,
 		contextWindow: 1_048_576,
 		supportsImages: true,
 	},
 	"gemini-3-flash-preview": {
-		maxTokens: 65536,
+		maxTokens: 65_536,
 		contextWindow: 1_048_576,
 		supportsImages: true,
 		supportsReasoning: true,
@@ -192,17 +202,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapabilities> = {
 		},
 	},
 	"gemini-3.5-flash": {
-		maxTokens: 65536,
-		contextWindow: 1_048_576,
-		supportsImages: true,
-		supportsReasoning: true,
-		thinkingConfig: {
-			geminiThinkingLevel: "high",
-			supportsThinkingLevel: true,
-		},
-	},
-	"gemini-3.6-flash": {
-		maxTokens: 65536,
+		maxTokens: 65_536,
 		contextWindow: 1_048_576,
 		supportsImages: true,
 		supportsReasoning: true,
@@ -212,7 +212,37 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapabilities> = {
 		},
 	},
 	"gemini-3.5-flash-lite": {
-		maxTokens: 65536,
+		maxTokens: 65_536,
+		contextWindow: 1_048_576,
+		supportsImages: true,
+		supportsReasoning: true,
+		thinkingConfig: {
+			geminiThinkingLevel: "high",
+			supportsThinkingLevel: true,
+		},
+	},
+	"gemini-3.6-flash": {
+		maxTokens: 65_536,
+		contextWindow: 1_048_576,
+		supportsImages: true,
+		supportsReasoning: true,
+		thinkingConfig: {
+			geminiThinkingLevel: "high",
+			supportsThinkingLevel: true,
+		},
+	},
+	"gemini-3.7-flash": {
+		maxTokens: 65_536,
+		contextWindow: 1_048_576,
+		supportsImages: true,
+		supportsReasoning: true,
+		thinkingConfig: {
+			geminiThinkingLevel: "medium",
+			supportsThinkingLevel: true,
+		},
+	},
+	"gemini-3.8-flash": {
+		maxTokens: 65_536,
 		contextWindow: 1_048_576,
 		supportsImages: true,
 		supportsReasoning: true,
@@ -222,7 +252,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapabilities> = {
 		},
 	},
 	"gemini-3-pro-preview": {
-		maxTokens: 8192,
+		maxTokens: 65_536,
 		contextWindow: 1_048_576,
 		supportsImages: true,
 		supportsReasoning: true,
@@ -232,7 +262,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapabilities> = {
 		},
 	},
 	"gemini-3.1-pro-preview": {
-		maxTokens: 8192,
+		maxTokens: 65_536,
 		contextWindow: 1_048_576,
 		supportsImages: true,
 		supportsReasoning: true,
@@ -250,9 +280,10 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapabilities> = {
 	},
 	"glm-5": {
 		supportsTools: true,
-		maxTokens: 8_192,
+		maxTokens: 128_000,
 		contextWindow: 200_000,
 		supportsImages: false,
+		supportsReasoning: true,
 	},
 	"glm-5.1": {
 		supportsTools: true,
@@ -260,9 +291,6 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapabilities> = {
 		contextWindow: 200_000,
 		supportsImages: false,
 		supportsReasoning: true,
-		thinkingConfig: {
-			maxBudget: 128_000,
-		},
 	},
 	"glm-5.2": {
 		supportsTools: true,
@@ -270,9 +298,26 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapabilities> = {
 		contextWindow: 1_000_000,
 		supportsImages: false,
 		supportsReasoning: true,
-		thinkingConfig: {
-			maxBudget: 128_000,
-		},
+	},
+	"glm-5.3": {
+		supportsTools: true,
+		maxTokens: 128_000,
+		contextWindow: 1_000_000,
+		supportsImages: false,
+		supportsReasoning: true,
+		supportsReasoningEffort: true,
+		reasoningEffortOptions: ["low", "high", "max"],
+		defaultReasoningEffort: "max",
+	},
+	"glm-5.3-flash": {
+		supportsTools: true,
+		maxTokens: 128_000,
+		contextWindow: 1_000_000,
+		supportsImages: true,
+		supportsReasoning: true,
+		supportsReasoningEffort: true,
+		reasoningEffortOptions: ["low", "high", "max"],
+		defaultReasoningEffort: "max",
 	},
 	"gpt-5.4": {
 		name: "GPT-5.4",
@@ -316,6 +361,13 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapabilities> = {
 		supportsImages: true,
 		supportsReasoning: true,
 	},
+	"gpt-6-astra": {
+		name: "GPT-6 Astra",
+		maxTokens: 128_000,
+		contextWindow: 1_000_000,
+		supportsImages: true,
+		supportsReasoning: true,
+	},
 	"gpt-5.6-terra": {
 		name: "GPT-5.6 Terra",
 		maxTokens: 128_000,
@@ -340,6 +392,14 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapabilities> = {
 		contextWindow: 128_000,
 		supportsImages: false,
 	},
+	"grok-4.6": {
+		contextWindow: 500_000,
+		supportsImages: true,
+		supportsReasoning: true,
+		supportsReasoningEffort: true,
+		supportsTools: true,
+	},
+
 	"grok-4-1-fast-non-reasoning": {
 		contextWindow: 2_000_000,
 		supportsImages: true,

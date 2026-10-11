@@ -1,39 +1,41 @@
-import { isValidAutoCondenseContextLimit } from "@shared/context-management"
-import { useCallback, useRef } from "react"
-import { StateManager } from "@/core/storage/StateManager"
-import { getProviderModelIdKey, ProviderToApiKeyMap, type UtilityModelUseCases } from "@shared/storage"
-import { openAiCodexOAuthManager } from "@/integrations/openai-codex/oauth"
-import { openAiCodexUsageService } from "@/integrations/openai-codex/OpenAiCodexUsageService"
-import { githubCopilotAuthManager } from "@/integrations/github-copilot/auth"
-import { applyProviderConfig, applyBedrockConfig } from "../../../utils/provider-config"
-import { normalizeReasoningEffort, nextReasoningEffort } from "../utils"
-import { FEATURE_SETTINGS, type FeatureKey } from "../constants"
-import { hasModelPicker, CUSTOM_MODEL_ID } from "../../ModelPicker"
-import { usesOpenRouterModels } from "../../../utils/openrouter-models"
-import { openExternal } from "@/utils/env"
-import { Logger } from "@/shared/services/Logger"
-import type { Controller } from "@/core/controller"
-import { SettingsItemType, SettingsNavigationDirection, type ListItem } from "../types"
-import { getNextSelectableSettingsIndex } from "../navigation"
 import type { AutoApprovalSettings } from "@shared/AutoApprovalSettings"
-import type { TelemetrySetting } from "@shared/TelemetrySetting"
-import type { OpenaiReasoningEffort } from "@shared/storage/types"
 import {
-	createModelProviderSelection,
 	type ApiProvider,
+	createModelProviderSelection,
 	type ModelInfo,
 	type ModelProviderPreset,
 	type ModelProviderSelection,
 } from "@shared/api"
-import type { ObjectEditorState } from "../../ConfigViewComponents"
-import type { BedrockConfig } from "../../BedrockSetup"
+import { isValidAutoCondenseContextLimit } from "@shared/context-management"
 import type { ToolMetadata } from "@shared/ExtensionMessage"
+import { getProviderModelIdKey, ProviderToApiKeyMap, type UtilityModelUseCases } from "@shared/storage"
+import { isOpenaiReasoningEffort, type OpenaiReasoningEffort } from "@shared/storage/types"
+import type { TelemetrySetting } from "@shared/TelemetrySetting"
+import { useCallback, useRef } from "react"
+import type { Controller } from "@/core/controller"
+import { StateManager } from "@/core/storage/StateManager"
+import type { TaskWorkingConfigurationPatch } from "@/core/task/runtime/TaskWorkingConfiguration"
 import { ToolRegistry } from "@/core/task/tools/registry/ToolRegistry"
+import { githubCopilotAuthManager } from "@/integrations/github-copilot/auth"
+import { openAiCodexUsageService } from "@/integrations/openai-codex/OpenAiCodexUsageService"
+import { openAiCodexOAuthManager } from "@/integrations/openai-codex/oauth"
+import { Logger } from "@/shared/services/Logger"
+import { openExternal } from "@/utils/env"
+import { applyBedrockConfig, applyProviderConfig } from "../../../utils/provider-config"
+import type { BedrockConfig } from "../../BedrockSetup"
+import type { ObjectEditorState } from "../../ConfigViewComponents"
+import { CUSTOM_MODEL_ID, hasModelPicker } from "../../ModelPicker"
+import { FEATURE_SETTINGS, type FeatureKey } from "../constants"
+import { getNextSelectableSettingsIndex } from "../navigation"
+import { persistInteractiveSettingWithRollback } from "../settingsTransaction"
+import { type ListItem, SettingsItemType, SettingsNavigationDirection } from "../types"
+import { nextReasoningEffort, normalizeReasoningEffort } from "../utils"
 
 const utilityModelUseCaseSettings = {
 	utilityModelUseCondense: "condense",
 	utilityModelUseNewTask: "newTask",
 	utilityModelUseGenerateCommitMessage: "generateCommitMessage",
+	utilityModelUsePermissionHandling: "permissionHandling",
 } as const
 
 type UtilityModelUseCaseSetting = keyof typeof utilityModelUseCaseSettings
@@ -62,9 +64,12 @@ interface UseSettingsActionsProps {
 	setPlanThinkingEnabled: (value: boolean) => void
 	autoApproveSettings: AutoApprovalSettings
 	setAutoApproveSettings: (settings: AutoApprovalSettings) => void
+	autoApproveAllToggled: boolean
+	setAutoApproveAllToggled: (value: boolean) => void
 	features: Record<FeatureKey, boolean>
 	utilityModelUseCases: UtilityModelUseCases
 	setUtilityModelUseCases: (useCases: UtilityModelUseCases | ((previous: UtilityModelUseCases) => UtilityModelUseCases)) => void
+	setUtilityPermissionPolicy: (policy: string) => void
 	setFeatures: (
 		features: Record<FeatureKey, boolean> | ((prev: Record<FeatureKey, boolean>) => Record<FeatureKey, boolean>),
 	) => void
@@ -92,14 +97,12 @@ interface UseSettingsActionsProps {
 	setObjectEditor: (state: ObjectEditorState | null) => void
 	setIsWaitingForCodexAuth: (value: boolean) => void
 	setIsWaitingForGithubAuth: (value: boolean) => void
-	setCodexAuthError: (error: string | null) => void
-	setCodexAuthUrl: (url: string | null) => void
 	setGithubAuthData: (data: any) => void
 	setIsBedrockCustomFlow: (value: boolean) => void
 	setIsConfiguringBedrock: (value: boolean) => void
 	controller?: Controller
 	stateManager: StateManager
-	rebuildTaskApi: () => Promise<void>
+	rebuildTaskApi: (patch: TaskWorkingConfigurationPatch, persist: () => void | Promise<void>) => Promise<void>
 	refreshModelIds: () => void
 	onClose: () => void
 	initialMode?: string
@@ -131,9 +134,12 @@ export function useSettingsActions({
 	setPlanThinkingEnabled,
 	autoApproveSettings,
 	setAutoApproveSettings,
+	autoApproveAllToggled,
+	setAutoApproveAllToggled,
 	features,
 	utilityModelUseCases,
 	setUtilityModelUseCases,
+	setUtilityPermissionPolicy,
 	setFeatures,
 	setLightTerminalTheme,
 	preferredLanguage,
@@ -159,8 +165,6 @@ export function useSettingsActions({
 	setObjectEditor,
 	setIsWaitingForCodexAuth,
 	setIsWaitingForGithubAuth,
-	setCodexAuthError,
-	setCodexAuthUrl,
 	setGithubAuthData,
 	setIsBedrockCustomFlow,
 	setIsConfiguringBedrock,
@@ -173,88 +177,79 @@ export function useSettingsActions({
 	availableTools,
 	setToolToggles,
 }: UseSettingsActionsProps) {
-	const cancelCodexAuthWaitRef = useRef<(() => void) | null>(null)
 	const githubAuthAbortControllerRef = useRef<AbortController | null>(null)
+
+	const commitSettings = useCallback(
+		async (settings: Record<string, unknown>, flush = false) => {
+			const previous = Object.fromEntries(
+				Object.keys(settings).map((key) => [key, structuredClone(stateManager.getGlobalSettingsKey(key as any))]),
+			)
+			await rebuildTaskApi({ settings }, () =>
+				persistInteractiveSettingWithRollback(
+					async () => {
+						for (const [key, value] of Object.entries(settings)) stateManager.setGlobalState(key as any, value as any)
+						if (flush) await stateManager.flushPendingState()
+					},
+					async () => {
+						for (const [key, value] of Object.entries(previous)) stateManager.setGlobalState(key as any, value as any)
+						if (flush) await stateManager.flushPendingState()
+					},
+				),
+			)
+		},
+		[rebuildTaskApi, stateManager],
+	)
 
 	const toggleFeature = useCallback(
 		async (key: FeatureKey) => {
 			const config = FEATURE_SETTINGS[key]
 			const newValue = !features[key]
+			await commitSettings({ [config.stateKey]: newValue })
 			setFeatures((prev) => ({ ...prev, [key]: newValue }))
-			stateManager.setGlobalState(config.stateKey, newValue)
-
-			await rebuildTaskApi()
 		},
-		[features, stateManager, setFeatures, rebuildTaskApi],
+		[features, setFeatures, commitSettings],
 	)
 
 	const handleUtilityModelPresetSelect = useCallback(
 		async (preset: ModelProviderPreset) => {
 			const selection = createModelProviderSelection(preset)
-			stateManager.setGlobalState("utilityModelSelection", selection)
+			await commitSettings({ utilityModelSelection: selection }, true)
 			setUtilityModelSelection(selection)
-			await stateManager.flushPendingState()
-			await controller?.postStateToWebview()
 			setIsPickingUtilityModel(false)
 		},
-		[controller, stateManager, setIsPickingUtilityModel, setUtilityModelSelection],
+		[commitSettings, setIsPickingUtilityModel, setUtilityModelSelection],
 	)
 
 	const setReasoningEffortForMode = useCallback(
 		async (mode: "act" | "plan", effort: OpenaiReasoningEffort) => {
+			const settingsPatch =
+				mode === "act"
+					? {
+						actModeReasoningEffort: effort,
+						...(!separateModels ? { planModeReasoningEffort: effort } : {}),
+					}
+					: { planModeReasoningEffort: effort }
+			await commitSettings(settingsPatch)
 			if (mode === "act") {
 				setActReasoningEffort(effort)
-				stateManager.setGlobalState("actModeReasoningEffort", effort)
-				if (!separateModels) {
-					setPlanReasoningEffort(effort)
-					stateManager.setGlobalState("planModeReasoningEffort", effort)
-				}
+				if (!separateModels) setPlanReasoningEffort(effort)
 			} else {
 				setPlanReasoningEffort(effort)
-				stateManager.setGlobalState("planModeReasoningEffort", effort)
 			}
-			await rebuildTaskApi()
 		},
-		[separateModels, rebuildTaskApi, stateManager, setActReasoningEffort, setPlanReasoningEffort],
+		[separateModels, commitSettings, setActReasoningEffort, setPlanReasoningEffort],
 	)
 
-	const startCodexAuth = useCallback(async () => {
-		try {
-			setIsWaitingForCodexAuth(true)
-			setCodexAuthError(null)
-			const authUrl = openAiCodexOAuthManager.startAuthorizationFlow()
-			setCodexAuthUrl(authUrl)
-			await openExternal(authUrl)
-			const completed = await Promise.race([
-				openAiCodexOAuthManager.waitForCallback().then(() => true),
-				new Promise<false>((resolve) => {
-					cancelCodexAuthWaitRef.current = () => resolve(false)
-				}),
-			])
-			cancelCodexAuthWaitRef.current = null
-			if (!completed) return
-			openAiCodexUsageService.clear()
-			await applyProviderConfig({ providerId: "openai-codex", controller })
-			setProvider("openai-codex")
-			refreshModelIds()
-			setIsWaitingForCodexAuth(false)
-			setCodexAuthUrl(null)
-		} catch (error) {
-			cancelCodexAuthWaitRef.current = null
-			openAiCodexOAuthManager.cancelAuthorizationFlow()
-			setCodexAuthError(error instanceof Error ? error.message : String(error))
-			setIsWaitingForCodexAuth(false)
-			setCodexAuthUrl(null)
-		}
-	}, [controller, setIsWaitingForCodexAuth, setCodexAuthError, setCodexAuthUrl, setProvider, refreshModelIds])
+	const startCodexAuth = useCallback(() => {
+		setIsWaitingForCodexAuth(true)
+	}, [setIsWaitingForCodexAuth])
 
-	const cancelCodexAuth = useCallback(() => {
-		openAiCodexOAuthManager.cancelAuthorizationFlow()
-		cancelCodexAuthWaitRef.current?.()
-		cancelCodexAuthWaitRef.current = null
+	const completeCodexAuth = useCallback(async () => {
+		await applyProviderConfig({ providerId: "openai-codex", controller })
+		setProvider("openai-codex")
+		refreshModelIds()
 		setIsWaitingForCodexAuth(false)
-		setCodexAuthUrl(null)
-	}, [setCodexAuthUrl, setIsWaitingForCodexAuth])
+	}, [controller, setProvider, refreshModelIds, setIsWaitingForCodexAuth])
 
 	const startGithubAuth = useCallback(async () => {
 		const abortController = new AbortController()
@@ -279,9 +274,7 @@ export function useSettingsActions({
 			Logger.error("[github-copilot-auth] Auth failed:", error)
 			throw error
 		} finally {
-			if (githubAuthAbortControllerRef.current === abortController) {
-				githubAuthAbortControllerRef.current = null
-			}
+			if (githubAuthAbortControllerRef.current === abortController) githubAuthAbortControllerRef.current = null
 		}
 	}, [controller, setIsWaitingForGithubAuth, setGithubAuthData, setProvider, refreshModelIds])
 
@@ -306,10 +299,8 @@ export function useSettingsActions({
 		const utilityModelUseCase = utilityModelUseCaseSettings[item.key as UtilityModelUseCaseSetting]
 		if (utilityModelUseCase) {
 			const newValue = !utilityModelUseCases[utilityModelUseCase]
+			await commitSettings({ [item.key]: newValue }, true)
 			setUtilityModelUseCases((previous) => ({ ...previous, [utilityModelUseCase]: newValue }))
-			stateManager.setGlobalState(item.key as UtilityModelUseCaseSetting, newValue)
-			await stateManager.flushPendingState()
-			await controller?.postStateToWebview()
 			return
 		}
 
@@ -318,22 +309,46 @@ export function useSettingsActions({
 				setIsPickingUtilityModel(true)
 				return
 			}
-
+			if (item.key === "documentation") {
+				await openExternal("https://dirac.run/docs/")
+				return
+			}
+			if (item.key === "communitySupport") {
+				await openExternal("https://discord.gg/wcYTx9BGea")
+				return
+			}
 			if (item.key === "codexSignOut") {
-				await openAiCodexOAuthManager.clearCredentials()
+				const previousCredentials = openAiCodexOAuthManager.getCredentials()
+				await rebuildTaskApi({ apiConfiguration: { "openai-codex-oauth-credentials": undefined } }, () =>
+					persistInteractiveSettingWithRollback(
+						() => openAiCodexOAuthManager.clearCredentials(),
+						async () => {
+							if (previousCredentials) await openAiCodexOAuthManager.saveCredentials(previousCredentials)
+						},
+					),
+				)
 				openAiCodexUsageService.clear()
-				await rebuildTaskApi()
 				return
 			}
 			if (item.key === "githubSignOut") {
-				await githubCopilotAuthManager.clearCredentials()
-				await rebuildTaskApi()
+				const previousCredentials = await githubCopilotAuthManager.loadCredentials()
+				await rebuildTaskApi({ apiConfiguration: { "github-copilot-oauth-credentials": undefined } }, () =>
+					persistInteractiveSettingWithRollback(
+						() => githubCopilotAuthManager.clearCredentials(),
+						async () => {
+							if (previousCredentials) await githubCopilotAuthManager.saveCredentials(previousCredentials)
+						},
+					),
+				)
 				return
 			}
-			if (item.key === "githubSignIn") {
-				await startGithubAuth()
-				return
-			}
+			if (item.key === "githubSignIn") await startGithubAuth()
+			return
+		}
+
+		if (item.key === "autoApproveAll") {
+			await commitSettings({ autoApproveAllToggled: !autoApproveAllToggled }, true)
+			setAutoApproveAllToggled(!autoApproveAllToggled)
 			return
 		}
 
@@ -354,17 +369,17 @@ export function useSettingsActions({
 		if (item.type === SettingsItemType.CYCLE) {
 			if (item.key === "openRouterProviderSorting") {
 				const sortingOptions = [undefined, "price", "throughput", "latency"]
-				const currentIndex = sortingOptions.indexOf(openRouterProviderSorting)
-				const nextSorting = sortingOptions[(currentIndex + 1) % sortingOptions.length]
+				const nextSorting =
+					sortingOptions[(sortingOptions.indexOf(openRouterProviderSorting) + 1) % sortingOptions.length]
+				await commitSettings({ openRouterProviderSorting: nextSorting })
 				setOpenRouterProviderSorting(nextSorting)
-				stateManager.setGlobalState("openRouterProviderSorting", nextSorting)
-				await rebuildTaskApi()
 				return
 			}
 			const targetMode = item.key === "actReasoningEffort" ? "act" : item.key === "planReasoningEffort" ? "plan" : undefined
 			if (targetMode) {
-				const currentEffort = targetMode === "act" ? actReasoningEffort : planReasoningEffort
-				await setReasoningEffortForMode(targetMode, nextReasoningEffort(currentEffort))
+				const currentEffort = normalizeReasoningEffort(item.value)
+				const options = item.cycleOptions?.filter(isOpenaiReasoningEffort)
+				await setReasoningEffortForMode(targetMode, nextReasoningEffort(currentEffort, options))
 			}
 			return
 		}
@@ -393,119 +408,122 @@ export function useSettingsActions({
 			return
 		}
 
-		// Checkbox handling
 		const newValue = !item.value
-
 		if (item.key === "lightTerminalTheme") {
 			setLightTerminalTheme(newValue)
 			stateManager.setGlobalState("cliTerminalColorMode", newValue ? "light" : "dark")
 			await stateManager.flushPendingState()
 			return
 		}
-
 		if (item.key in FEATURE_SETTINGS) {
 			await toggleFeature(item.key as FeatureKey)
 			return
 		}
 
-		// Tool toggle handling
 		const isTool = availableTools.some((t) => t.id === item.key)
 		if (isTool) {
 			const toolId = item.key
-			ToolRegistry.getInstance().toggleAndPersist(toolId, newValue)
+			const previousToggles = await ToolRegistry.withExclusiveAccess((registry) => registry.getToggles())
+			const toggles = { ...previousToggles, [toolId]: newValue }
+			await rebuildTaskApi({ settings: { toolToggles: toggles } }, () =>
+				persistInteractiveSettingWithRollback(
+					() =>
+						ToolRegistry.withExclusiveAccess((registry) => {
+							registry.loadToggles(toggles)
+							stateManager.setGlobalState("toolToggles", registry.getToggles())
+						}),
+					() =>
+						ToolRegistry.withExclusiveAccess((registry) => {
+							registry.loadToggles(previousToggles)
+							stateManager.setGlobalState("toolToggles", registry.getToggles())
+						}),
+				),
+			)
 			setToolToggles((prev) => ({ ...prev, [toolId]: newValue }))
-			await rebuildTaskApi()
 			return
 		}
 
 		if (item.key === "separateModels") {
-			setSeparateModels(newValue)
-			stateManager.setGlobalState("planActSeparateModelsSetting", newValue)
+			const taskConfig = controller?.task?.getWorkingConfiguration()
+			const effectiveSettings = taskConfig?.settings
+			const effectiveApi = taskConfig?.apiConfiguration ?? stateManager.getApiConfiguration()
+			const taskSettingsPatch: Record<string, unknown> = { planActSeparateModelsSetting: newValue }
 			if (!newValue) {
-				const apiConfig = stateManager.getApiConfiguration()
-				const actProvider = apiConfig.actModeApiProvider
-				const planProvider = apiConfig.planModeApiProvider || actProvider
-				if (actProvider) {
+				const actProvider = effectiveApi.actModeApiProvider
+				const planProvider = effectiveApi.planModeApiProvider || actProvider
+				if (actProvider && planProvider) {
 					const actKey = getProviderModelIdKey(actProvider, "act")
-					const planKey = planProvider ? getProviderModelIdKey(planProvider, "plan") : null
-					const actModel = stateManager.getGlobalSettingsKey(actKey)
-					if (planKey) stateManager.setGlobalState(planKey, actModel)
+					const planKey = getProviderModelIdKey(planProvider, "plan")
+					taskSettingsPatch[planKey] = effectiveSettings?.[actKey] ?? stateManager.getGlobalSettingsKey(actKey as any)
 				}
-				const actThinkingBudget = stateManager.getGlobalSettingsKey("actModeThinkingBudgetTokens") ?? 0
-				stateManager.setGlobalState("planModeThinkingBudgetTokens", actThinkingBudget)
-				setPlanThinkingEnabled(actThinkingBudget > 0)
-
-				const actEffort = normalizeReasoningEffort(stateManager.getGlobalSettingsKey("actModeReasoningEffort"))
-				stateManager.setGlobalState("planModeReasoningEffort", actEffort)
-				setPlanReasoningEffort(actEffort)
+				taskSettingsPatch.planModeThinkingBudgetTokens =
+					effectiveSettings?.actModeThinkingBudgetTokens ??
+					stateManager.getGlobalSettingsKey("actModeThinkingBudgetTokens") ??
+					0
+				taskSettingsPatch.planModeReasoningEffort = normalizeReasoningEffort(
+					effectiveSettings?.actModeReasoningEffort ?? stateManager.getGlobalSettingsKey("actModeReasoningEffort"),
+				)
 			}
-			await rebuildTaskApi()
+			await commitSettings(taskSettingsPatch)
+			setSeparateModels(newValue)
+			if (!newValue) {
+				setPlanThinkingEnabled(Number(taskSettingsPatch.planModeThinkingBudgetTokens) > 0)
+				setPlanReasoningEffort(taskSettingsPatch.planModeReasoningEffort as OpenaiReasoningEffort)
+			}
 			return
 		}
 
 		if (item.key === "actThinkingEnabled") {
-			setActThinkingEnabled(newValue)
-			stateManager.setGlobalState("actModeThinkingBudgetTokens", newValue ? 1024 : 0)
-			if (!separateModels) {
-				setPlanThinkingEnabled(newValue)
-				stateManager.setGlobalState("planModeThinkingBudgetTokens", newValue ? 1024 : 0)
+			const patch = {
+				actModeThinkingBudgetTokens: newValue ? 1024 : 0,
+				...(!separateModels ? { planModeThinkingBudgetTokens: newValue ? 1024 : 0 } : {}),
 			}
-			await rebuildTaskApi()
+			await commitSettings(patch)
+			setActThinkingEnabled(newValue)
+			if (!separateModels) setPlanThinkingEnabled(newValue)
 			return
 		}
-
 		if (item.key === "planThinkingEnabled") {
+			await commitSettings({ planModeThinkingBudgetTokens: newValue ? 1024 : 0 })
 			setPlanThinkingEnabled(newValue)
-			stateManager.setGlobalState("planModeThinkingBudgetTokens", newValue ? 1024 : 0)
-			await rebuildTaskApi()
 			return
 		}
-
 		if (item.key === "openRouterPreventFallbacks") {
+			await commitSettings({ openRouterPreventFallbacks: newValue || undefined })
 			setOpenRouterPreventFallbacks(newValue)
-			stateManager.setGlobalState("openRouterPreventFallbacks", newValue || undefined)
-			await rebuildTaskApi()
 			return
 		}
-
 		if (item.key === "telemetry") {
 			const newTelemetry: TelemetrySetting = newValue ? "enabled" : "disabled"
 			setTelemetry(newTelemetry)
-			stateManager.setGlobalState("telemetrySetting", newTelemetry)
-			await stateManager.flushPendingState()
 			await controller?.updateTelemetrySetting(newTelemetry)
 			return
 		}
 
+		let newSettings: AutoApprovalSettings
 		if (item.key === "enableNotifications") {
-			const newSettings = {
+			newSettings = {
 				...autoApproveSettings,
 				version: (autoApproveSettings.version ?? 1) + 1,
 				enableNotifications: newValue,
 			}
-			setAutoApproveSettings(newSettings)
-			stateManager.setGlobalState("autoApprovalSettings", newSettings)
-			await rebuildTaskApi()
-			return
+		} else {
+			const actionKey = item.key as keyof AutoApprovalSettings["actions"]
+			const newActions = { ...autoApproveSettings.actions, [actionKey]: newValue }
+			if (!newValue) {
+				if (actionKey === "readFiles") newActions.readFilesExternally = false
+				if (actionKey === "editFiles") newActions.editFilesExternally = false
+			}
+			if (newValue && item.parentKey) newActions[item.parentKey as keyof typeof newActions] = true
+			newSettings = { ...autoApproveSettings, version: (autoApproveSettings.version ?? 1) + 1, actions: newActions }
 		}
-
-		const actionKey = item.key as keyof AutoApprovalSettings["actions"]
-		const newActions = { ...autoApproveSettings.actions, [actionKey]: newValue }
-		if (!newValue) {
-			if (actionKey === "readFiles") newActions.readFilesExternally = false
-			if (actionKey === "editFiles") newActions.editFilesExternally = false
-		}
-		if (newValue && item.parentKey) {
-			newActions[item.parentKey as keyof typeof newActions] = true
-		}
-		const newSettings = { ...autoApproveSettings, version: (autoApproveSettings.version ?? 1) + 1, actions: newActions }
+		await commitSettings({ autoApprovalSettings: newSettings })
 		setAutoApproveSettings(newSettings)
-		stateManager.setGlobalState("autoApprovalSettings", newSettings)
-		await rebuildTaskApi()
 	}, [
 		items,
 		selectedIndex,
 		stateManager,
+		controller,
 		autoApproveSettings,
 		toggleFeature,
 		utilityModelUseCases,
@@ -514,6 +532,7 @@ export function useSettingsActions({
 		actReasoningEffort,
 		planReasoningEffort,
 		rebuildTaskApi,
+		commitSettings,
 		setReasoningEffortForMode,
 		startGithubAuth,
 		setObjectEditor,
@@ -531,6 +550,8 @@ export function useSettingsActions({
 		setActThinkingEnabled,
 		setTelemetry,
 		setAutoApproveSettings,
+		autoApproveAllToggled,
+		setAutoApproveAllToggled,
 		provider,
 		actModelId,
 		planModelId,
@@ -539,63 +560,64 @@ export function useSettingsActions({
 		setOpenRouterPreventFallbacks,
 		setOpenRouterRoutingModelId,
 		availableTools,
+		setToolToggles,
 	])
 
 	const handleSave = useCallback(
 		async (editValue: string) => {
 			const item = items[selectedIndex]
 			if (!item) return
-
-			switch (item.key) {
-				case "baseUrl": {
-					await applyProviderConfig({
-						providerId: provider,
-						baseUrl: editValue,
-						controller,
-					})
-					break
-				}
-				case "actModelId":
-				case "planModelId":
-				case "actCustomModelId":
-				case "planCustomModelId": {
-					const apiConfig = stateManager.getApiConfiguration()
-					const actProvider = apiConfig.actModeApiProvider
-					const planProvider = apiConfig.planModeApiProvider || actProvider
-					if (!actProvider && !planProvider) break
-					const actKey = actProvider ? getProviderModelIdKey(actProvider, "act") : null
-					const planKey = planProvider ? getProviderModelIdKey(planProvider, "plan") : null
-
-					if (separateModels) {
-						const stateKey = item.key === "actModelId" || item.key === "actCustomModelId" ? actKey : planKey
-						if (stateKey) stateManager.setGlobalState(stateKey, editValue || undefined)
-					} else {
-						if (actKey) stateManager.setGlobalState(actKey, editValue || undefined)
-						if (planKey) stateManager.setGlobalState(planKey, editValue || undefined)
-					}
-					break
-				}
-				case "autoCondenseContextLimit": {
-					const limit = Number(editValue)
-					if (!isValidAutoCondenseContextLimit(limit)) {
-						throw new Error("Auto-condense context limit must be between 1 and 2,000,000,000 tokens")
-					}
-					setAutoCondenseContextLimit(limit)
-					stateManager.setGlobalState("autoCondenseContextLimits", {
-						...stateManager.getGlobalSettingsKey("autoCondenseContextLimits"),
-						[provider]: limit,
-					})
-					break
-				}
-				case "language":
-					setPreferredLanguage(editValue)
-					stateManager.setGlobalState("preferredLanguage", editValue)
-					break
+			if (item.key === "baseUrl") {
+				await applyProviderConfig({ providerId: provider, baseUrl: editValue, controller })
+				refreshModelIds()
+				setIsEditing(false)
+				return
 			}
 
-			await rebuildTaskApi()
+			const settingsPatch: Record<string, unknown> = {}
+			if (["actModelId", "planModelId", "actCustomModelId", "planCustomModelId"].includes(item.key)) {
+				const taskConfig =
+					controller?.task?.getWorkingConfiguration().apiConfiguration ?? stateManager.getApiConfiguration()
+				const actProvider = taskConfig.actModeApiProvider
+				const planProvider = taskConfig.planModeApiProvider || actProvider
+				const actKey = actProvider ? getProviderModelIdKey(actProvider, "act") : null
+				const planKey = planProvider ? getProviderModelIdKey(planProvider, "plan") : null
+				if (separateModels) {
+					const stateKey = item.key === "actModelId" || item.key === "actCustomModelId" ? actKey : planKey
+					if (stateKey) settingsPatch[stateKey] = editValue || undefined
+				} else {
+					if (actKey) settingsPatch[actKey] = editValue || undefined
+					if (planKey) settingsPatch[planKey] = editValue || undefined
+				}
+			} else if (item.key === "autoCondenseContextLimit") {
+				const limit = Number(editValue)
+				if (!isValidAutoCondenseContextLimit(limit))
+					throw new Error("Auto-condense context limit must be between 1 and 2,000,000,000 tokens")
+				settingsPatch.autoCondenseContextLimits = {
+					...(controller?.task?.getWorkingConfiguration().settings.autoCondenseContextLimits ??
+						stateManager.getGlobalSettingsKey("autoCondenseContextLimits")),
+					[provider]: limit,
+				}
+				await commitSettings(settingsPatch)
+				setAutoCondenseContextLimit(limit)
+			} else if (item.key === "language") {
+				settingsPatch.preferredLanguage = editValue
+				await commitSettings(settingsPatch)
+				setPreferredLanguage(editValue)
+			} else if (item.key === "utilityModelPermissionPolicy") {
+				settingsPatch.utilityModelPermissionPolicy = editValue
+				await commitSettings(settingsPatch, true)
+				setUtilityPermissionPolicy(editValue)
+			}
+			if (
+				Object.keys(settingsPatch).length > 0 &&
+				item.key !== "autoCondenseContextLimit" &&
+				item.key !== "language" &&
+				item.key !== "utilityModelPermissionPolicy"
+			) {
+				await commitSettings(settingsPatch)
+			}
 			refreshModelIds()
-
 			setIsEditing(false)
 		},
 		[
@@ -604,9 +626,10 @@ export function useSettingsActions({
 			separateModels,
 			stateManager,
 			setPreferredLanguage,
+			setUtilityPermissionPolicy,
 			setAutoCondenseContextLimit,
 			setIsEditing,
-			rebuildTaskApi,
+			commitSettings,
 			provider,
 			controller,
 			refreshModelIds,
@@ -626,10 +649,8 @@ export function useSettingsActions({
 			const apiConfig = stateManager.getApiConfiguration()
 			const fieldName = keyField ? (Array.isArray(keyField) ? keyField[0] : keyField) : null
 			const existingKey = fieldName ? (apiConfig as Record<string, string>)[fieldName] || "" : ""
-
 			const requiresOpenRouterModelSelection =
 				providerId === "openrouter" && !apiConfig.actModeOpenRouterModelId && !apiConfig.planModeOpenRouterModelId
-
 			if (
 				initialMode === "provider-picker" &&
 				(existingKey || !keyField) &&
@@ -637,11 +658,8 @@ export function useSettingsActions({
 				!requiresOpenRouterModelSelection
 			) {
 				let canSwitchDirectly = true
-				if (providerId === "openai-codex") {
-					canSwitchDirectly = await openAiCodexOAuthManager.isAuthenticated()
-				} else if (providerId === "github-copilot") {
-					canSwitchDirectly = await githubCopilotAuthManager.isAuthenticated()
-				}
+				if (providerId === "openai-codex") canSwitchDirectly = await openAiCodexOAuthManager.isAuthenticated()
+				else if (providerId === "github-copilot") canSwitchDirectly = await githubCopilotAuthManager.isAuthenticated()
 				if (canSwitchDirectly) {
 					await applyProviderConfig({ providerId, controller })
 					setProvider(providerId)
@@ -651,7 +669,6 @@ export function useSettingsActions({
 					return
 				}
 			}
-
 			if (providerId === "bedrock") {
 				const isConfigured = !!(
 					apiConfig.awsRegion &&
@@ -670,31 +687,25 @@ export function useSettingsActions({
 				setIsConfiguringBedrock(true)
 				return
 			}
-
 			if (providerId === "github-copilot") {
 				setIsPickingProvider(false)
-				const isAuthenticated = await githubCopilotAuthManager.isAuthenticated()
-				if (!isAuthenticated) {
-					await startGithubAuth()
-				} else {
+				if (!(await githubCopilotAuthManager.isAuthenticated())) await startGithubAuth()
+				else {
 					await applyProviderConfig({ providerId, controller })
 					setProvider(providerId)
 					refreshModelIds()
 				}
 				return
 			}
-
 			if (providerId === "openai-codex") {
 				setIsPickingProvider(false)
 				await startCodexAuth()
 				return
 			}
-
 			if (requiresOpenRouterModelSelection && existingKey) {
 				beginOpenRouterModelSelection()
 				return
 			}
-
 			if (keyField) {
 				setPendingProvider(providerId)
 				setApiKeyValue(existingKey)
@@ -728,18 +739,11 @@ export function useSettingsActions({
 	const handleModelSelect = useCallback(
 		async (modelId: string) => {
 			if (!pickingModelKey) return
-			if (modelId === CUSTOM_MODEL_ID) {
-				if (provider === "bedrock") {
-					setIsPickingModel(false)
-					setIsBedrockCustomFlow(true)
-					return
-				}
-				if (usesOpenRouterModels(pendingProvider || provider)) {
-					// For OpenRouter, selecting "Custom" just sets the model ID to __custom__
-					// which triggers the third line to appear in the settings list.
-				}
+			if (modelId === CUSTOM_MODEL_ID && provider === "bedrock") {
+				setIsPickingModel(false)
+				setIsBedrockCustomFlow(true)
+				return
 			}
-
 			if (pendingProvider === "openrouter") {
 				await applyProviderConfig({ providerId: pendingProvider, modelId, controller })
 				setProvider(pendingProvider)
@@ -750,45 +754,36 @@ export function useSettingsActions({
 				if (initialMode) onClose()
 				return
 			}
-
-			const apiConfig = stateManager.getApiConfiguration()
-			const actProvider = apiConfig.actModeApiProvider
-			const planProvider = apiConfig.planModeApiProvider || actProvider
+			const taskConfig = controller?.task?.getWorkingConfiguration().apiConfiguration ?? stateManager.getApiConfiguration()
+			const actProvider = taskConfig.actModeApiProvider
+			const planProvider = taskConfig.planModeApiProvider || actProvider
 			const providerForSelection = separateModels
 				? pickingModelKey === "actModelId"
 					? actProvider
 					: planProvider
 				: actProvider || planProvider
 			if (!providerForSelection) return
-
 			const actKey = actProvider ? getProviderModelIdKey(actProvider, "act") : null
 			const planKey = planProvider ? getProviderModelIdKey(planProvider, "plan") : null
-
 			let modelInfo: ModelInfo | undefined
-			if (providerForSelection === "openrouter") {
-				const openRouterModels = await controller?.readOpenRouterModels()
-				modelInfo = openRouterModels?.[modelId]
-			}
-
+			if (providerForSelection === "openrouter") modelInfo = (await controller?.readOpenRouterModels())?.[modelId]
+			const settingsPatch: Record<string, unknown> = {}
 			if (separateModels) {
 				const stateKey = pickingModelKey === "actModelId" ? actKey : planKey
-				if (stateKey) stateManager.setGlobalState(stateKey, modelId)
-				if (modelInfo) {
-					const infoKey =
+				if (stateKey) settingsPatch[stateKey] = modelId
+				if (modelInfo)
+					settingsPatch[
 						pickingModelKey === "actModelId" ? "actModeOpenRouterModelInfo" : "planModeOpenRouterModelInfo"
-					stateManager.setGlobalState(infoKey, modelInfo)
-				}
+					] = modelInfo
 			} else {
-				if (actKey) stateManager.setGlobalState(actKey, modelId)
-				if (planKey) stateManager.setGlobalState(planKey, modelId)
+				if (actKey) settingsPatch[actKey] = modelId
+				if (planKey) settingsPatch[planKey] = modelId
 				if (modelInfo) {
-					stateManager.setGlobalState("actModeOpenRouterModelInfo", modelInfo)
-					stateManager.setGlobalState("planModeOpenRouterModelInfo", modelInfo)
+					settingsPatch.actModeOpenRouterModelInfo = modelInfo
+					settingsPatch.planModeOpenRouterModelInfo = modelInfo
 				}
 			}
-
-			await stateManager.flushPendingState()
-			await rebuildTaskApi()
+			await commitSettings(settingsPatch, true)
 			refreshModelIds()
 			setIsPickingModel(false)
 			setPickingModelKey(null)
@@ -809,14 +804,13 @@ export function useSettingsActions({
 			setPickingModelKey,
 			setPendingProvider,
 			setProvider,
-			rebuildTaskApi,
+			commitSettings,
 		],
 	)
 
 	const handleApiKeySubmit = useCallback(
 		async (submittedValue: string) => {
 			if (!pendingProvider || !submittedValue.trim()) return
-
 			const apiConfig = stateManager.getApiConfiguration()
 			const requiresOpenRouterModelSelection =
 				pendingProvider === "openrouter" && !apiConfig.actModeOpenRouterModelId && !apiConfig.planModeOpenRouterModelId
@@ -828,7 +822,6 @@ export function useSettingsActions({
 				beginOpenRouterModelSelection()
 				return
 			}
-
 			await applyProviderConfig({ providerId: pendingProvider, apiKey: submittedValue.trim(), controller })
 			setProvider(pendingProvider)
 			refreshModelIds()
@@ -874,8 +867,6 @@ export function useSettingsActions({
 				awsUseCrossRegionInference: Boolean(apiConfig.awsUseCrossRegionInference),
 			}
 			await applyBedrockConfig({ bedrockConfig, modelId: arn, customModelBaseId: baseModelId, controller })
-			await stateManager.flushPendingState()
-			await rebuildTaskApi()
 			refreshModelIds()
 			setIsBedrockCustomFlow(false)
 			setPickingModelKey(null)
@@ -885,7 +876,6 @@ export function useSettingsActions({
 			pickingModelKey,
 			stateManager,
 			controller,
-			rebuildTaskApi,
 			refreshModelIds,
 			initialMode,
 			onClose,
@@ -896,13 +886,11 @@ export function useSettingsActions({
 
 	const handleLanguageSelect = useCallback(
 		async (language: string) => {
+			await commitSettings({ preferredLanguage: language })
 			setPreferredLanguage(language)
-			stateManager.setGlobalState("preferredLanguage", language)
 			setIsPickingLanguage(false)
-
-			await rebuildTaskApi()
 		},
-		[stateManager, setPreferredLanguage, setIsPickingLanguage, rebuildTaskApi],
+		[commitSettings, setPreferredLanguage, setIsPickingLanguage],
 	)
 
 	const navigateItems = useCallback(
@@ -923,7 +911,7 @@ export function useSettingsActions({
 		handleLanguageSelect,
 		startCodexAuth,
 		startGithubAuth,
-		cancelCodexAuth,
+		completeCodexAuth,
 		cancelGithubAuth,
 		navigateItems,
 		toggleFeature,

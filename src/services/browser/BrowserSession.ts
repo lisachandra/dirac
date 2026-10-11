@@ -4,7 +4,8 @@ import { BrowserActionResult } from "@shared/ExtensionMessage"
 import pWaitFor from "p-wait-for"
 import type { ConsoleMessage, ScreenshotOptions } from "puppeteer-core"
 import { Page, TimeoutError } from "puppeteer-core"
-import { StateManager } from "@/core/storage/StateManager"
+import type { StateManager } from "@/core/storage/StateManager"
+import type { BrowserSettings } from "@shared/BrowserSettings"
 import { telemetryService } from "@/services/telemetry"
 import { getErrorMessage } from "@/shared/errors"
 import { Logger } from "@/shared/services/Logger"
@@ -22,8 +23,8 @@ export class BrowserSession {
 	private currentMousePosition?: string
 	private useWebp: boolean
 
-	constructor(stateManager: StateManager, useWebp = true) {
-		this.connection = new BrowserConnectionManager(stateManager)
+	constructor(settingsSource: StateManager | BrowserSettings | (() => BrowserSettings), useWebp = true) {
+		this.connection = new BrowserConnectionManager(settingsSource)
 		this.useWebp = useWebp
 	}
 

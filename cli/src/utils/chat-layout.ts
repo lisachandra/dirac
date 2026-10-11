@@ -4,6 +4,8 @@ export interface ChatLayoutInput {
 	hasComposer: boolean
 	hasFooter: boolean
 	hasPanel: boolean
+	footerRows?: number
+	goalSummaryRows?: number
 }
 
 export interface ChatLayoutRows {
@@ -51,6 +53,32 @@ const ROWS = {
 	},
 } as const
 
+const GOAL_SUMMARY_COMPACT_ROWS = 5
+const GOAL_SUMMARY_EXPANDED_ROWS = 16
+const GOAL_FOOTER_ROWS = 2
+const MIN_SHORT_TERMINAL_TRANSCRIPT_ROWS = 2
+const MIN_VISIBLE_TRANSCRIPT_ROWS = 1
+const MIN_GOAL_SUMMARY_ROWS = 1
+const MIN_TERMINAL_ROWS_FOR_GOAL_FOOTER = 10
+
+export function shouldShowGoalFooter(terminalRows: number): boolean {
+	return terminalRows >= MIN_TERMINAL_ROWS_FOR_GOAL_FOOTER
+}
+
+export function calculateGoalSummaryRows(terminalRows: number, detailsExpanded: boolean): number {
+	const footerRows = shouldShowGoalFooter(terminalRows) ? GOAL_FOOTER_ROWS : 0
+	const compactRows = clamp(
+		terminalRows - ROWS.composer - footerRows - MIN_VISIBLE_TRANSCRIPT_ROWS,
+		MIN_GOAL_SUMMARY_ROWS,
+		GOAL_SUMMARY_COMPACT_ROWS,
+	)
+	if (!detailsExpanded) return compactRows
+
+	const rowsAvailableWithoutCrowdingTranscript =
+		terminalRows - ROWS.composer - footerRows - ROWS.margin - MIN_SHORT_TERMINAL_TRANSCRIPT_ROWS
+	return clamp(rowsAvailableWithoutCrowdingTranscript, compactRows, GOAL_SUMMARY_EXPANDED_ROWS)
+}
+
 export function calculateChatLayoutRows(input: ChatLayoutInput): ChatLayoutRows {
 	const availableRows = Math.max(1, input.terminalRows - calculateReservedRows(input))
 	const liveViewportRows = input.hasConversationContent ? boundedRows(availableRows, ROWS.liveViewport) : availableRows
@@ -69,7 +97,8 @@ function calculateReservedRows(input: ChatLayoutInput): number {
 
 	return [
 		input.hasComposer ? ROWS.composer : 0,
-		input.hasFooter ? ROWS.footer : 0,
+		input.hasFooter ? (input.footerRows ?? ROWS.footer) : 0,
+		input.goalSummaryRows ?? 0,
 		ROWS.margin,
 	].reduce((total, rows) => total + rows, 0)
 }

@@ -150,4 +150,15 @@ Reviewer prompt`,
 		assert.equal(loader.isDynamicSubagentTool(withToolNames[0].toolName), true)
 		assert.ok(getToolUseNames().includes(withToolNames[0].toolName))
 	})
+	it("does not restart watching after disposal", async () => {
+		const tempHome = await createTempHomeDir()
+		tempDirs.push(tempHome)
+		const loader = AgentConfigLoader.getInstance(tempHome)
+		await loader.ready()
+
+		await loader.dispose()
+		await loader.watch()
+
+		assert.equal((loader as unknown as { watcher?: unknown }).watcher, undefined)
+	})
 })

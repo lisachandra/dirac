@@ -28,7 +28,7 @@ export async function updateApiConfigurationProto(
 
 		const previousProfiles = controller.stateManager.getApiConfiguration().openAiCompatibleProfiles || []
 
-		applyApiConfigurationTransaction(controller, convertedApiConfigurationFromProto)
+		await applyApiConfigurationTransaction(controller, convertedApiConfigurationFromProto)
 		recordSavedOpenAiCompatibleProfileChanges(controller.stateManager, previousProfiles)
 
 		// Post updated state to webview

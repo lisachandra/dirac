@@ -51,7 +51,15 @@ export class MultiRootCheckpointManager implements ICheckpointManager {
 		private taskId: string,
 		private enableCheckpoints: boolean,
 		private messageStateHandler: MessageStateHandler,
-	) {}
+	) { }
+
+	setEnabled(enabled: boolean): void {
+		this.enableCheckpoints = enabled
+	}
+
+	isEnabled(): boolean {
+		return this.enableCheckpoints
+	}
 
 	/**
 	 * Initialize checkpoint trackers for all workspace roots
@@ -180,6 +188,7 @@ export class MultiRootCheckpointManager implements ICheckpointManager {
 	 * Future enhancement: restore all roots to their respective checkpoints
 	 */
 	async restoreCheckpoint(): Promise<any> {
+		if (!this.enableCheckpoints) return { error: "Checkpoints are disabled in settings" }
 		const primaryRoot = this.workspaceManager.getPrimaryRoot()
 		if (!primaryRoot) {
 			Logger.error("[MultiRootCheckpointManager] No primary root found")
@@ -207,7 +216,7 @@ export class MultiRootCheckpointManager implements ICheckpointManager {
 	 * Returns true if ANY workspace has changes
 	 */
 	async doesLatestTaskCompletionHaveNewChanges(): Promise<boolean> {
-		if (!this.initialized || this.trackers.size === 0) {
+		if (!this.enableCheckpoints || !this.initialized || this.trackers.size === 0) {
 			return false
 		}
 
@@ -232,7 +241,7 @@ export class MultiRootCheckpointManager implements ICheckpointManager {
 	 * Returns the primary root's commit hash for backward compatibility
 	 */
 	async commit(): Promise<string | undefined> {
-		if (!this.initialized || this.trackers.size === 0) {
+		if (!this.enableCheckpoints || !this.initialized || this.trackers.size === 0) {
 			return undefined
 		}
 

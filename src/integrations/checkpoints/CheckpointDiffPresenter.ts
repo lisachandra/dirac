@@ -10,7 +10,7 @@ import type { CreateCheckpointTracker } from "./CheckpointRestoreHandler"
 import type { CheckpointStorageManager } from "./CheckpointStorageManager"
 
 interface CheckpointDiffConfig {
-	readonly enableCheckpoints: boolean
+	enableCheckpoints: boolean
 	readonly taskId: string
 }
 interface CheckpointDiffServices {
@@ -34,6 +34,10 @@ export class CheckpointDiffPresenter {
 		this.config = config
 		this.services = services
 		this.storage = storage
+	}
+
+	setEnabled(enabled: boolean): void {
+		this.config.enableCheckpoints = enabled
 	}
 
 	/**

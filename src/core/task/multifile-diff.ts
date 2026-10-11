@@ -44,7 +44,7 @@ export async function showChangedFilesDiff(
 		leftContent: file.before,
 		rightContent: file.after,
 	}))
-	HostProvider.diff.openMultiFileDiff({ title, diffs })
+	await HostProvider.diff.openMultiFileDiff({ title, diffs })
 }
 
 type ChangedFile = {

@@ -54,7 +54,7 @@ export const tokenResponseSchema = z.object({
 export const deviceAuthorizationResponseSchema = z.object({
 	device_auth_id: z.string().min(1),
 	user_code: z.string().min(1),
-	interval: z.string().transform((value) => Number.parseInt(value, 10)),
+	interval: z.coerce.number().finite().positive(),
 })
 
 export interface OpenAiCodexDeviceAuthorization {
@@ -217,6 +217,7 @@ export async function exchangeCodeForTokensWithRedirectUri(
 	code: string,
 	codeVerifier: string,
 	redirectUri: string,
+	signal?: AbortSignal,
 ): Promise<OpenAiCodexCredentials> {
 	const body = new URLSearchParams({
 		grant_type: "authorization_code",
@@ -232,7 +233,7 @@ export async function exchangeCodeForTokensWithRedirectUri(
 			"Content-Type": "application/x-www-form-urlencoded",
 		},
 		body: body.toString(),
-		signal: AbortSignal.timeout(30000),
+		signal: AbortSignal.any([AbortSignal.timeout(30000), ...(signal ? [signal] : [])]),
 	})
 
 	if (!response.ok) {

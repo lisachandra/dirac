@@ -1,172 +1,132 @@
+import { SETTINGS_HELP } from "@shared/settings-presentation"
 import { VSCodeCheckbox } from "@vscode/webview-ui-toolkit/react"
-import React, { useEffect, useRef, useState } from "react"
+import React, { useRef } from "react"
 import { useClickAway } from "react-use"
+import { useAppStore } from "@/app/store/appStore"
 import { useSettingsStore } from "@/features/settings/store/settingsStore"
-import { StateServiceClient } from "@/shared/api/grpc-client"
 import { useAutoApproveActions } from "@/shared/hooks/useAutoApproveActions"
-import { getAsVar, VSC_DESCRIPTION_FOREGROUND, VSC_TITLEBAR_INACTIVE_FOREGROUND } from "@/shared/lib/vscStyles"
+import { useAutoApproveAll } from "@/shared/hooks/useAutoApproveAll"
+import { Button } from "@/shared/ui/button"
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip"
+import { updateSetting } from "@/features/settings/components/utils/settingsHandlers"
 import AutoApproveMenuItem from "./AutoApproveMenuItem"
-import { updateAutoApproveSettings } from "./AutoApproveSettingsAPI"
-import { ActionMetadata } from "./types"
-
-const breakpoint = 500
-
-function getCheckboxChecked(event: { target: EventTarget | null }): boolean {
-	return (event.target as HTMLInputElement).checked
-}
+import { ACTION_METADATA, NOTIFICATIONS_SETTING } from "./constants"
 
 interface AutoApproveModalProps {
 	isVisible: boolean
 	setIsVisible: (visible: boolean) => void
 	buttonRef: React.RefObject<HTMLButtonElement>
-	ACTION_METADATA: ActionMetadata[]
 }
 
-const AutoApproveModal: React.FC<AutoApproveModalProps> = ({ isVisible, setIsVisible, buttonRef, ACTION_METADATA }) => {
-	const { autoApprovalSettings, autoApproveAllToggled, remoteConfigSettings, yoloModeToggled } = useSettingsStore()
-	const { isChecked, updateAction } = useAutoApproveActions()
+const AutoApproveModal = ({ isVisible, setIsVisible, buttonRef }: AutoApproveModalProps) => {
+	const navigateToSettings = useAppStore((state) => state.navigateToSettings)
+	const {
+		autoApproveAllToggled,
+		autoApproveAllUpdateError,
+		pendingAutoApproveAllToggled,
+		remoteConfigSettings,
+		strictPlanModeEnabled,
+		yoloModeToggled,
+	} = useSettingsStore()
+	const { isChecked, updateAction, updateNotifications } = useAutoApproveActions()
+	const { updateAutoApproveAll } = useAutoApproveAll()
 	const modalRef = useRef<HTMLDivElement>(null)
-	const itemsContainerRef = useRef<HTMLDivElement>(null)
-	const [containerWidth, setContainerWidth] = useState(0)
 	const isYoloRemoteLocked = remoteConfigSettings?.yoloModeToggled !== undefined
+	const effectiveYoloMode = remoteConfigSettings?.yoloModeToggled ?? yoloModeToggled
 
-	useClickAway(modalRef, (e) => {
-		// Skip if click was on the button that toggles the modal
-		if (buttonRef.current?.contains(e.target as Node)) {
-			return
-		}
-		setIsVisible(false)
+	useClickAway(modalRef, (event) => {
+		if (!buttonRef.current?.contains(event.target as Node)) setIsVisible(false)
 	})
 
-	// Track container width for responsive layout
-	useEffect(() => {
-		if (!isVisible) {
-			return
-		}
-
-		const updateWidth = () => {
-			if (itemsContainerRef.current) {
-				setContainerWidth(itemsContainerRef.current.offsetWidth)
-			}
-		}
-
-		// Initial measurement
-		updateWidth()
-
-		// Set up resize observer
-		const resizeObserver = new ResizeObserver(updateWidth)
-		if (itemsContainerRef.current) {
-			resizeObserver.observe(itemsContainerRef.current)
-		}
-
-		// Clean up
-		return () => {
-			resizeObserver.disconnect()
-		}
-	}, [isVisible])
-
-	if (!isVisible) {
-		return null
-	}
+	if (!isVisible) return null
 
 	return (
-		<div ref={modalRef}>
-			{/* Expanded menu content - renders directly below the bar */}
-			<div
-				className="overflow-y-auto pb-3 px-3.5 overscroll-contain"
-				style={{
-					maxHeight: "60vh",
-				}}>
-				<div className="mb-2.5 text-muted-foreground text-xs">
-					Let Dirac take these actions without asking for approval.
-				</div>
+		<div className="max-h-[60vh] overflow-y-auto overscroll-contain px-3.5 pb-3" ref={modalRef}>
+			<p className="mb-2.5 mt-0 text-xs text-muted-foreground">
+				Let Dirac take these actions without asking for approval.
+			</p>
 
-				<div
-					className="relative mb-2 w-full"
-					ref={itemsContainerRef}
-					style={{
-						columnCount: containerWidth > breakpoint ? 2 : 1,
-						columnGap: "4px",
-					}}>
-					{/* Vertical separator line - only visible in two-column mode */}
-					{containerWidth > breakpoint && (
-						<div
-							className="absolute left-1/2 top-0 bottom-0 opacity-20"
-							style={{
-								background: getAsVar(VSC_TITLEBAR_INACTIVE_FOREGROUND),
-								transform: "translateX(-50%)", // Center the line
-							}}
-						/>
-					)}
-
-					{/* All items in a single list - CSS Grid will handle the column distribution */}
-					{ACTION_METADATA.map((action) => (
-						<AutoApproveMenuItem
-							action={action}
-							disabled={autoApproveAllToggled || yoloModeToggled}
-							isChecked={isChecked}
-							key={action.id}
-							onToggle={updateAction}
-						/>
-					))}
-				</div>
-
-				{/* Separator line */}
-				<div
-					style={{
-						height: "0.5px",
-						background: getAsVar(VSC_DESCRIPTION_FOREGROUND),
-						opacity: 0.1,
-						margin: "8px 0",
-					}}
-				/>
-
-				<div className="flex items-center gap-2 mb-1">
-					<VSCodeCheckbox
-						checked={yoloModeToggled}
-						disabled={isYoloRemoteLocked}
-						onChange={async (e) => {
-							const checked = getCheckboxChecked(e)
-							await StateServiceClient.updateSettings({ metadata: {}, yoloModeToggled: checked })
-						}}
-						title={
-							isYoloRemoteLocked
-								? "YOLO mode is managed by your organization"
-								: "Run autonomously without confirmation prompts"
-						}>
-						<span className="text-sm">YOLO mode</span>
-					</VSCodeCheckbox>
-				</div>
-
-				<div className="flex items-center gap-2 mb-1">
-					<VSCodeCheckbox
-						checked={autoApproveAllToggled}
-						disabled={yoloModeToggled}
-						onChange={async (e) => {
-							const checked = getCheckboxChecked(e)
-							await StateServiceClient.updateSettings({ metadata: {}, autoApproveAllToggled: checked })
-						}}
-						title="Auto-approve all, including unsafe commands">
-						<span className="text-sm">Approve All</span>
-					</VSCodeCheckbox>
-				</div>
-
-				<div className="flex items-center gap-2">
-					<VSCodeCheckbox
-						checked={autoApprovalSettings.enableNotifications}
-						disabled={autoApproveAllToggled || yoloModeToggled}
-						onChange={async (e) => {
-							const checked = getCheckboxChecked(e)
-							await updateAutoApproveSettings({
-								...autoApprovalSettings,
-								version: (autoApprovalSettings.version ?? 1) + 1,
-								enableNotifications: checked,
-							})
-						}}>
-						<span className="text-sm">Enable notifications</span>
-					</VSCodeCheckbox>
-				</div>
+			<div className="grid grid-cols-1 gap-x-1 min-[500px]:grid-cols-2">
+				{ACTION_METADATA.map((action) => (
+					<AutoApproveMenuItem
+						action={action}
+						disabled={autoApproveAllToggled || effectiveYoloMode}
+						isChecked={isChecked}
+						key={action.id}
+						onToggle={updateAction}
+					/>
+				))}
 			</div>
+
+			<div className="my-2 border-t border-muted-foreground/10" />
+
+			<AutoApproveMenuItem
+				action={NOTIFICATIONS_SETTING}
+				isChecked={isChecked}
+				onToggle={updateNotifications}
+			/>
+			<div className="px-0.5 py-0.5">
+				<VSCodeCheckbox
+					checked={strictPlanModeEnabled}
+					onChange={(event: any) => updateSetting("strictPlanModeEnabled", event.target.checked === true)}>
+					<span className="text-sm">Strict Plan Mode</span>
+				</VSCodeCheckbox>
+			</div>
+
+			<div className="my-2 border-t border-muted-foreground/10" />
+
+			<div className="mb-1 px-0.5">
+				<Tooltip>
+					<TooltipTrigger asChild>
+						<div className="inline-flex" tabIndex={0}>
+							<VSCodeCheckbox
+								checked={autoApproveAllToggled}
+								disabled={effectiveYoloMode || pendingAutoApproveAllToggled !== undefined}
+								onChange={(event: any) =>
+									void updateAutoApproveAll(event.target.checked === true)
+								}>
+								<span className="text-sm">Approve All</span>
+							</VSCodeCheckbox>
+						</div>
+					</TooltipTrigger>
+					<TooltipContent className="max-w-sm">{SETTINGS_HELP.approveAll}</TooltipContent>
+				</Tooltip>
+				{autoApproveAllUpdateError && (
+					<p className="mb-1 mt-1 text-xs text-(--vscode-errorForeground)">{autoApproveAllUpdateError}</p>
+				)}
+			</div>
+
+			<div className="px-0.5">
+				<Tooltip>
+					<TooltipTrigger asChild>
+						<div className="inline-flex items-center gap-2" tabIndex={isYoloRemoteLocked ? 0 : undefined}>
+							<VSCodeCheckbox
+								checked={effectiveYoloMode}
+								disabled={isYoloRemoteLocked}
+								onChange={(event: any) =>
+									updateSetting("yoloModeToggled", event.target.checked === true)
+								}>
+								<span className="text-sm">YOLO Mode</span>
+							</VSCodeCheckbox>
+							{isYoloRemoteLocked && <i className="codicon codicon-lock text-description text-sm" />}
+						</div>
+					</TooltipTrigger>
+					<TooltipContent hidden={!isYoloRemoteLocked}>{SETTINGS_HELP.managedSetting}</TooltipContent>
+				</Tooltip>
+				<p className="mb-1 mt-1 text-xs text-(--vscode-errorForeground)">{SETTINGS_HELP.yolo}</p>
+				<p className="m-0 text-xs text-muted-foreground">{SETTINGS_HELP.yoloPrecedence}</p>
+			</div>
+
+			<Button
+				className="mt-3"
+				onClick={() => {
+					setIsVisible(false)
+					navigateToSettings("approvals")
+				}}
+				size="sm"
+				variant="secondary">
+				More approval settings…
+			</Button>
 		</div>
 	)
 }

@@ -13,19 +13,8 @@ export async function toggleTaskFavorite(controller: Controller, request: TaskFa
 		throw new Error(`[toggleTaskFavorite] Task ${request.taskId} was not found`)
 	}
 
-	const updatedHistory = [...history]
-	updatedHistory[taskIndex] = {
-		...updatedHistory[taskIndex],
-		isFavorited: request.isFavorited,
-	}
-	controller.stateManager.setGlobalState("taskHistory", updatedHistory)
-
-	try {
-		await controller.stateManager.flushPendingState()
-	} catch (error) {
-		controller.stateManager.setGlobalState("taskHistory", history)
-		throw error
-	}
+	controller.stateManager.setTaskHistoryFavorite(request.taskId, request.isFavorited)
+	await controller.stateManager.flushPendingState()
 
 	await controller.postStateToWebview()
 	return Empty.create({})

@@ -64,6 +64,11 @@ interface FileSearchResult {
 
 const MAX_RESULTS = 30
 
+function spawnRipgrepProcess(binPath: string, args: string[]) {
+	return childProcess.spawn(binPath, args, { stdio: ["ignore", "pipe", "pipe"] })
+}
+export type RipgrepProcessSpawner = typeof spawnRipgrepProcess
+
 function isAllowedScopedNodeModulesPath(filePath: string, allowedScopes?: string[]): boolean {
 	if (!allowedScopes || allowedScopes.length === 0) return false
 	const parts = filePath.replace(/\\/g, "/").split("/")
@@ -73,14 +78,18 @@ function isAllowedScopedNodeModulesPath(filePath: string, allowedScopes?: string
 	return scope !== undefined && allowedScopes.includes(scope)
 }
 
-type RipgrepDebugLog = (info: Record<string, any>) => Promise<void>
-
-async function execRipgrep(args: string[], debugLog?: RipgrepDebugLog): Promise<string> {
+export async function execRipgrep(
+	args: string[],
+	signal?: AbortSignal,
+	spawnProcess: RipgrepProcessSpawner = spawnRipgrepProcess,
+): Promise<string> {
 	const binPath: string = await getBinaryLocation("rg")
-	await debugLog?.({ info: "execRipgrep start", binPath, args })
+	if (signal?.aborted) {
+		throw signal.reason instanceof Error ? signal.reason : new Error("Ripgrep search aborted")
+	}
 
 	return new Promise((resolve, reject) => {
-		const rgProcess = childProcess.spawn(binPath, args, { stdio: ["ignore", "pipe", "pipe"] })
+		const rgProcess = spawnProcess(binPath, args)
 		// cross-platform alternative to head, which is ripgrep author's recommendation for limiting output.
 		const rl = readline.createInterface({
 			input: rgProcess.stdout,
@@ -92,11 +101,13 @@ async function execRipgrep(args: string[], debugLog?: RipgrepDebugLog): Promise<
 		let errorOutput = ""
 		let settled = false
 		let killedAfterOutputLimit = false
+		let killedAfterAbort = false
 		const maxLines = MAX_RESULTS * 5 // limiting ripgrep output with max lines since there's no other way to limit results. it's okay that we're outputting as json, since we're parsing it line by line and ignore anything that's not part of a match. This assumes each result is at most 5 lines.
 
 		const finish = (error: Error | undefined, value?: string) => {
 			if (settled) return
 			settled = true
+			signal?.removeEventListener("abort", abortSearch)
 			if (error) {
 				reject(error)
 				return
@@ -112,6 +123,7 @@ async function execRipgrep(args: string[], debugLog?: RipgrepDebugLog): Promise<
 		}
 
 		rl.on("line", (line) => {
+			if (killedAfterOutputLimit || killedAfterAbort) return
 			if (lineCount < maxLines) {
 				output += line + "\n"
 				lineCount++
@@ -119,53 +131,39 @@ async function execRipgrep(args: string[], debugLog?: RipgrepDebugLog): Promise<
 			}
 
 			killedAfterOutputLimit = true
-			rl.close()
 			rgProcess.kill()
+			finish(undefined, output)
 		})
+
+		const abortSearch = () => {
+			killedAfterAbort = true
+			rgProcess.kill()
+			const reason = signal?.reason instanceof Error ? signal.reason : new Error("Ripgrep search aborted")
+			finish(reason)
+		}
+		signal?.addEventListener("abort", abortSearch, { once: true })
+		if (signal?.aborted) abortSearch()
 
 		rgProcess.stderr.on("data", (data) => {
 			errorOutput += data.toString()
 		})
 
 		rgProcess.on("error", (error) => {
-			void debugLog?.({
-				info: "execRipgrep process error",
-				binPath,
-				args,
-				errorMessage: error.message,
-				stack: error.stack,
-			})
 			finish(new Error(buildFailureMessage(`ripgrep spawn failed: ${error.message}`)))
 		})
 
 		rgProcess.on("close", (code, signal) => {
-			const finishDetails = {
-				info: "execRipgrep finished",
-				binPath,
-				args,
-				lineCount,
-				stderrOutput: errorOutput || "(none)",
-				exitCode: code,
-				signal,
-				killedAfterOutputLimit,
-				outputLength: output.length,
-				outputPreview: output.substring(0, 300),
-			}
-			void debugLog?.(finishDetails)
-
 			if (killedAfterOutputLimit) {
 				finish(undefined, output)
 				return
 			}
+			if (killedAfterAbort) return
 
 			if (code !== 0 && code !== 1) {
 				finish(new Error(buildFailureMessage(`ripgrep exited with code ${code}${signal ? ` and signal ${signal}` : ""}`)))
 				return
 			}
 
-			if (errorOutput) {
-				void debugLog?.({ info: "execRipgrep stderr (non-fatal)", stderr: errorOutput })
-			}
 			finish(undefined, output)
 		})
 	})
@@ -180,9 +178,9 @@ export async function regexSearchFiles(
 	anchorTaskId?: string,
 	contextLines?: number,
 	excludeFilePatterns?: string[],
-	debugLog?: RipgrepDebugLog,
 	includeAnchors?: boolean,
-	onAnchorStateChanged?: () => void,
+	onAnchorStateChanged?: (absolutePath: string) => void,
+	signal?: AbortSignal,
 	noIgnore?: boolean,
 	allowedNodeModuleScopes?: string[],
 ): Promise<string> {
@@ -198,36 +196,14 @@ export async function regexSearchFiles(
 	if (noIgnore) {
 		args.push("--no-ignore", "--hidden")
 	}
-	const argsDetails = {
-		info: "regexSearchFiles args",
-		args,
-		cwd,
-		directoryPath,
-		filePattern,
-		contextLines: cappedContextLines,
-		hasDiracIgnore: !!diracIgnoreController,
-	}
-	await debugLog?.(argsDetails)
 
 	let output: string
 	try {
-		output = await execRipgrep(args, debugLog)
+		output = await execRipgrep(args, signal)
 	} catch (error) {
-		await debugLog?.({
-			info: "regexSearchFiles execRipgrep error",
-			errorMessage: getErrorMessage(error),
-			stack: error instanceof Error ? error.stack : undefined,
-		})
 		const causeMessage = getErrorMessage(error)
 		throw new Error(`Error calling ripgrep: ${causeMessage}`, { cause: error })
 	}
-	const outputDetails = {
-		info: "regexSearchFiles ripgrep output",
-		outputLength: output.length,
-		outputPreview: output.substring(0, 500),
-		totalLines: output.split("\n").length,
-	}
-	await debugLog?.(outputDetails)
 
 	const resultsByFile: Map<string, Map<number, SearchResultLine>> = new Map()
 
@@ -254,24 +230,9 @@ export async function regexSearchFiles(
 				}
 			} catch (error) {
 				Logger.error("Error parsing ripgrep output:", error)
-				void debugLog?.({
-					info: "regexSearchFiles parse line error",
-					linePreview: line.substring(0, 300),
-					errorMessage: getErrorMessage(error),
-				})
 			}
 		}
 	})
-	const parsedDetails = {
-		info: "regexSearchFiles parsed",
-		totalFilesParsed: resultsByFile.size,
-		files: Array.from(resultsByFile.entries()).map(([file, lines]) => ({
-			file,
-			lineCount: lines.size,
-			matchCount: Array.from(lines.values()).filter((line) => line.isMatch).length,
-		})),
-	}
-	await debugLog?.(parsedDetails)
 
 	const fileResults: FileSearchResult[] = []
 	let finalMatchCount = 0
@@ -283,10 +244,6 @@ export async function regexSearchFiles(
 			!diracIgnoreController.validateAccess(filePath) &&
 			!isAllowedScopedNodeModulesPath(filePath, allowedNodeModuleScopes)
 		) {
-			await debugLog?.({
-				info: "regexSearchFiles diracIgnore filtered file",
-				filePath,
-			})
 			continue
 		}
 
@@ -294,13 +251,6 @@ export async function regexSearchFiles(
 		fileResults.push({ filePath, lines: sortedLines })
 		finalMatchCount += sortedLines.filter((line) => line.isMatch).length
 	}
-	const finalDetails = {
-		info: "regexSearchFiles final",
-		filesBeforeIgnoreFilter: resultsByFile.size,
-		filesAfterIgnoreFilter: fileResults.length,
-		finalMatchCount,
-	}
-	await debugLog?.(finalDetails)
 
 	return await formatResults(fileResults, finalMatchCount, cwd, anchorTaskId, includeAnchors, onAnchorStateChanged)
 }
@@ -315,7 +265,7 @@ export async function formatResults(
 	cwd: string,
 	anchorTaskId?: string,
 	includeAnchors?: boolean,
-	onAnchorStateChanged?: () => void,
+	onAnchorStateChanged?: (absolutePath: string) => void,
 ): Promise<string> {
 	let output = matchCount >= MAX_RESULTS
 		? `Showing first ${MAX_RESULTS} of ${matchCount.toLocaleString()}+ results. Use a more specific search if necessary.\n\n`
@@ -334,7 +284,7 @@ export async function formatResults(
 				currentLines = (await fs.readFile(absoluteFilePath, "utf8")).split(/\r?\n/)
 				const result = AnchorStateManager.reconcileWithChanges(absoluteFilePath, currentLines, anchorTaskId)
 				anchors = result.anchors
-				if (result.changed) onAnchorStateChanged?.()
+				if (result.changed) onAnchorStateChanged?.(absoluteFilePath)
 			} catch (error) {
 				Logger.error(`Error reading file for search anchors: ${absoluteFilePath}`, error)
 				const message = `${relPath}\n[Anchored results unavailable because the file could not be reread. Rerun search_files.]\n\n`

@@ -31,7 +31,11 @@ function makeEnv() {
 		config: {
 			isSubagentExecution: false,
 			autoApprover: { isUnrestrictedAutoApprove: sinon.stub().returns(false) },
-			callbacks: { shouldAutoApproveToolWithPath: sinon.stub().resolves(true) },
+			callbacks: {
+				shouldAutoApproveToolWithPath: sinon.stub().resolves(true),
+				resolveToolPathPermission: sinon.stub().resolves("auto_approve"),
+				assertMutationAuthorized: sinon.stub(),
+			},
 		},
 		workspace: {
 			readFile: sinon.stub().resolves("const oldName = 1"),
@@ -49,11 +53,14 @@ function makeEnv() {
 			upsertText: sinon.stub().resolves(),
 		},
 		editor: {
+			readText: sinon.stub().resolves("const oldName = 1"),
 			showReview: sinon.stub().resolves(),
 			scrollToFirstDiff: sinon.stub().resolves(),
 			hideReview: sinon.stub().resolves(),
 			undoUserEdits: sinon.stub().resolves(),
-			applyAndSaveSilently: sinon.stub().resolves({ content: "const newName = 1", userEdits: false, autoFormatting: false }),
+			applyAndSaveSilently: sinon
+				.stub()
+				.resolves({ content: "const newName = 1", userEdits: false, autoFormatting: false }),
 		},
 		diagnostics: {
 			prepare: sinon.stub().resolves(),
@@ -95,12 +102,12 @@ describe("EditAstTool", () => {
 
 	it("does not write when planning has a failure", async () => {
 		const { env } = makeEnv()
-			; (env.sourceAst.planRename as sinon.SinonStub).resolves({
-				...renamePlan,
-				files: [],
-				editCount: 0,
-				failures: [{ status: "ambiguous", path: "src", symbol: "oldName", message: "ambiguous" }],
-			})
+		;(env.sourceAst.planRename as sinon.SinonStub).resolves({
+			...renamePlan,
+			files: [],
+			editCount: 0,
+			failures: [{ status: "ambiguous", path: "src", symbol: "oldName", message: "ambiguous" }],
+		})
 
 		const result = await tool.processCall(
 			{ operation: "rename", targets: [{ path: "src", symbol: "oldName", replacement: "newName" }] },
@@ -113,7 +120,7 @@ describe("EditAstTool", () => {
 
 	it("applies an auto-approved plan and finalizes the file card", async () => {
 		const { env, progressCard } = makeEnv()
-			; (env.sourceAst.planRename as sinon.SinonStub).resolves(renamePlan)
+		;(env.sourceAst.planRename as sinon.SinonStub).resolves(renamePlan)
 
 		const result = await tool.processCall(
 			{ operation: "rename", targets: [{ path: "src", symbol: "oldName", replacement: "newName" }] },
@@ -123,17 +130,28 @@ describe("EditAstTool", () => {
 		assert.match(result, /Rename completed/)
 		sinon.assert.calledOnce(env.editor.applyAndSaveSilently as sinon.SinonStub)
 		sinon.assert.calledWith(progressCard.finalize, CardStatus.SUCCESS)
-		sinon.assert.calledWith(
-			env.config.callbacks.shouldAutoApproveToolWithPath as sinon.SinonStub,
-			"edit_ast",
-			"src/a.ts",
-		)
+		sinon.assert.calledWith(env.config.callbacks.shouldAutoApproveToolWithPath as sinon.SinonStub, "edit_ast", "src/a.ts")
 	})
 
-	it("does not create interactive cards in subagent execution", async () => {
+	it("stops before the AST applier when mutation consent is revoked after approval", async () => {
 		const { env } = makeEnv()
-			; (env.config as any).isSubagentExecution = true
-			; (env.sourceAst.planRename as sinon.SinonStub).resolves(renamePlan)
+		;(env.sourceAst.planRename as sinon.SinonStub).resolves(renamePlan)
+		;(env.config.callbacks.assertMutationAuthorized as sinon.SinonStub).throws(new Error("Plan Mode revoked mutation"))
+
+		const result = await tool.processCall(
+			{ operation: "rename", targets: [{ path: "src", symbol: "oldName", replacement: "newName" }] },
+			env,
+		)
+
+		assert.match(result, /Plan Mode revoked mutation/)
+		sinon.assert.calledOnceWithExactly(env.config.callbacks.assertMutationAuthorized as sinon.SinonStub, "edit_ast")
+		sinon.assert.notCalled(env.editor.applyAndSaveSilently as sinon.SinonStub)
+	})
+
+	it("keeps deterministic auto-approval silent in subagent execution", async () => {
+		const { env } = makeEnv()
+		;(env.config as any).isSubagentExecution = true
+		;(env.sourceAst.planRename as sinon.SinonStub).resolves(renamePlan)
 
 		await tool.processCall(
 			{ operation: "rename", targets: [{ path: "src", symbol: "oldName", replacement: "newName" }] },
@@ -144,11 +162,11 @@ describe("EditAstTool", () => {
 		sinon.assert.calledOnce(env.editor.applyAndSaveSilently as sinon.SinonStub)
 	})
 
-	it("rejects non-auto-approved subagent paths before writing", async () => {
+	it("preserves non-interactive subagent rejection when legacy auto-approval fails", async () => {
 		const { env } = makeEnv()
-			; (env.config as any).isSubagentExecution = true
-			; (env.config.callbacks.shouldAutoApproveToolWithPath as sinon.SinonStub).resolves(false)
-			; (env.sourceAst.planRename as sinon.SinonStub).resolves(renamePlan)
+		;(env.config as any).isSubagentExecution = true
+		;(env.config.callbacks.shouldAutoApproveToolWithPath as sinon.SinonStub).resolves(false)
+		;(env.sourceAst.planRename as sinon.SinonStub).resolves(renamePlan)
 
 		const result = await tool.processCall(
 			{ operation: "rename", targets: [{ path: "src", symbol: "oldName", replacement: "newName" }] },
@@ -160,11 +178,32 @@ describe("EditAstTool", () => {
 		sinon.assert.notCalled(env.editor.applyAndSaveSilently as sinon.SinonStub)
 	})
 
+	it("routes Utility-eligible subagent paths through the inherited approval card", async () => {
+		const { env, approvalCard } = makeEnv()
+		;(env.config as any).permissionDecisionBinding = { service: { decide: sinon.stub() }, configurationRevision: 1 }
+		;(env.config as any).isSubagentExecution = true
+		;(env.config.callbacks.resolveToolPathPermission as sinon.SinonStub).resolves("utility_eligible")
+		;(env.sourceAst.planRename as sinon.SinonStub).resolves(renamePlan)
+
+		const result = await tool.processCall(
+			{ operation: "rename", targets: [{ path: "src", symbol: "oldName", replacement: "newName" }] },
+			env,
+		)
+
+		assert.match(result, /Rename completed/)
+		sinon.assert.calledWithMatch(env.ui.createCard as sinon.SinonStub, {
+			requireApproval: true,
+			permissionRequestKind: "tool",
+		})
+		sinon.assert.calledOnce(approvalCard.waitForInteraction as sinon.SinonStub)
+		sinon.assert.calledOnce(env.editor.applyAndSaveSilently as sinon.SinonStub)
+	})
+
 	it("reports saved files when post-write observability fails", async () => {
 		const { env, progressCard } = makeEnv()
-			; (env.sourceAst.planRename as sinon.SinonStub).resolves(renamePlan)
-			; (progressCard.update as sinon.SinonStub).onSecondCall().rejects(new Error("card unavailable"))
-			; (env.telemetry.captureCustomMetadata as sinon.SinonStub).throws(new Error("telemetry unavailable"))
+		;(env.sourceAst.planRename as sinon.SinonStub).resolves(renamePlan)
+		;(progressCard.update as sinon.SinonStub).onSecondCall().rejects(new Error("card unavailable"))
+		;(env.telemetry.captureCustomMetadata as sinon.SinonStub).throws(new Error("telemetry unavailable"))
 
 		const result = await tool.processCall(
 			{ operation: "rename", targets: [{ path: "src", symbol: "oldName", replacement: "newName" }] },
@@ -179,11 +218,10 @@ describe("EditAstTool", () => {
 		sinon.assert.calledWith(progressCard.finalize, CardStatus.SUCCESS)
 	})
 
-
 	it("does not overwrite a file that changed after planning", async () => {
 		const { env } = makeEnv()
-			; (env.sourceAst.planRename as sinon.SinonStub).resolves(renamePlan)
-			; (env.workspace.readFile as sinon.SinonStub).resolves("const userChange = 1")
+		;(env.sourceAst.planRename as sinon.SinonStub).resolves(renamePlan)
+		;(env.editor.readText as sinon.SinonStub).resolves("const userChange = 1")
 
 		const result = await tool.processCall(
 			{ operation: "rename", targets: [{ path: "src", symbol: "oldName", replacement: "newName" }] },
@@ -194,11 +232,10 @@ describe("EditAstTool", () => {
 		sinon.assert.notCalled(env.editor.applyAndSaveSilently as sinon.SinonStub)
 	})
 
-
 	it("preserves saved-file reporting when result formatting fails", async () => {
 		const { env } = makeEnv()
-			; (env.sourceAst.planRename as sinon.SinonStub).resolves(renamePlan)
-			; (tool as any).formatter.formatResult = sinon.stub().throws(new Error("formatter unavailable"))
+		;(env.sourceAst.planRename as sinon.SinonStub).resolves(renamePlan)
+		;(tool as any).formatter.formatResult = sinon.stub().throws(new Error("formatter unavailable"))
 
 		const result = await tool.processCall(
 			{ operation: "rename", targets: [{ path: "src", symbol: "oldName", replacement: "newName" }] },
@@ -210,20 +247,24 @@ describe("EditAstTool", () => {
 		sinon.assert.calledOnce(env.editor.applyAndSaveSilently as sinon.SinonStub)
 	})
 
-
 	it("sets approval cards to a terminal status before finalization", async () => {
 		const { env, approvalCard } = makeEnv()
-			; (env.config.callbacks.shouldAutoApproveToolWithPath as sinon.SinonStub).resolves(false)
-			; (env.sourceAst.planRename as sinon.SinonStub).resolves(renamePlan)
-			; (approvalCard.finalize as sinon.SinonStub).rejects(new Error("finalization unavailable"))
+		;(env.config as any).permissionDecisionBinding = { service: { decide: sinon.stub() }, configurationRevision: 1 }
+		;(env.config.callbacks.resolveToolPathPermission as sinon.SinonStub).resolves("manual_only")
+		;(env.sourceAst.planRename as sinon.SinonStub).resolves(renamePlan)
+		;(approvalCard.finalize as sinon.SinonStub).rejects(new Error("finalization unavailable"))
 
 		await tool.processCall(
 			{ operation: "rename", targets: [{ path: "src", symbol: "oldName", replacement: "newName" }] },
 			env,
 		)
 
+		sinon.assert.calledWithMatch(env.ui.createCard as sinon.SinonStub, {
+			requireApproval: true,
+			permissionRequestKind: "manual_tool",
+		})
+
 		assert.equal(approvalCard.status, CardStatus.SUCCESS)
 		sinon.assert.notCalled(env.editor.applyAndSaveSilently as sinon.SinonStub)
 	})
-
 })

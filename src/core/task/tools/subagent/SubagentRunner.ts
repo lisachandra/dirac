@@ -1,270 +1,63 @@
 import * as path from "node:path"
-import type { ApiHandler, buildApiHandler } from "@core/api"
-import { parseAssistantMessageV2, ToolParamName, ToolUse } from "@core/assistant-message"
 import { formatResponse } from "@core/formatResponse"
 import { StreamResponseHandler } from "@core/task/StreamResponseHandler"
 import { type ToolRequestSnapshot } from "@core/task/tools/runtime/ToolSnapshot"
-import { DiracAssistantToolUseBlock, DiracContent, DiracStorageMessage, DiracTextContentBlock } from "@shared/messages"
+import { SubagentExecutionStatus } from "@shared/ExtensionMessage"
+import { DiracContent, DiracStorageMessage, DiracTextContentBlock } from "@shared/messages"
 import { Logger } from "@shared/services/Logger"
 import { NATIVE_WEB_SEARCH_SKILL_NAME } from "@shared/skills"
+import { SubagentTrajectoryEventType } from "@shared/subagents"
 import { DiracTool } from "@shared/tools"
 import { ContextManager } from "@/core/context/context-management/ContextManager"
 import { checkContextWindowExceededError } from "@/core/context/context-management/context-error-handling"
-import { getContextWindowInfo } from "@/core/context/context-management/context-window-utils"
 import { DiracError, DiracErrorType } from "@/services/error"
 import { calculateApiCostAnthropic } from "@/utils/cost"
 import { TaskState } from "../../TaskState"
 import { excerpt } from "../../utils/excerpt"
 import { ToolExecutorCoordinator } from "../ToolExecutorCoordinator"
-import type { TaskConfig } from "../types/TaskConfig"
+import type { SubagentRuntime, TaskConfig } from "../types/TaskConfig"
 import { SubagentAbortHandler } from "./SubagentAbortHandler"
 import { SubagentBuilder, type SubagentBuilderOptions } from "./SubagentBuilder"
 import { SubagentContextBuilder } from "./SubagentContextBuilder"
 import { resolveSubagentTimeoutSeconds } from "./SubagentExecutionPolicy"
-import { SubagentToolExecutor } from "./SubagentToolExecutor"
-import { SubagentTrajectoryEventType, type SubagentTrajectoryEvent } from "@shared/subagents"
-import { SubagentExecutionStatus } from "@shared/ExtensionMessage"
+import {
+	createEmptyRequestUsageState,
+	createEmptySubagentRunStats,
+	getBestEffortResult,
+	normalizeToolCallArguments,
+	parseNonNativeToolCalls,
+	resolveToolUseId,
+	toAssistantToolUseBlock,
+} from "./SubagentRunHelpers"
+import { SubagentRunProgress } from "./SubagentRunProgress"
 import type { SubagentDiagnosticEvent, SubagentRunPhase, SubagentTranscriptEvent } from "./SubagentRunRecorder"
+import { SubagentRunState } from "./SubagentRunState"
+import type {
+	SubagentProgressUpdate,
+	SubagentRunResult,
+	SubagentRunStats,
+	SubagentRunStatus,
+	SubagentToolCall,
+	SubagentUsageState,
+} from "./SubagentRunTypes"
+import { SubagentToolExecutor } from "./SubagentToolExecutor"
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 const MAX_EMPTY_ASSISTANT_RETRIES = 3
 const MAX_INITIAL_STREAM_ATTEMPTS = 3
 const INITIAL_STREAM_RETRY_BASE_DELAY_MS = 2_000
-const PROGRESS_UPDATE_DRAIN_TIMEOUT_MS = 1_000
 const PARENT_ABORT_POLL_INTERVAL_MS = 50
 const WRAP_UP_TIMEOUT_SECONDS = 90
-const SUBAGENT_HEARTBEAT_INTERVAL_MS = 5_000
-const SUBAGENT_STALL_WARNING_MS = 30_000
 const WRAP_UP_PROMPT =
 	'The research deadline has elapsed. Stop investigating and summarize the concrete findings you already established. Call respond with operation "complete" now. Do not perform further research.'
-
-export type SubagentRunStatus =
-	| typeof SubagentExecutionStatus.COMPLETED
-	| typeof SubagentExecutionStatus.FAILED
-	| typeof SubagentExecutionStatus.CANCELLED
-
-export interface SubagentRunResult {
-	status: SubagentRunStatus
-	result?: string
-	error?: string
-	stats: SubagentRunStats
-}
-
-export interface SubagentProgressUpdate {
-	stats?: SubagentRunStats
-	latestToolCall?: string
-	status?: SubagentExecutionStatus
-	result?: string
-	error?: string
-	textChunk?: string
-	trajectoryEvent?: SubagentTrajectoryEvent
-	isWrappingUp?: boolean
-	phase?: SubagentRunPhase
-	phaseStartedAt?: number
-	lastActivityAt?: number
-	isStalled?: boolean
-	transcriptPath?: string
-	diagnosticsPath?: string
-}
-
-export interface SubagentRunStats {
-	toolCalls: number
-	inputTokens: number
-	outputTokens: number
-	cacheWriteTokens: number
-	cacheReadTokens: number
-	totalCost: number
-	contextTokens: number
-	contextWindow: number
-	contextUsagePercentage: number
-}
-
-interface SubagentRequestUsageState {
-	inputTokens: number
-	outputTokens: number
-	cacheWriteTokens: number
-	cacheReadTokens: number
-	totalTokens: number
-	totalCost?: number
-}
-
-interface SubagentUsageState {
-	currentRequest: SubagentRequestUsageState
-	lastRequest?: SubagentRequestUsageState
-}
-
-export interface SubagentToolCall {
-	toolUseId: string
-	id?: string
-	call_id?: string
-	signature?: string
-	name: string
-	input: unknown
-	isNativeToolCall: boolean
-}
 
 interface SubagentContextState {
 	conversationHistoryDeletedRange?: [number, number]
 }
 
-function createEmptyRequestUsageState(): SubagentRequestUsageState {
-	return {
-		inputTokens: 0,
-		outputTokens: 0,
-		cacheWriteTokens: 0,
-		cacheReadTokens: 0,
-		totalTokens: 0,
-	}
-}
-
-function createEmptySubagentRunStats(): SubagentRunStats {
-	return {
-		toolCalls: 0,
-		inputTokens: 0,
-		outputTokens: 0,
-		cacheWriteTokens: 0,
-		cacheReadTokens: 0,
-		totalCost: 0,
-		contextTokens: 0,
-		contextWindow: 0,
-		contextUsagePercentage: 0,
-	}
-}
-
-export function serializeToolResult(result: unknown): string {
-	if (typeof result === "string") {
-		return result
-	}
-
-	if (Array.isArray(result)) {
-		return result
-			.map((item) => {
-				if (!item || typeof item !== "object") {
-					return String(item)
-				}
-
-				const maybeText = (item as { text?: string }).text
-				if (typeof maybeText === "string") {
-					return maybeText
-				}
-
-				return JSON.stringify(item)
-			})
-			.join("")
-	}
-
-	return JSON.stringify(result, null, 2)
-}
-
-export function toToolUseParams(input: unknown): Partial<Record<ToolParamName, any>> {
-	if (!input || typeof input !== "object") {
-		return {}
-	}
-
-	return input as Partial<Record<ToolParamName, any>>
-}
-
-function formatToolArgPreview(value: any, maxLength = 48): string {
-	const stringValue = typeof value === "string" ? value : JSON.stringify(value)
-	const normalized = stringValue.replace(/\s+/g, " ").trim()
-	if (normalized.length <= maxLength) {
-		return normalized
-	}
-	return `${normalized.slice(0, maxLength - 3)}...`
-}
-
-export function formatToolCallPreview(toolName: string, params: Partial<Record<string, string>>): string {
-	const entries = Object.entries(params).filter(([, value]) => value !== undefined)
-	const visibleEntries = entries.slice(0, 3)
-	const omittedCount = Math.max(0, entries.length - visibleEntries.length)
-
-	const args = visibleEntries
-		.map(([key, value]) => `${key}=${formatToolArgPreview(value ?? "")}`)
-		.concat(omittedCount > 0 ? [`...+${omittedCount}`] : [])
-		.join(", ")
-
-	return `${toolName}(${args})`
-}
-
-function normalizeToolCallArguments(argumentsPayload: unknown): string {
-	if (typeof argumentsPayload === "string") {
-		return argumentsPayload
-	}
-
-	try {
-		return JSON.stringify(argumentsPayload ?? {})
-	} catch {
-		return "{}"
-	}
-}
-
-function resolveToolUseId(call: { id?: string; call_id?: string; name?: string }, index: number): string {
-	const id = call.id?.trim()
-	if (id) {
-		return id
-	}
-
-	const callId = call.call_id?.trim()
-	if (callId) {
-		return callId
-	}
-
-	const fallbackId = `subagent_tool_${Date.now()}_${index + 1}`
-	Logger.warn(`[SubagentRunner] Missing tool call id for '${call.name || "unknown"}'; using fallback '${fallbackId}'`)
-	return fallbackId
-}
-
-function toAssistantToolUseBlock(call: SubagentToolCall): DiracAssistantToolUseBlock {
-	return {
-		type: "tool_use",
-		id: call.toolUseId,
-		name: call.name,
-		input: call.input,
-		call_id: call.call_id,
-		signature: call.signature,
-	}
-}
-
-function parseNonNativeToolCalls(assistantText: string): SubagentToolCall[] {
-	const parsedBlocks = parseAssistantMessageV2(assistantText)
-
-	return parsedBlocks
-		.filter((block): block is ToolUse => block.type === "tool_use")
-		.map((block, index) => ({
-			toolUseId: resolveToolUseId({ call_id: block.call_id, name: block.name }, index),
-			name: block.name,
-			input: block.params,
-			call_id: block.call_id,
-			signature: block.signature,
-			isNativeToolCall: false,
-		}))
-}
-
-export function pushSubagentToolResultBlock(
-	toolResultBlocks: DiracContent[],
-	call: SubagentToolCall,
-	label: string,
-	content: string,
-): void {
-	if (call.isNativeToolCall) {
-		toolResultBlocks.push({
-			type: "tool_result",
-			tool_use_id: call.toolUseId,
-			call_id: call.call_id,
-			content,
-		})
-		return
-	}
-
-	toolResultBlocks.push({
-		type: "text",
-		text: `${label} Result:\n${content}`,
-	})
-}
-
 export class SubagentRunner {
 	private readonly agent: SubagentBuilder
-	private readonly apiHandler: ApiHandler
+	private readonly runtime: SubagentRuntime
 	private readonly allowedTools: string[]
 	private readonly contextBuilder: SubagentContextBuilder
 	private readonly abortHandler: SubagentAbortHandler
@@ -272,7 +65,6 @@ export class SubagentRunner {
 	private activeApiAbort: (() => void) | undefined
 	private abortRequested = false
 	private abortReason?: string
-	private activeCommandExecutions = 0
 	private abortingCommands = false
 	private activeTaskState?: TaskState
 	private activeConversation: DiracStorageMessage[] = []
@@ -280,16 +72,6 @@ export class SubagentRunner {
 	private readonly subagentName: string
 	private wrapUpRequested = false
 	private isWrappingUp = false
-	private currentPhase: SubagentRunPhase = "starting"
-	private phaseStartedAt = 0
-	private lastActivityAt = 0
-	private lastMeaningfulAction = "not started"
-	private currentAttempt: number | undefined
-	private livenessWarningIssued = false
-	private terminalRecorded = false
-	private recorderFailureReported = false
-	private progressSink: ((update: SubagentProgressUpdate) => void) | undefined
-	private heartbeatHandle: NodeJS.Timeout | undefined
 
 	constructor(
 		private baseConfig: TaskConfig,
@@ -298,19 +80,19 @@ export class SubagentRunner {
 	) {
 		this.agent = new SubagentBuilder(baseConfig, subagentName, options)
 		this.subagentName = subagentName
-		this.apiHandler = this.agent.getApiHandler()
+		this.runtime = this.agent.getRuntime()
 		this.allowedTools = this.agent.getAllowedTools()
-		this.contextBuilder = new SubagentContextBuilder(baseConfig, this.agent, this.allowedTools, this.apiHandler)
-		this.abortHandler = new SubagentAbortHandler(
-			() => this.abortReason,
-			(conv) => this.getBestEffortResult(conv),
-		)
+		this.contextBuilder = new SubagentContextBuilder(baseConfig, this.agent, this.allowedTools, this.runtime)
+		const logPrefix = `[SubagentRunner:${this.subagentName || "unnamed"}]`
+		this.runProgress = new SubagentRunProgress(options.recorder, logPrefix)
+		this.runState = new SubagentRunState(baseConfig, this.runProgress)
+		this.abortHandler = new SubagentAbortHandler(() => this.abortReason, getBestEffortResult)
 		this.toolExecutor = new SubagentToolExecutor(
 			(state, coordinator) => this.createSubagentTaskConfig(state, coordinator),
 			(name, snap) => this.isAllowedTool(name, snap),
 			{
 				recordToolCall: (call) =>
-					this.recordTranscript("tool_call", {
+					this.runProgress.recordTranscript("tool_call", {
 						toolUseId: call.toolUseId,
 						id: call.id,
 						callId: call.call_id,
@@ -319,15 +101,15 @@ export class SubagentRunner {
 						isNativeToolCall: call.isNativeToolCall,
 					}),
 				recordToolResult: (call, result) =>
-					this.recordTranscript("tool_result", {
+					this.runProgress.recordTranscript("tool_result", {
 						toolUseId: call.toolUseId,
 						id: call.id,
 						callId: call.call_id,
 						name: call.name,
 						result,
 					}),
-				recordProgress: (text) => this.recordTranscript("progress", { text }),
-				markActivity: (action) => this.markActivity(action),
+				recordProgress: (text) => this.runProgress.recordTranscript("progress", { text }),
+				markActivity: (action) => this.runState.markActivity(action),
 			},
 		)
 	}
@@ -336,89 +118,27 @@ export class SubagentRunner {
 		SubagentProgressUpdate,
 		"phase" | "phaseStartedAt" | "lastActivityAt" | "isStalled" | "transcriptPath" | "diagnosticsPath"
 	> {
-		const paths = this.options.recorder?.getPaths()
-		return {
-			phase: this.currentPhase,
-			phaseStartedAt: this.phaseStartedAt,
-			lastActivityAt: this.lastActivityAt,
-			isStalled:
-				this.currentPhase !== "completed" &&
-				this.currentPhase !== "failed" &&
-				this.currentPhase !== "cancelled" &&
-				Date.now() - this.lastActivityAt >= SUBAGENT_STALL_WARNING_MS,
-			transcriptPath: paths?.transcriptPath,
-			diagnosticsPath: paths?.diagnosticsPath,
-		}
+		return this.runState.getRuntimeProgress()
 	}
 
 	private getDiagnosticDetails(details: Record<string, unknown> = {}): Record<string, unknown> {
-		return {
-			...details,
-			phaseStartedAt: this.phaseStartedAt,
-			lastActivityAt: this.lastActivityAt,
-			elapsedMs: Math.max(0, Date.now() - this.phaseStartedAt),
-			lastMeaningfulAction: this.lastMeaningfulAction,
-			attempt: this.currentAttempt,
-			activeCommandExecutions: this.activeCommandExecutions,
-			parentAbortRequested: this.baseConfig.taskState.abort,
-		}
+		return this.runState.getDiagnosticDetails(details)
 	}
 
 	private enterPhase(phase: SubagentRunPhase, action: string, details: Record<string, unknown> = {}): void {
-		const previousPhase = this.currentPhase
-		const previousPhaseStartedAt = this.phaseStartedAt
-		if (previousPhase === phase && previousPhaseStartedAt > 0) {
-			this.markActivity(action)
-			return
-		}
-		const now = Date.now()
-		if (previousPhase !== phase && previousPhaseStartedAt > 0) {
-			this.recordDiagnostic("phase_completed", previousPhase, {
-				completedPhase: previousPhase,
-				nextPhase: phase,
-				durationMs: now - previousPhaseStartedAt,
-			})
-		}
-		this.currentPhase = phase
-		this.phaseStartedAt = now
-		this.lastActivityAt = now
-		this.lastMeaningfulAction = action
-		this.livenessWarningIssued = false
-		this.recordDiagnostic("phase_entered", phase, details)
-		this.publishRuntimeState()
+		this.runState.enterPhase(phase, action, details)
 	}
 
 	private markActivity(action: string): void {
-		const wasStalled = this.getRuntimeProgress().isStalled
-		this.lastActivityAt = Date.now()
-		this.lastMeaningfulAction = action
-		this.livenessWarningIssued = false
-		if (wasStalled) this.publishRuntimeState()
+		this.runState.markActivity(action)
 	}
 
 	private startHeartbeat(): void {
-		this.heartbeatHandle = setInterval(() => this.heartbeat(), SUBAGENT_HEARTBEAT_INTERVAL_MS)
-	}
-
-	private heartbeat(): void {
-		const runtime = this.getRuntimeProgress()
-		this.recordDiagnostic("heartbeat", this.currentPhase, { isStalled: runtime.isStalled })
-		if (!runtime.isStalled || this.livenessWarningIssued) return
-		this.livenessWarningIssued = true
-		this.recordDiagnostic("liveness_warning", this.currentPhase, {
-			inactiveForMs: Date.now() - this.lastActivityAt,
-		})
-		this.publishRuntimeState()
-	}
-
-	private publishRuntimeState(): void {
-		this.progressSink?.(this.getRuntimeProgress())
+		this.runState.startHeartbeat()
 	}
 
 	private recordTranscript(type: SubagentTranscriptEvent["type"], details: Record<string, unknown>): void {
-		const recorder = this.options.recorder
-		if (!recorder) return
-		void recorder.recordTranscript({ type, details }).catch((error) => this.reportRecorderFailure(error))
+		this.runProgress.recordTranscript(type, details)
 	}
 
 	private recordDiagnostic(
@@ -426,33 +146,22 @@ export class SubagentRunner {
 		phase: SubagentRunPhase,
 		details: Record<string, unknown> = {},
 	): void {
-		const recorder = this.options.recorder
-		if (!recorder) return
-		void recorder
-			.recordDiagnostic({ type, phase, details: this.getDiagnosticDetails(details) })
-			.catch((error) => this.reportRecorderFailure(error))
+		this.runProgress.recordDiagnostic(type, phase, this.runState.getDiagnosticDetails(details))
 	}
 
 	private recordTerminal(result: SubagentRunResult): void {
-		if (this.terminalRecorded) return
-		this.terminalRecorded = true
+		// Phase transition must happen before the terminal record so progress
+		// reports a final "cancelled" (not "cancelling") on timeout/abort.
 		this.enterPhase(this.phaseForStatus(result.status), "subagent run settled", { status: result.status })
-		const recorder = this.options.recorder
-		if (!recorder) return
-		void recorder
-			.recordTerminal(result.status, this.getDiagnosticDetails({
+		this.runProgress.recordTerminal(
+			result,
+			this.runState.getDiagnosticDetails({
 				result: result.result,
 				error: result.error,
 				stats: result.stats,
 				abortReason: this.abortReason,
-			}))
-			.catch((error) => this.reportRecorderFailure(error))
-	}
-
-	private reportRecorderFailure(error: unknown): void {
-		if (this.recorderFailureReported) return
-		this.recorderFailureReported = true
-		Logger.error(`[SubagentRunner:${this.subagentName || "unnamed"}] recorder append failed`, error)
+			}),
+		)
 	}
 
 	private isAllowedTool(toolName: string, requestSnapshot: ToolRequestSnapshot): boolean {
@@ -475,13 +184,13 @@ export class SubagentRunner {
 		await this.stopActiveWork()
 	}
 
-	private async requestWrapUp(onProgress: (update: SubagentProgressUpdate) => void): Promise<void> {
+	private async requestWrapUp(): Promise<void> {
 		if (this.wrapUpRequested || this.isWrappingUp || this.shouldAbort()) return
 		this.wrapUpRequested = true
 		this.enterPhase("wrapping_up", "execution deadline reached")
 		this.recordTranscript("progress", { text: "Time limit reached. Wrapping up findings." })
 		this.recordDiagnostic("abort_requested", "wrapping_up", { reason: "execution deadline reached" })
-		onProgress({
+		this.runProgress.enqueueExecutionProgress({
 			...this.getRuntimeProgress(),
 			isWrappingUp: true,
 			trajectoryEvent: { type: SubagentTrajectoryEventType.MESSAGE, text: "Time limit reached. Wrapping up findings." },
@@ -508,7 +217,11 @@ export class SubagentRunner {
 			Logger.error("[SubagentRunner] failed to abort active API stream", error)
 		}
 
-		if (this.activeCommandExecutions > 0 && !this.abortingCommands && this.baseConfig.callbacks.cancelRunningCommandTool) {
+		if (
+			this.runState.activeCommandExecutions > 0 &&
+			!this.abortingCommands &&
+			this.baseConfig.callbacks.cancelRunningCommandTool
+		) {
 			this.abortingCommands = true
 			try {
 				await this.baseConfig.callbacks.cancelRunningCommandTool()
@@ -520,11 +233,8 @@ export class SubagentRunner {
 		}
 	}
 
-
 	private phaseForStatus(status: SubagentRunStatus): SubagentRunPhase {
-		if (status === SubagentExecutionStatus.COMPLETED) return "completed"
-		if (status === SubagentExecutionStatus.FAILED) return "failed"
-		return "cancelled"
+		return this.runState.phaseForStatus(status)
 	}
 
 	private shouldAbort(): boolean {
@@ -569,28 +279,8 @@ export class SubagentRunner {
 		this.activeTaskState = undefined
 		this.activeConversation = []
 		this.activeStats = createEmptySubagentRunStats()
-		this.currentPhase = "starting"
-		this.phaseStartedAt = 0
-		this.lastActivityAt = 0
-		this.lastMeaningfulAction = "run initialized"
-		this.currentAttempt = undefined
-		this.livenessWarningIssued = false
-		this.terminalRecorded = false
-		this.recorderFailureReported = false
-
-		let acceptsExecutionProgress = true
-		let discardQueuedExecutionProgress = false
-		let progressUpdates = Promise.resolve()
-		const enqueueExecutionProgress = (update: SubagentProgressUpdate): void => {
-			if (!acceptsExecutionProgress) return
-			progressUpdates = progressUpdates
-				.then(async () => {
-					if (discardQueuedExecutionProgress) return
-					await onProgress(update)
-				})
-				.catch((error) => Logger.error(`${logPrefix} progress observer failed`, error))
-		}
-		this.progressSink = enqueueExecutionProgress
+		this.runState.reset()
+		this.runProgress.beginExecution(onProgress)
 		this.enterPhase("starting", "subagent run dispatched", { timeoutSeconds, includeHistory: includeHistory === true })
 		this.recordTranscript("progress", {
 			message: "subagent run dispatched",
@@ -611,9 +301,9 @@ export class SubagentRunner {
 			resolveTermination()
 		}
 		let wrapUpTimeoutHandle: NodeJS.Timeout | undefined
-		const requestWrapUp = () => {
+		const scheduleWrapUp = () => {
 			if (terminationRequested || this.wrapUpRequested || this.isWrappingUp) return
-			void this.requestWrapUp(enqueueExecutionProgress)
+			void this.requestWrapUp()
 			wrapUpTimeoutHandle = setTimeout(
 				() =>
 					requestTermination(
@@ -623,14 +313,14 @@ export class SubagentRunner {
 			)
 		}
 
-		const timeoutHandle = setTimeout(requestWrapUp, timeoutSeconds * 1000)
+		const timeoutHandle = setTimeout(scheduleWrapUp, timeoutSeconds * 1000)
 		const parentAbortPoll = setInterval(() => {
 			if (this.baseConfig.taskState.abort) {
 				requestTermination("Subagent run cancelled because the parent task was cancelled.")
 			}
 		}, PARENT_ABORT_POLL_INTERVAL_MS)
 
-		const executionPromise = this.executeRun(prompt, enqueueExecutionProgress, timeoutSeconds, includeHistory)
+		const executionPromise = this.executeRun(prompt, timeoutSeconds, includeHistory)
 		void executionPromise.catch((error) => {
 			if (terminationRequested) Logger.error(`${logPrefix} abandoned execution failed after termination`, error)
 		})
@@ -647,17 +337,17 @@ export class SubagentRunner {
 
 			if (outcome.kind === "execution") {
 				this.recordTerminal(outcome.result)
-				acceptsExecutionProgress = false
-				const progressDrained = await this.drainProgressUpdates(progressUpdates, logPrefix)
-				if (!progressDrained) discardQueuedExecutionProgress = true
+				this.runProgress.stopAcceptingUpdates()
+				const progressDrained = await this.drainProgressUpdates(undefined, logPrefix)
+				if (!progressDrained) this.runProgress.discardQueuedUpdates()
 				return outcome.result
 			}
 
-			discardQueuedExecutionProgress = true
+			this.runProgress.discardQueuedUpdates()
 			const result = this.abortHandler.buildAbortResult(this.activeConversation, this.activeStats)
 			this.recordTerminal(result)
-			acceptsExecutionProgress = false
-			await this.drainProgressUpdates(progressUpdates, logPrefix)
+			this.runProgress.stopAcceptingUpdates()
+			await this.drainProgressUpdates(undefined, logPrefix)
 			const terminalProgress = Promise.resolve()
 				.then(() => onProgress(this.toTerminalProgressUpdate(result)))
 				.catch((error) => Logger.error(`${logPrefix} terminal progress observer failed`, error))
@@ -667,20 +357,14 @@ export class SubagentRunner {
 			clearTimeout(timeoutHandle)
 			if (wrapUpTimeoutHandle) clearTimeout(wrapUpTimeoutHandle)
 			clearInterval(parentAbortPoll)
-			if (this.heartbeatHandle) clearInterval(this.heartbeatHandle)
-			this.heartbeatHandle = undefined
-			this.progressSink = undefined
-			const recorder = this.options.recorder
-			if (recorder) void recorder.flush().catch((error) => this.reportRecorderFailure(error))
+			this.runState.stopHeartbeat()
+			this.runProgress.endExecution()
+			// Fire-and-forget: recorder flush must not block terminal completion (matches pre-split behavior).
+			void this.runProgress.flush()
 		}
 	}
 
-	private async executeRun(
-		prompt: string,
-		onProgress: (update: SubagentProgressUpdate) => void | Promise<void>,
-		timeout: number,
-		includeHistory?: boolean,
-	): Promise<SubagentRunResult> {
+	private async executeRun(prompt: string, timeout: number, includeHistory?: boolean): Promise<SubagentRunResult> {
 		const state = new TaskState()
 		state.abort = this.abortRequested
 		state.activeSkillIds = [...this.baseConfig.taskState.activeSkillIds]
@@ -705,16 +389,17 @@ export class SubagentRunner {
 				this.enterPhase(this.phaseForStatus(update.status), `reported ${update.status} status`, { status: update.status })
 				Logger.info(`${logPrefix} ${update.status}: ${(update.result || update.error || "").substring(0, 200)}`)
 			}
-			return onProgress({ ...this.getRuntimeProgress(), ...update })
+			this.runProgress.enqueueExecutionProgress({ ...this.getRuntimeProgress(), ...update })
 		}
 
 		instrumentedOnProgress({
-			status: SubagentExecutionStatus.RUNNING, stats
+			status: SubagentExecutionStatus.RUNNING,
+			stats,
 		})
 
 		try {
-			const api = this.apiHandler
-			this.activeApiAbort = api.abort?.bind(api)
+			const runtime = this.runtime
+			this.activeApiAbort = () => runtime.abort()
 
 			this.enterPhase("building_initial_context", "building initial tool and provider context")
 			const initialContext = await this.contextBuilder.buildContext()
@@ -770,7 +455,7 @@ export class SubagentRunner {
 				if (
 					!this.isWrappingUp &&
 					usageState.lastRequest &&
-					this.shouldCompactBeforeNextRequest(usageState.lastRequest.totalTokens, api, context.providerInfo.model.id)
+					this.shouldCompactBeforeNextRequest(usageState.lastRequest.totalTokens, runtime.model.info.contextWindow)
 				) {
 					const compactResult = this.compactConversationForContextWindow(
 						contextManager,
@@ -789,13 +474,14 @@ export class SubagentRunner {
 				const { toolUseHandler, reasonsHandler } = streamHandler.getHandlers()
 				usageState.currentRequest = createEmptyRequestUsageState()
 				const requestUsage = usageState.currentRequest
+				const costBeforeRequest = stats.totalCost
 
 				let assistantText = ""
 				let assistantTextSignature: string | undefined
 				let requestId: string | undefined
 
 				const stream = this.createMessageWithInitialChunkRetry(
-					api,
+					runtime,
 					systemPrompt,
 					conversation,
 					requestSnapshot.nativeTools,
@@ -825,6 +511,14 @@ export class SubagentRunner {
 									requestUsage.cacheWriteTokens +
 									requestUsage.cacheReadTokens
 								requestUsage.totalCost = chunk.totalCost ?? requestUsage.totalCost
+								// Account as usage arrives so aborts, stream failures, and wrap-up retain billed usage.
+								stats.totalCost = costBeforeRequest + (requestUsage.totalCost ?? calculateApiCostAnthropic(
+									context.providerInfo.model.info,
+									requestUsage.inputTokens,
+									requestUsage.outputTokens,
+									requestUsage.cacheWriteTokens,
+									requestUsage.cacheReadTokens,
+								) ?? 0)
 								stats.contextTokens = requestUsage.totalTokens
 								stats.contextUsagePercentage =
 									stats.contextWindow > 0 ? (stats.contextTokens / stats.contextWindow) * 100 : 0
@@ -881,21 +575,6 @@ export class SubagentRunner {
 					throw error
 				}
 
-				const calculatedRequestCost =
-					requestUsage.totalCost ??
-					calculateApiCostAnthropic(
-						context.providerInfo.model.info,
-						requestUsage.inputTokens,
-						requestUsage.outputTokens,
-						requestUsage.cacheWriteTokens,
-						requestUsage.cacheReadTokens,
-					)
-				requestUsage.totalTokens =
-					requestUsage.inputTokens +
-					requestUsage.outputTokens +
-					requestUsage.cacheWriteTokens +
-					requestUsage.cacheReadTokens
-				stats.totalCost += calculatedRequestCost || 0
 				usageState.lastRequest = { ...requestUsage }
 
 				const nativeFinalizedToolCalls = toolUseHandler.getAllFinalizedToolUses().map((toolCall, index) => ({
@@ -957,7 +636,7 @@ export class SubagentRunner {
 					}
 
 					emptyAssistantResponseRetries += 1
-					this.recordDiagnostic("retry", this.currentPhase, {
+					this.recordDiagnostic("retry", this.runState.currentPhase, {
 						kind: "empty_assistant_response",
 						attempt: emptyAssistantResponseRetries,
 					})
@@ -1062,66 +741,35 @@ export class SubagentRunner {
 	}
 
 	private toTerminalProgressUpdate(result: SubagentRunResult): SubagentProgressUpdate {
-		return {
-			...this.getRuntimeProgress(),
-			status: result.status,
-			result: result.result,
-			error: result.error,
-			stats: { ...result.stats },
-		}
+		return this.runProgress.toTerminalProgressUpdate(result, this.runState.getRuntimeProgress())
 	}
 
-	private async drainProgressUpdates(progressUpdates: Promise<void>, logPrefix: string): Promise<boolean> {
-		let progressDrainTimeout: NodeJS.Timeout | undefined
-		const progressUpdatesDrained = await Promise.race([
-			progressUpdates.then(() => true),
-			new Promise<boolean>((resolve) => {
-				progressDrainTimeout = setTimeout(() => resolve(false), PROGRESS_UPDATE_DRAIN_TIMEOUT_MS)
-			}),
-		])
-		if (progressDrainTimeout) clearTimeout(progressDrainTimeout)
-		if (!progressUpdatesDrained) {
-			Logger.warn(`${logPrefix} progress observer did not drain within ${PROGRESS_UPDATE_DRAIN_TIMEOUT_MS}ms`)
-		}
-		return progressUpdatesDrained
-	}
-
-	private getBestEffortResult(conversation: DiracStorageMessage[]): string {
-		const assistantTexts = conversation
-			.filter((msg) => msg.role === "assistant")
-			.flatMap((msg) => {
-				if (typeof msg.content === "string") {
-					return [{ type: "text", text: msg.content } as DiracTextContentBlock]
-				}
-				return msg.content as DiracTextContentBlock[]
-			})
-			.filter((block): block is DiracTextContentBlock => block.type === "text")
-			.map((block) => block.text.trim())
-			.filter((text) => text.length > 0)
-
-		if (assistantTexts.length === 0) {
-			return "No findings recorded."
-		}
-
-		return assistantTexts.join("\n")
+	private async drainProgressUpdates(progressUpdates?: Promise<void>, logPrefix?: string): Promise<boolean> {
+		return this.runProgress.drainProgressUpdates(progressUpdates, logPrefix)
 	}
 
 	private createSubagentTaskConfig(state: TaskState, coordinator: ToolExecutorCoordinator): TaskConfig {
 		const baseCallbacks = this.baseConfig.callbacks
+		const currentPermissionDecisionBinding = () => this.baseConfig.permissionDecisionBinding
 
 		return {
 			...this.baseConfig,
 			context: this.baseConfig.context,
-			api: this.apiHandler,
+			providerId: this.runtime.providerId,
+			model: this.runtime.model,
+			supportsNativeWebSearch: this.runtime.supportsNativeWebSearch,
 			coordinator,
 			taskState: state,
 			isSubagentExecution: true,
+			get permissionDecisionBinding() {
+				return currentPermissionDecisionBinding()
+			},
 			agentIdentity: this.options.agentIdentity,
 			vscodeTerminalExecutionMode: "backgroundExec",
 			callbacks: {
 				...baseCallbacks,
 				executeCommandTool: async (command: string, timeoutSeconds: number | undefined) => {
-					this.activeCommandExecutions += 1
+					this.runState.activeCommandExecutions += 1
 					this.markActivity("started command tool execution")
 					try {
 						return await baseCallbacks.executeCommandTool(command, timeoutSeconds, {
@@ -1129,7 +777,7 @@ export class SubagentRunner {
 							suppressUserInteraction: true,
 						})
 					} finally {
-						this.activeCommandExecutions = Math.max(0, this.activeCommandExecutions - 1)
+						this.runState.activeCommandExecutions = Math.max(0, this.runState.activeCommandExecutions - 1)
 						this.markActivity("finished command tool execution")
 					}
 				},
@@ -1189,16 +837,13 @@ export class SubagentRunner {
 		}
 	}
 
-	private shouldCompactBeforeNextRequest(
-		requestTotalTokens: number,
-		api: ReturnType<typeof buildApiHandler>,
-		modelId: string,
-	): boolean {
-		const { contextWindow, maxAllowedSize } = getContextWindowInfo(api)
-		const useAutoCondense = this.baseConfig.services.stateManager.getGlobalSettingsKey("useAutoCondense")
+	private shouldCompactBeforeNextRequest(requestTotalTokens: number, configuredContextWindow?: number): boolean {
+		const contextWindow = configuredContextWindow || 256_000
+		const maxAllowedSize = Math.min(1_000_000, Math.max(contextWindow - 40_000, contextWindow * 0.8))
+		const useAutoCondense = this.baseConfig.useAutoCondense
 		if (useAutoCondense) {
 			const autoCondenseThreshold = 0.75
-			const roundedThreshold = autoCondenseThreshold ? Math.floor(contextWindow * autoCondenseThreshold) : maxAllowedSize
+			const roundedThreshold = Math.floor(contextWindow * autoCondenseThreshold)
 			const thresholdTokens = Math.min(roundedThreshold, maxAllowedSize)
 			return requestTotalTokens >= thresholdTokens
 		}
@@ -1207,7 +852,7 @@ export class SubagentRunner {
 	}
 
 	private async *createMessageWithInitialChunkRetry(
-		api: ReturnType<typeof buildApiHandler>,
+		runtime: SubagentRuntime,
 		systemPrompt: string,
 		fullConversation: DiracStorageMessage[],
 		nativeTools: DiracTool[] | undefined,
@@ -1217,12 +862,12 @@ export class SubagentRunner {
 		contextState: SubagentContextState,
 	) {
 		for (let attempt = 1; attempt <= MAX_INITIAL_STREAM_ATTEMPTS; attempt += 1) {
-			this.currentAttempt = attempt
+			this.runState.currentAttempt = attempt
 			const truncatedConversation = contextManager
 				.getTruncatedMessages(fullConversation, contextState.conversationHistoryDeletedRange)
 				.map((message) => message as DiracStorageMessage)
 			const enableNativeWebSearch =
-				api.supportsNativeWebSearch?.() === true &&
+				runtime.supportsNativeWebSearch &&
 				this.activeTaskState?.activeSkillIds.includes(NATIVE_WEB_SEARCH_SKILL_NAME) === true
 			this.enterPhase("awaiting_first_provider_chunk", "starting provider request", {
 				attempt,
@@ -1232,12 +877,14 @@ export class SubagentRunner {
 				enableNativeWebSearch,
 			})
 
+			let receivedChunk = false
 			try {
-				const stream = api.createMessage(systemPrompt, truncatedConversation, nativeTools, { enableNativeWebSearch })
+				const stream = runtime.createMessage(systemPrompt, truncatedConversation, nativeTools, { enableNativeWebSearch })
 				const iterator = stream[Symbol.asyncIterator]()
 				const firstChunk = await iterator.next()
 				this.enterPhase("streaming_provider_response", "received first provider chunk", { attempt, providerId, modelId })
 				if (!firstChunk.done) {
+					receivedChunk = true
 					yield firstChunk.value
 				}
 
@@ -1245,6 +892,8 @@ export class SubagentRunner {
 				this.markActivity("provider stream completed")
 				return
 			} catch (error) {
+				// Retrying a partially consumed stream merges distinct billed requests into one usage snapshot.
+				if (receivedChunk) throw error
 				if (checkContextWindowExceededError(error)) {
 					const compactResult = this.compactConversationForContextWindow(
 						contextManager,
@@ -1255,7 +904,7 @@ export class SubagentRunner {
 					if (!compactResult.didCompact || this.shouldAbort() || attempt >= MAX_INITIAL_STREAM_ATTEMPTS) {
 						throw error
 					}
-					this.recordDiagnostic("retry", this.currentPhase, {
+					this.recordDiagnostic("retry", this.runState.currentPhase, {
 						kind: "context_window_compaction",
 						attempt,
 						error,
@@ -1275,7 +924,7 @@ export class SubagentRunner {
 				}
 
 				const delayMs = INITIAL_STREAM_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1)
-				this.recordDiagnostic("retry", this.currentPhase, {
+				this.recordDiagnostic("retry", this.runState.currentPhase, {
 					kind: "initial_stream_error",
 					attempt,
 					nextAttempt: attempt + 1,
@@ -1287,4 +936,15 @@ export class SubagentRunner {
 			}
 		}
 	}
+
+	private runState: SubagentRunState
+	private runProgress: SubagentRunProgress
 }
+
+export type {
+	SubagentProgressUpdate,
+	SubagentRunResult,
+	SubagentRunStats,
+	SubagentRunStatus,
+	SubagentToolCall,
+} from "./SubagentRunTypes"

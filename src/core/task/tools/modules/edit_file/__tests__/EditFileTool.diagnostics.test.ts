@@ -37,6 +37,7 @@ function createConfig() {
 	let lastPath: string | undefined
 	let lastContent: string | undefined
 	const diffViewProvider = {
+		readText: sinon.stub().callsFake(async (filePath: string) => await fs.readFile(filePath, "utf8")),
 		open: sinon.stub().callsFake(async (path: string) => {
 			lastPath = path
 		}),
@@ -73,12 +74,14 @@ function createConfig() {
 	}
 
 	const callbacks = {
+		assertMutationAuthorized: sinon.stub(),
 		say: sinon.stub().resolves(undefined),
 		ask: sinon.stub().resolves({ response: DiracAskResponse.APPROVE }),
 		saveCheckpoint: sinon.stub().resolves(),
 		sayAndCreateMissingParamError: sinon.stub().resolves("missing"),
 		removeLastPartialMessageIfExistsWithType: sinon.stub().resolves(),
 		shouldAutoApproveToolWithPath: sinon.stub().resolves(true),
+		resolveToolPathPermission: sinon.stub().resolves("auto_approve"),
 		postStateToWebview: sinon.stub().resolves(),
 		cancelTask: sinon.stub().resolves(),
 		switchToActMode: sinon.stub().resolves(false),
@@ -113,9 +116,8 @@ function createConfig() {
 		messageState: {
 			getApiConversationHistory: sinon.stub().returns([]),
 		},
-		api: {
-			getModel: () => ({ id: "test-model", info: { supportsImages: false } }),
-		},
+		model: { id: "test-model", info: { supportsImages: false } },
+		supportsNativeWebSearch: false,
 		autoApprovalSettings: {
 			enableNotifications: false,
 			actions: { executeCommands: false },
@@ -126,18 +128,6 @@ function createConfig() {
 		browserSettings: {},
 		focusChainSettings: {},
 		services: {
-			stateManager: {
-				getGlobalStateKey: () => undefined,
-				getGlobalSettingsKey: (key: string) => {
-					if (key === "mode") return "act"
-					if (key === "hooksEnabled") return false
-					return undefined
-				},
-				getApiConfiguration: () => ({
-					planModeApiProvider: "openai",
-					actModeApiProvider: "openai",
-				}),
-			},
 			fileContextTracker: {
 				trackFileContext: sinon.stub().resolves(),
 				markFileAsEditedByDirac: sinon.stub(),
@@ -254,7 +244,7 @@ describe("EditFileTool.diagnostics", () => {
 		const result = await handler.execute(config, block)
 		assert.ok(typeof result === "string")
 		assert.ok(result.includes("Applied 1 edit(s) successfully"))
-		assert.ok(result.includes("New problems detected after saving the file"))
+		assert.ok(result.includes("Diagnostics:"))
 	})
 
 	it("reports new linter errors with anchored context", async () => {
@@ -360,7 +350,7 @@ describe("EditFileTool.diagnostics", () => {
 		assert.ok(typeof result === "string")
 		assert.ok(result.includes("Applied 1 edit(s) successfully"))
 		assert.ok(result.includes("Found 6 problems"))
-		assert.ok(result.includes("New problems detected after saving the file"))
+		assert.ok(result.includes("Diagnostics:"))
 	})
 
 	it("reports both fixed and new errors", async () => {
@@ -412,7 +402,7 @@ describe("EditFileTool.diagnostics", () => {
 
 		const result = await handler.execute(config, block)
 		assert.ok(typeof result === "string")
-		assert.ok(result.includes("New problems detected after saving the file"))
+		assert.ok(result.includes("Diagnostics:"))
 		assert.ok(result.includes("Found 1 problems"))
 	})
 

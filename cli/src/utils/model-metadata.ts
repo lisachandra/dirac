@@ -33,8 +33,10 @@ import {
 	huggingFaceModels,
 	internationalQwenDefaultModelId,
 	internationalQwenModels,
+	mainlandQwenModels,
 	internationalZAiDefaultModelId,
 	internationalZAiModels,
+	mainlandZAiModels,
 	minimaxDefaultModelId,
 	minimaxModels,
 	mistralDefaultModelId,
@@ -83,13 +85,13 @@ export const providerModels: Record<string, { models: Record<string, unknown>; d
 	nousResearch: { models: nousResearchModels, defaultId: nousResearchDefaultModelId },
 	"openai-codex": { models: openAiCodexModels, defaultId: openAiCodexDefaultModelId },
 	"openai-native": { models: openAiNativeModels, defaultId: openAiNativeDefaultModelId },
-	qwen: { models: internationalQwenModels, defaultId: internationalQwenDefaultModelId },
+	qwen: { models: { ...internationalQwenModels, ...mainlandQwenModels }, defaultId: internationalQwenDefaultModelId },
 	"qwen-code": { models: qwenCodeModels, defaultId: qwenCodeDefaultModelId },
 	sambanova: { models: sambanovaModels, defaultId: sambanovaDefaultModelId },
 	vertex: { models: vertexModels, defaultId: vertexDefaultModelId },
 	wandb: { models: wandbModels, defaultId: wandbDefaultModelId },
 	xai: { models: xaiModels, defaultId: xaiDefaultModelId },
-	zai: { models: internationalZAiModels, defaultId: internationalZAiDefaultModelId },
+	zai: { models: { ...internationalZAiModels, ...mainlandZAiModels }, defaultId: internationalZAiDefaultModelId },
 }
 
 export function hasStaticModels(provider: string): boolean {

@@ -37,6 +37,7 @@ export interface LocalSlashCommandContext {
 	resetInputLine: () => void
 	clearViewAndResetTask: () => void
 	handleExit: () => void
+	enableFastMode: () => void
 	toggleQuietMode: () => void
 }
 
@@ -74,6 +75,10 @@ const LOCAL_SLASH_COMMANDS: Record<string, LocalSlashCommandHandler> = {
 	q: ({ handleExit }) => handleExit(),
 	quiet: ({ toggleQuietMode, resetInputLine }) => {
 		toggleQuietMode()
+		resetInputLine()
+	},
+	fast: ({ enableFastMode, resetInputLine }) => {
+		enableFastMode()
 		resetInputLine()
 	},
 	providers: openPanel({ type: CliPanelType.SETTINGS, initialMode: "provider-picker" }),

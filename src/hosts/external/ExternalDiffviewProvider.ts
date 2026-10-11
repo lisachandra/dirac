@@ -115,12 +115,13 @@ export class ExternalDiffViewProvider extends DiffViewProvider {
 	override async applyAndSaveSilently(
 		absolutePath: string,
 		content: string,
+		editType: "create" | "modify" = "modify",
 	): Promise<{
 		finalContent: string | undefined
 		autoFormattingEdits: string | undefined
 		userEdits: string | undefined
 	}> {
-		await this.open(absolutePath)
+		await this.open(absolutePath, { editType })
 		const range = { startLine: 0, endLine: await this.getDocumentLineCount() }
 		await this.replaceText(content, range, undefined)
 		const saveResult = await this.saveChanges({ skipDiagnostics: true })

@@ -1,14 +1,64 @@
 import { strict as assert } from "node:assert"
+import { EventEmitter } from "node:events"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
+import { PassThrough } from "node:stream"
 import { AnchorStateManager } from "@utils/AnchorStateManager"
 import { getDelimiter } from "@utils/line-hashing"
 import { afterEach, beforeEach, describe, it } from "mocha"
-import { formatResults } from "../index"
+import sinon from "sinon"
+import { execRipgrep, formatResults, type RipgrepProcessSpawner } from "../index"
 
 let tmpDir: string
 const taskId = "ripgrep-anchor-test"
+
+function fakeRipgrepProcess() {
+	const stdout = new PassThrough()
+	const kill = sinon.stub().returns(true)
+	const process = Object.assign(new EventEmitter(), {
+		stdin: new PassThrough(),
+		stdout,
+		stderr: new PassThrough(),
+		kill,
+	}) as unknown as ReturnType<RipgrepProcessSpawner>
+	return { process, stdout, kill }
+}
+
+describe("Ripgrep process lifecycle", () => {
+	it("resolves capped output without waiting for child close", async () => {
+		const { process: child, stdout, kill } = fakeRipgrepProcess()
+		const spawnProcess: RipgrepProcessSpawner = () => child
+		const pending = execRipgrep(["--json", "needle", "."], undefined, spawnProcess)
+
+		for (let line = 1; line <= 151; line++) stdout.write(`line ${line}\n`)
+		const output = await pending
+
+		assert.equal(output.trim().split("\n").length, 150)
+		sinon.assert.calledOnce(kill)
+	})
+
+	it("kills and rejects a search when its signal is aborted", async () => {
+		const { process: child, kill } = fakeRipgrepProcess()
+		let markSpawned: (() => void) | undefined
+		const spawned = new Promise<void>((resolve) => {
+			markSpawned = resolve
+		})
+		const spawnProcess: RipgrepProcessSpawner = () => {
+			markSpawned?.()
+			return child
+		}
+		const controller = new AbortController()
+		const reason = new Error("search deadline expired")
+		const pending = execRipgrep(["--json", "needle", "."], controller.signal, spawnProcess)
+		await spawned
+
+		controller.abort(reason)
+
+		await assert.rejects(pending, (error: unknown) => error === reason)
+		sinon.assert.calledOnce(kill)
+	})
+})
 
 describe("Ripgrep search result anchors", () => {
 	beforeEach(async () => {

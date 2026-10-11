@@ -1,16 +1,20 @@
 import type { ToolUse } from "@core/assistant-message"
 import { DiracDefaultTool } from "@/shared/tools"
-import { CardStatus } from "../../../shared/ExtensionMessage"
-import { SurfaceAdapter } from "./adapters/SurfaceAdapter"
+import { CardStatus, isFinalStatus } from "../../../shared/ExtensionMessage"
+import { SurfaceToolEnvironmentFactory } from "./adapters/SurfaceAdapter"
+import type { ToolEnvironmentFactory } from "./interfaces/ToolEnvironmentFactory"
 
 import { IDiracTool } from "./interfaces/IDiracTool"
 import { SurfaceType } from "./interfaces/SurfaceType"
+import { assertValidToolResponse } from "./runtime/assertValidToolResponse"
+import { normalizeOptionalToolParameters } from "./runtime/normalizeOptionalToolParameters"
 import { AgentConfigLoader } from "./subagent/AgentConfigLoader"
 import type { TaskConfig } from "./types/TaskConfig"
 import type { ToolResponse } from "./types/ToolResponse"
 import { ToolSkippedByUserMessage } from "./types/ToolSkippedByUserMessage"
 import { createUIHelpers } from "./types/UIHelpers"
-import { normalizeOptionalToolParameters } from "./runtime/normalizeOptionalToolParameters"
+import { formatResponse } from "@core/formatResponse"
+import { ToolTimeoutError } from "./runtime/ToolExecutionDeadline"
 
 interface PartialToolUseHandler extends IDiracTool {
 	bufferPartialToolUse(block: ToolUse, uiHelpers: ReturnType<typeof createUIHelpers>): Promise<void>
@@ -21,7 +25,11 @@ interface PartialToolUseHandler extends IDiracTool {
  * Throws an error for unregistered tools.
  */
 export class ToolExecutorCoordinator {
-	constructor() { }
+	constructor(private readonly environmentFactory: ToolEnvironmentFactory = new SurfaceToolEnvironmentFactory()) {}
+
+	createEmptySibling(): ToolExecutorCoordinator {
+		return new ToolExecutorCoordinator(this.environmentFactory)
+	}
 
 	private modularTools = new Map<string, IDiracTool>()
 
@@ -81,7 +89,10 @@ export class ToolExecutorCoordinator {
 		}
 
 		// 1. Initialize Tool Environment (Surface Adapter)
-		const env = new SurfaceAdapter({ ...config, toolUse: { name: block.name, params: block.params } }, block.name)
+		// Preserve live task-setting accessors while adding call-specific metadata.
+		const toolConfig = Object.create(Object.getPrototypeOf(config), Object.getOwnPropertyDescriptors(config)) as TaskConfig
+		toolConfig.toolUse = { name: block.name, params: block.params }
+		const env = this.environmentFactory.create(toolConfig, block.name)
 
 		// 2. Filter (Surface Check)
 		const supported = tool.supportedSurfaces()
@@ -118,14 +129,15 @@ export class ToolExecutorCoordinator {
 		// 4. Observability: "Calling..." (Removed redundant message)
 
 		let executionSuccess = false
-		let result: any
 		let response!: ToolResponse
+		let executionError: Error | undefined
 
 		const initialMistakeCount = config.taskState.consecutiveMistakeCount
 		const unfinalizedCards: { id: string; status: CardStatus }[] = []
 		try {
 			// 5. Execute (Dispatcher)
-			result = await tool.processCall(block.params, env)
+			const result = await tool.processCall(block.params, env)
+			assertValidToolResponse(result, block.name)
 			executionSuccess = true
 
 			// 6. Persist Context
@@ -148,15 +160,8 @@ export class ToolExecutorCoordinator {
 				config.taskState.pendingUserImages = error.userImages
 				config.taskState.pendingUserFiles = error.userFiles
 
-				const finalStates: CardStatus[] = [
-					CardStatus.SUCCESS,
-					CardStatus.ERROR,
-					CardStatus.SKIPPED,
-					CardStatus.ABANDONED,
-					CardStatus.CANCELLED,
-				]
 				for (const card of env.getCreatedCards()) {
-					if (!finalStates.includes(card.status)) {
+					if (!isFinalStatus(card.status)) {
 						await card.finalize(CardStatus.SKIPPED)
 					}
 				}
@@ -164,8 +169,22 @@ export class ToolExecutorCoordinator {
 				env.telemetry.captureCustomMetadata({ skippedByUser: true, userMessageLength: error.userMessage.length })
 				response = `[Tool '${block.name}' skipped by user with message: "${error.userMessage}"]`
 			} else {
+				executionError = error instanceof Error ? error : new Error(String(error))
 				config.taskState.consecutiveMistakeCount = initialMistakeCount + 1
-				response = `Execution failed: ${error.message || error}`
+				if (executionError instanceof ToolTimeoutError) {
+					env.telemetry.captureCustomMetadata({
+						timedOut: true,
+						timeoutMs: executionError.timeoutMs,
+						timeoutOperation: executionError.operation,
+					})
+					response = formatResponse.toolTimeout(
+						executionError.toolName,
+						executionError.operation,
+						executionError.timeoutMs,
+					)
+				} else {
+					response = `Execution failed: ${error.message || error}`
+				}
 			}
 		} finally {
 			// 12. Telemetry
@@ -173,10 +192,9 @@ export class ToolExecutorCoordinator {
 			const customMetadata = env.getCustomMetadata()
 
 			const { telemetryService } = await import("@/services/telemetry")
-			const { getProviderForModel } = await import("@shared/api")
 
-			const modelId = config.api.getModel().id
-			const providerId = getProviderForModel(modelId) || "unknown"
+			const modelId = config.model.id
+			const providerId = config.providerId
 
 			telemetryService.captureToolUsage(
 				config.ulid,
@@ -194,15 +212,8 @@ export class ToolExecutorCoordinator {
 			)
 
 			// 13. Collect unfinalized cards — assert after finally to avoid unsafe throw
-			const finalStates: CardStatus[] = [
-				CardStatus.SUCCESS,
-				CardStatus.ERROR,
-				CardStatus.SKIPPED,
-				CardStatus.ABANDONED,
-				CardStatus.CANCELLED,
-			]
 			for (const card of env.getCreatedCards()) {
-				if (!finalStates.includes(card.status) && card.cleanupStrategy !== "keep_running") {
+				if (!isFinalStatus(card.status) && card.cleanupStrategy !== "keep_running") {
 					unfinalizedCards.push({ id: card.id, status: card.status })
 				}
 			}
@@ -211,7 +222,7 @@ export class ToolExecutorCoordinator {
 		// Assert tools finalized their own cards — no defensive finalization
 		if (unfinalizedCards.length > 0) {
 			throw new Error(
-				`Tool '${block.name}' did not finalize card(s): ${unfinalizedCards.map((c) => `${c.id} (${c.status})`).join(", ")}`,
+				`Tool '${block.name}' left nonterminal card(s): ${unfinalizedCards.map((c) => `${c.id} (${c.status})`).join(", ")}${executionError ? `. Original execution error: ${executionError.message}` : ""}`,
 			)
 		}
 		return response

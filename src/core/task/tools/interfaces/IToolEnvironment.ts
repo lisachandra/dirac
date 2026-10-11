@@ -1,4 +1,5 @@
 import type { TextCondensationTemplateId } from "@core/text-condensation/TextCondenser"
+import type { TextFileWindow, TextFileWindowOptions } from "@shared/text-file-window"
 import type {
 	AstImplementationRequest,
 	AstImplementationResult,
@@ -17,6 +18,7 @@ import {
 	ActionButton,
 	BrowserActionResult,
 	Card,
+	CardParams as SharedCardParams,
 	CardLocation,
 	CardStatus,
 	CleanupStrategy,
@@ -25,11 +27,20 @@ import {
 } from "../../../../shared/ExtensionMessage"
 import { SkillContent, SkillMetadata } from "../../../../shared/skills"
 import { DiracAskResponse } from "../../../../shared/WebviewMessage"
+import type { DiracStorageMessage } from "../../../../shared/messages/content"
 import { HookExecutionResult } from "../../../hooks/hook-executor"
 import { TaskState } from "../../TaskState"
 import { SubagentProgressUpdate, SubagentRunResult } from "../subagent/SubagentRunner"
 import { TaskConfig } from "../types/TaskConfig"
 import { IDiracContext } from "./IDiracContext"
+import type {
+	GoalChildRecord,
+	GoalChildRole,
+	GoalChildStatus,
+	GoalObjectiveRevision,
+	GoalTaskSummary,
+} from "@shared/goal"
+import type { ResponseArguments } from "@shared/responseTool"
 
 export interface ICardHandle {
 	readonly collapsed: boolean
@@ -49,6 +60,8 @@ export interface ICardHandle {
 	readonly maxHeight?: number
 	readonly cleanupStrategy?: CleanupStrategy
 	readonly status: CardStatus
+	/** Whether waitForInteraction will actually suspend for user input. */
+	readonly requiresUserInteraction?: boolean
 
 	/**
 	 * Update the card's metadata or state.
@@ -81,30 +94,14 @@ export interface ICardHandle {
 	finalize(status: CardStatus, doNotAutoCollapse?: boolean): Promise<void>
 }
 
-export interface CardParams {
-	header: string
-	kind?: import("../../../../shared/ExtensionMessage").CardKind
-	/** Programmatic name of the tool that created this card. */
-	toolName?: string
-	icon?: string
-	status?: CardStatus
-	renderType?: RenderType
-	body?: string
-
-	rawInput?: import("../../../../shared/ExtensionMessage").CardRawInput
-	rawOutput?: import("../../../../shared/ExtensionMessage").CardRawOutput
-	diffs?: import("../../../../shared/ExtensionMessage").CardDiff[]
-	locations?: CardLocation[]
-	requireApproval?: boolean
-	requireFeedback?: boolean
-	feedbackPlaceholder?: string
-	actions?: ActionButton[]
-	autoScroll?: boolean
-	collapsed?: boolean
-	maxHeight?: number
-	cleanupStrategy?: CleanupStrategy
-	do_not_auto_collapse?: boolean
-	outcome?: string
+export interface CardParams extends SharedCardParams {
+	/**
+	 * Classifies tool permissions for the shared approval pipeline.
+	 * Utility may approve `tool`; `manual_tool` requires the user unless an explicit unrestricted mode is active.
+	 */
+	permissionRequestKind?: "tool" | "manual_tool"
+	/** Internal live predicate used to resolve a displayed tool permission after settings change. */
+	isAutoApproved?: () => boolean
 }
 
 export interface IUITrait {
@@ -113,6 +110,9 @@ export interface IUITrait {
 	 * This card is purely for observability.
 	 */
 	createCard(params: CardParams): Promise<ICardHandle>
+
+	/** Creates an interaction that only an explicit user response may resolve. */
+	createManualInteractionCard(params: CardParams): Promise<ICardHandle>
 
 	/**
 	 * Generic upsert for informational messages.
@@ -153,6 +153,8 @@ export interface IInteractionTrait {
 }
 
 export interface PermissionPreview {
+	utilityEligible?: boolean
+	manualOnly?: boolean
 	diffs?: import("../../../../shared/ExtensionMessage").CardDiff[]
 	rawInput?: import("../../../../shared/ExtensionMessage").CardRawInput
 }
@@ -175,6 +177,7 @@ export interface SystemCommandResult {
 	exitCode?: number | null
 	signal?: NodeJS.Signals | null
 	logFilePath?: string
+	backgroundCompletion?: Promise<void>
 }
 
 export interface ISystemTrait {
@@ -193,8 +196,8 @@ export interface ISystemTrait {
 			filePattern?: string
 			contextLines?: number
 			excludeFilePatterns?: string[]
-			debugLog?: (info: Record<string, any>) => Promise<void>
 			includeAnchors?: boolean
+			signal?: AbortSignal
 			noIgnore?: boolean
 			allowedNodeModuleScopes?: string[]
 		},
@@ -248,6 +251,10 @@ export interface IWorkspaceTrait {
 	 * Reads the content of a file.
 	 */
 	readFile(path: string): Promise<string>
+	/** Streams a text range while retaining a complete snapshot only below a caller-supplied line limit. */
+	readTextFileWindow(path: string, options: TextFileWindowOptions): Promise<TextFileWindow>
+	/** Counts text lines without retaining file content. */
+	countTextFileLines(path: string, signal?: AbortSignal): Promise<number>
 	/**
 	 * Reads the content of a file, handling rich formats (PDF, DOCX, images).
 	 */
@@ -258,6 +265,9 @@ export interface IWorkspaceTrait {
 	 * Returns information about a file (size, existence, etc.).
 	 */
 	getFileInfo(path: string): Promise<{ size: number; isFile: boolean; exists: boolean }>
+
+	/** Fingerprints workspace file paths and bytes for completion-verification retry arbitration. */
+	fingerprintWorkspace(): Promise<string>
 
 	/**
 	 * Writes content to a file.
@@ -276,18 +286,20 @@ export interface SaveResult {
 }
 
 export interface IEditorTrait {
+	/** Reads authoritative text through the editor's configured transport. */
+	readText(path: string): Promise<string>
 	/** Opens the diff/review UI for one or more files */
 	showReview(files: { absolutePath: string; displayPath: string; content: string; originalContent?: string }[]): Promise<void>
 	/** Hides the review UI */
 	hideReview(): Promise<void>
 	/** Opens a specific file in the editor */
-	open(path: string, options?: { displayPath?: string }): Promise<void>
+	open(path: string, options?: { displayPath?: string; editType?: "create" | "modify" | "delete" }): Promise<void>
 	/** Updates the content of the currently open editor */
 	update(content: string, finalize: boolean): Promise<void>
 	/** Saves changes in the current editor, returning auto-formatting and user edits */
 	saveChanges(options?: { skipDiagnostics?: boolean }): Promise<SaveResult>
 	/** Applies content and saves a file silently (background edit) */
-	applyAndSaveSilently(path: string, content: string): Promise<SaveResult>
+	applyAndSaveSilently(path: string, content: string, editType?: "create" | "modify"): Promise<SaveResult>
 	/** Applies content and saves multiple files silently in a single transaction */
 	applyAndSaveBatchSilently(files: { path: string; content: string }[]): Promise<Map<string, SaveResult>>
 	/** Reverts all unsaved changes in the editor */
@@ -342,7 +354,7 @@ export interface IOrchestrationTrait {
 	 */
 	saveCheckpoint(isTaskComplete?: boolean, messageId?: string): Promise<void>
 	/** Returns false when queued steering supersedes the current completion attempt. */
-	commitAttemptCompletion(): Promise<boolean>
+	commitAttemptCompletion(response: string): Promise<CompletionCommitResult>
 
 	/**
 	 * Returns the conversation history.
@@ -386,6 +398,41 @@ export interface IOrchestrationTrait {
 	notifyContextCompacted(): void
 }
 
+export type CompletionCommitResult = { committed: true } | { committed: false; error: string }
+
+export interface IResponseObserverTrait {
+	recordResponse(response: ResponseArguments): Promise<void>
+}
+
+export interface TranscriptPage {
+	entries: DiracStorageMessage[]
+	nextCursor?: string
+}
+
+export interface IGoalTrait {
+	startTask(input: { taskTitle: string; prompt: string }): Promise<GoalChildRecord>
+	listTasks(input: {
+		status?: GoalChildStatus[]
+		role?: GoalChildRole
+		cursor?: string
+		limit?: number
+	}): Promise<{ tasks: GoalTaskSummary[]; nextCursor?: string }>
+	sendTaskMessage(input: { taskId: string; message: string }): Promise<GoalChildRecord>
+	cancelTask(input: { taskId: string; reason?: string }): Promise<GoalChildRecord>
+	readTaskTranscript(input: { taskId: string; cursor?: string; limit?: number }): Promise<TranscriptPage>
+	resolveTaskInteraction(input: {
+		taskId: string
+		interactionId: string
+		resolution: "allow" | "reject" | "answer" | "passthrough"
+		answer?: string
+	}): Promise<{ resolved: true; task: GoalChildRecord }>
+	waitForEvents(): Promise<string>
+	startVerification(input: { focus?: string }): Promise<GoalChildRecord>
+	replaceObjective(markdown: string): Promise<GoalObjectiveRevision>
+	blockGoal(reason: string): Promise<void>
+	commitCompletion(result: string): Promise<CompletionCommitResult>
+}
+
 export interface IDiagnosticsTrait {
 	/**
 	 * Prepares diagnostics for the specified files.
@@ -419,6 +466,7 @@ export interface ILoggingTrait {
 export interface IAnchorTrait {
 	reconcile(absolutePath: string, lines: string[]): string[]
 	getDocumentFingerprint(absolutePath: string): string | null
+	clear(absolutePath: string): void
 }
 
 /**
@@ -459,6 +507,8 @@ export interface IToolEnvironment {
 	readonly browser: IBrowserTrait
 	readonly skills: ISkillsTrait
 	readonly orchestration: IOrchestrationTrait
+	readonly responseObserver: IResponseObserverTrait
+	readonly goal?: IGoalTrait
 	/** Available only to task environments that own their conversation history. */
 	readonly conversationCondensation?: IConversationCondensationTrait
 

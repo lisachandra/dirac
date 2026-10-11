@@ -28,7 +28,12 @@ class QueuedFileWriter {
 	private closePromise: Promise<void> | undefined
 
 	constructor(path: string) {
-		this.handlePromise = import("node:fs/promises").then(({ open }) => open(path, "wx"))
+		this.handlePromise = import("node:fs/promises")
+			.then(({ open }) => open(path, "wx"))
+			.catch((error) => {
+				this.firstError ??= toError(error)
+				return undefined
+			})
 	}
 
 	write(output: string): void {
@@ -37,6 +42,7 @@ class QueuedFileWriter {
 		this.pendingWrites = this.pendingWrites
 			.then(async () => {
 				const handle = await this.handlePromise
+				if (!handle) return
 				await handle.appendFile(output, "utf8")
 			})
 			.catch((error) => {
@@ -52,7 +58,7 @@ class QueuedFileWriter {
 	private async closeAfterPendingWrites(): Promise<void> {
 		await this.pendingWrites
 		const handle = await this.handlePromise
-		await handle.close()
+		if (handle) await handle.close()
 		if (this.firstError) throw this.firstError
 	}
 }

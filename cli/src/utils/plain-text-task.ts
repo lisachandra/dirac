@@ -31,6 +31,8 @@ import { subscribeToState } from "@/core/controller/state/subscribeToState"
 import { showTaskWithId } from "@/core/controller/task/showTaskWithId"
 import { emitTaskStartedMessage } from "./task-start-output"
 import { getApiMetrics } from "@shared/getApiMetrics"
+import type { PresentationBatch } from "@shared/PresentationOperation"
+import { applyPresentationBatch, createPresentationState } from "@shared/presentationState"
 import {
 	approveCardForPlainTextYolo,
 	getStandaloneCardDisposition,
@@ -90,6 +92,8 @@ export async function runPlainTextTask(options: PlainTextTaskOptions): Promise<b
 	const lastPrintedCardState = new Map<string, string>()
 	const autoApprovedCards = new Set<string>()
 	let approvalQueue = Promise.resolve()
+	let latestState: Partial<ExtensionState> = {}
+	let presentationState = createPresentationState()
 
 	const isViewTaskOnly = Boolean(options.taskId) && !prompt && !imageDataUrls?.length
 
@@ -214,11 +218,54 @@ export async function runPlainTextTask(options: PlainTextTaskOptions): Promise<b
 		await subscribeToState(
 			controller,
 			{},
-			async ({ stateJson }) => {
+			async ({ stateJson, presentationJson }) => {
 				try {
+					const previousActiveVoiceStreamId = latestState.activeVoiceStreamId
+					const update = JSON.parse(stateJson) as Partial<ExtensionState>
+					latestState = { ...latestState, ...update, activeVoiceStreamId: update.activeVoiceStreamId }
+					let changedMessages: DiracMessage[] = []
+					if (update.diracMessages !== undefined) {
+						presentationState = createPresentationState(
+							update.diracMessages,
+							update.presentationSurfaceId,
+							update.presentationOffset,
+						)
+						changedMessages = update.diracMessages
+					}
+					if (presentationJson) {
+						const applied = applyPresentationBatch(
+							presentationState,
+							JSON.parse(presentationJson) as PresentationBatch,
+						)
+						if (applied.result === "gap") {
+							const fullState = await controller.getStateToPostToWebview()
+							latestState = fullState
+							presentationState = createPresentationState(
+								fullState.diracMessages,
+								fullState.presentationSurfaceId,
+								fullState.presentationOffset,
+							)
+							changedMessages = fullState.diracMessages
+						} else if (applied.result === "applied") {
+							changedMessages = applied.changedMessages
+						}
+					}
+					latestState.diracMessages = presentationState.messages
+					latestState.presentationSurfaceId = presentationState.surfaceId
+					latestState.presentationOffset = presentationState.offset
 					if (!taskExecutionStarted) return
-					const state = JSON.parse(stateJson) as ExtensionState
-					for (const message of state.diracMessages ?? []) {
+					const state = latestState as ExtensionState
+					const completedVoiceStreamId = previousActiveVoiceStreamId !== state.activeVoiceStreamId
+						? previousActiveVoiceStreamId
+						: undefined
+					if (completedVoiceStreamId) {
+						const completedIndex = presentationState.messageIndexById.get(completedVoiceStreamId)
+						const completedMessage = completedIndex === undefined
+							? undefined
+							: presentationState.messages[completedIndex]
+						if (completedMessage) await processMessage(completedMessage, state)
+					}
+					for (const message of changedMessages) {
 						await processMessage(message, state)
 					}
 

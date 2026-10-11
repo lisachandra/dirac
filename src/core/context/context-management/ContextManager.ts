@@ -11,7 +11,7 @@ export class ContextManager {
 	// moving to an earlier conversation history checkpoint - this ordering intuitively allows for binary search on truncation
 	// there is also a number stored for each (EditType) which defines which message type it is, for custom handling
 
-	constructor() {}
+	constructor() { }
 
 	/**
 	 * Extracts text from a content block, handling both regular text blocks and tool_result wrappers.
@@ -86,7 +86,7 @@ export class ContextManager {
 	 */
 	getContextTelemetryData(
 		diracMessages: DiracMessage[],
-		api: ApiHandler,
+		contextWindow: number,
 		triggerIndex?: number,
 	): {
 		tokensUsed: number
@@ -114,7 +114,6 @@ export class ContextManager {
 					const { tokensIn, tokensOut, cacheWrites, cacheReads } = targetRequestStatus || {}
 					const tokensUsed = (tokensIn || 0) + (tokensOut || 0) + (cacheWrites || 0) + (cacheReads || 0)
 
-					const { contextWindow } = getContextWindowInfo(api)
 
 					return {
 						tokensUsed,
@@ -273,9 +272,9 @@ export class ContextManager {
 				if (hasToolResults) {
 					// Clone and filter out all tool_result blocks
 					messagesToUpdate[2] = cloneDeep(firstMessageAfterTruncation)
-					;(messagesToUpdate[2].content as Anthropic.Messages.ContentBlockParam[]) = (
-						firstMessageAfterTruncation.content as Anthropic.Messages.ContentBlockParam[]
-					).filter((block) => block.type !== "tool_result")
+						; (messagesToUpdate[2].content as Anthropic.Messages.ContentBlockParam[]) = (
+							firstMessageAfterTruncation.content as Anthropic.Messages.ContentBlockParam[]
+						).filter((block) => block.type !== "tool_result")
 				}
 			}
 		}

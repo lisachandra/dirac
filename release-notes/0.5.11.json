@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "version": "0.5.11",
+  "kind": "patch",
+  "announce": true,
+  "sourceTag": "v0.5.10",
+  "analyzedCommit": "f3c24f50d8bf16b941fdf9a6ad6cdf8312260dd4",
+  "headline": "Updates and improvements",
+  "highlights": [
+    {
+      "id": "fix-d03bfc29",
+      "title": "preserve metrics with sensitive substrings",
+      "category": "fix",
+      "evidence": [
+        "d03bfc29e6b68b298d517641eda8910f60794aba"
+      ]
+    }
+  ]
+}

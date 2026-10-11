@@ -27,11 +27,12 @@ const currentModelResponse = (modelId = "gpt-5.6-terra") =>
 
 function createHandler(
 	createStub: sinon.SinonStub,
-	options: { modelId?: string; compactStub?: sinon.SinonStub } = {},
+	options: { modelId?: string; compactStub?: sinon.SinonStub; inferenceSpeed?: "default" | "standard" | "fast" } = {},
 ): OpenAiNativeHandler {
 	const handler = new OpenAiNativeHandler({
 		openAiNativeApiKey: "test-api-key",
 		apiModelId: options.modelId ?? "gpt-5.6-terra",
+		inferenceSpeed: options.inferenceSpeed,
 	})
 	sinon.stub(handler as any, "ensureClient").returns({
 		responses: { create: createStub, compact: options.compactStub ?? sinon.stub() },
@@ -49,6 +50,15 @@ async function drain(stream: AsyncIterable<unknown>): Promise<unknown[]> {
 describe("OpenAiNativeHandler persisted reasoning", () => {
 	afterEach(() => {
 		sinon.restore()
+	})
+
+	it("sends the Fast service tier to the native Responses API", async () => {
+		const createStub = sinon.stub().resolves(createAsyncIterable())
+		const handler = createHandler(createStub, { inferenceSpeed: "fast" })
+
+		await drain(handler.createMessage("system", [{ role: "user", content: "hello" }] as any, tools))
+
+		createStub.firstCall.args[0].service_tier.should.equal("fast")
 	})
 
 	it("continues a supported model with all-turn reasoning context", async () => {
@@ -74,6 +84,27 @@ describe("OpenAiNativeHandler persisted reasoning", () => {
 		params.input.should.have.length(1)
 	})
 
+	it("sends GPT-6 Astra with persisted reasoning", async () => {
+		const createStub = sinon.stub().resolves(createAsyncIterable())
+		const handler = createHandler(createStub, { modelId: "gpt-6-astra" })
+
+		await drain(
+			handler.createMessage(
+				"system",
+				[
+					{ role: "user", content: "old question" },
+					currentModelResponse("gpt-6-astra"),
+					{ role: "user", content: "new question" },
+				] as any,
+				tools,
+			),
+		)
+
+		const params = createStub.firstCall.args[0]
+		params.model.should.equal("gpt-6-astra")
+		params.previous_response_id.should.equal("resp_123")
+		params.reasoning.context.should.equal("all_turns")
+	})
 
 	it("preserves Responses call IDs for persisted-reasoning tool results", async () => {
 		const createStub = sinon.stub().resolves(createAsyncIterable())
@@ -122,7 +153,6 @@ describe("OpenAiNativeHandler persisted reasoning", () => {
 		expect(params.reasoning?.context).to.equal(undefined)
 		params.input.should.have.length(3)
 	})
-
 
 	it("does not chain from a response created by another model", async () => {
 		const createStub = sinon.stub().resolves(createAsyncIterable())
@@ -257,7 +287,9 @@ describe("OpenAiNativeHandler persisted reasoning", () => {
 		await drain(handler.createMessage("system", [], tools, { checkpoint, breakProviderContinuation: true }))
 		const newResponse = currentModelResponse() as any
 		newResponse.id = "resp_new"
-		await drain(handler.createMessage("system", [newResponse, { role: "user", content: "next" }] as any, tools, { checkpoint }))
+		await drain(
+			handler.createMessage("system", [newResponse, { role: "user", content: "next" }] as any, tools, { checkpoint }),
+		)
 
 		const first = createStub.firstCall.args[0]
 		expect(first.previous_response_id).to.equal(undefined)
@@ -294,15 +326,16 @@ describe("OpenAiNativeHandler persisted reasoning", () => {
 		sinon.stub(handler as any, "ensureClient").returns({
 			chat: {
 				completions: {
-					create: sinon.stub().resolves(
-						createAsyncIterable([{ choices: [{ delta: { tool_calls: { malformed: true } } }] }]),
-					),
+					create: sinon
+						.stub()
+						.resolves(createAsyncIterable([{ choices: [{ delta: { tool_calls: { malformed: true } } }] }])),
 				},
 			},
 		})
 
-		await drain((handler as any).createCompletionStream("system", [{ role: "user", content: "hello" }])).should.be
-			.rejectedWith(TypeError)
+		await drain(
+			(handler as any).createCompletionStream("system", [{ role: "user", content: "hello" }]),
+		).should.be.rejectedWith(TypeError)
 	})
 
 	it("aborts a streaming Chat Completions request", async () => {

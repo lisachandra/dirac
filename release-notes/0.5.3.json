@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "version": "0.5.3",
+  "kind": "patch",
+  "announce": true,
+  "sourceTag": "v0.5.2",
+  "analyzedCommit": "0b7718216121f7792d4876a2a3a11ae152ca39a4",
+  "headline": "Updates and improvements",
+  "highlights": [
+    {
+      "id": "perf-ffe6deed",
+      "title": "make the long running task swift by overhauling the full json blob storage on every turn, major UI and backend perf win",
+      "category": "perf",
+      "evidence": [
+        "ffe6deed21f0f06c63284bc2b0df666b02b570a2"
+      ]
+    },
+    {
+      "id": "fix-f37f8265",
+      "title": "clear stale goals from partial webview state updates",
+      "category": "fix",
+      "evidence": [
+        "f37f8265effd8f30e5e1291bd14713d9b6872da6"
+      ]
+    },
+    {
+      "id": "fix-4e64bfb7",
+      "title": "improve completion verification with task context",
+      "category": "fix",
+      "evidence": [
+        "4e64bfb765ac1d491d7a9b9ccb96369946a6b0ec"
+      ]
+    },
+    {
+      "id": "fix-148c8902",
+      "title": "separate child task IDs from conversation ULIDs",
+      "category": "fix",
+      "evidence": [
+        "148c890288507f9fbd953ae45958479b6b3641d9"
+      ]
+    }
+  ]
+}

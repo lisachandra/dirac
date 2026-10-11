@@ -7,7 +7,7 @@ import type { TaskConfig } from "../../types/TaskConfig"
 export function buildSourceAstTrait(config: TaskConfig): ISourceAstTrait {
 	const reconcileAnchors = (absolutePath: string, lines: string[]): string[] => {
 		const result = AnchorStateManager.reconcileWithChanges(absolutePath, lines, config.ulid)
-		if (result.changed) config.context.markAnchorStateDirty()
+		if (result.changed) config.context.markAnchorStateDirty(absolutePath)
 		return result.anchors
 	}
 	const service = new SourceAstService({

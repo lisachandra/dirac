@@ -1,200 +1,277 @@
-# Dirac - Accurate & Highly Token Efficient Open Source AI Agent
+# Dirac, an Open-source AI coding agent for efficiently doing complex work 
 
-> **Dirac topped the [Terminal-Bench-2 leaderboard](https://huggingface.co/datasets/harborframework/terminal-bench-2-leaderboard/discussions/145) for `gemini-3-flash-preview` with a 65.2% score!**
+Dirac is built for long-running software-engineering work, precise codebase changes, and efficient model use.
 
+## What is Dirac?
 
-It is a well studied phenomenon that any given model's reasoning ability degrades with the context length. If we can keep context tightly curated, we improve both accuracy and cost while making larger changes tractable in a single task. 
+Dirac is an open-source coding agent you can use in VS Code, from the terminal, or through any compatible [Agent Client Protocol (ACP)](https://agentclientprotocol.com/) client. It supports **dozens of providers and hundreds of models**, so you can bring the models and credentials that fit your workflow instead of being locked into one stack.
 
-Dirac is an open-source coding agent built with this in mind. It reduces API costs by **64.8%** on average while producing better and faster work. Using line-anchored parallel edits, AST manipulation, and a suite of advanced optimizations. Oh, and no MCP.
+Dirac combines autonomous task execution with purpose-built code tools: hash-anchored file editing, syntax-tree inspection and refactoring, parallel operations, subagents, continuous steering, and configurable permission controls. The goal is simple: give capable models better infrastructure so they can work longer, faster, and with less token overhead.
 
-Our goal: Optimize for bang-for-the-buck on tooling with bare minimum prompting instead of going blindly minimalistic.
+## Why Dirac?
 
-## 📊 Evals
+<details>
+<summary><strong>Available in VS Code, Open VSX, the CLI, and ACP clients</strong></summary>
 
-Dirac is benchmarked against other leading open-source agents on complex, real-world refactoring tasks. Dirac consistently achieves 100% accuracy at a fraction of the cost. These evals are run on public github repos and should be reproducible by anyone. 
+Install the extension from the [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=dirac-run.dirac) or [Open VSX](https://open-vsx.org/extension/dirac-run/dirac), run Dirac in any terminal with the CLI, or use it from ACP-compatible editors such as JetBrains IDEs and Zed. Your provider configuration stays with Dirac across these interfaces.
 
-> 🏆 **TerminalBench 2.0 Leaderboard**: Dirac recently topped the [Terminal-Bench-2 leaderboard](https://huggingface.co/datasets/harborframework/terminal-bench-2-leaderboard/discussions/145) with a **65.2%** score using `gemini-3-flash-preview`. This outperforms both Google's official baseline (**47.6%**) and the top closed-source agent Junie CLI (**64.3%**). This was achieved without any benchmark-specific info or any `AGENTS.md` files being inserted.
+</details>
 
+<details>
+<summary><strong>Goal mode: give Dirac a goal and walk away</strong></summary>
 
-> **Note on the cost table below**: A bug was discovered in Cline, the parent repo, after running these evals ([issue #10314](https://github.com/cline/cline/issues/10314)). We have submitted a [PR #10315](https://github.com/cline/cline/pull/10315) to fix this. This bug caused the evals for Dirac and Cline to slightly underreport the numbers ($0.03 vs $0.05 per million token cache read). Although there won't be a large difference, we will update the evals soon.
+Start an interactive CLI session with `/goal <objective>`. Dirac can keep working toward the same objective for hours or days without drifting, autonomously creating and coordinating tasks until the goal is achieved. It pauses when it needs your input, and you can check in, steer, pause, resume, or stop it at any time.
 
-All tasks for all models used `gemini-3-flash-preview` with thinking set to `high`
+![An achieved Goal with delegated work, timing, token, cache, and cost accounting](assets/media/goal.png)
 
-| Task (Repo) | Files* | Cline | Kilo | Ohmypi | Opencode | Pimono | Roo | **Dirac** |
+</details>
+
+<details>
+<summary><strong>Dirac can extend itself</strong></summary>
+
+Use `/new-tool <description>` to build a tool tailored to your workflow while you work. Dirac turns the requirements into a typed tool, compiles it, validates it, and smoke-tests it. Task-scoped tools are available immediately; persistent workspace and global tools appear in the **Tools** tab and can be enabled without starting a new conversation.
+
+Tool creation must be enabled. Smoke commands follow your configured approval policy.
+
+![Dirac building and then using a custom weather tool in the same conversation](assets/media/tool-building.png)
+
+</details>
+
+<details>
+<summary><strong>Low-verbosity responses</strong></summary>
+
+Models do not need to narrate every routine step. Enable **Low-verbosity responses** to keep progress and final answers concise while preserving decisions, caveats, failures, and verification results.
+
+![A concise task completion with changes and verification results](assets/media/models-speak-less.png)
+
+</details>
+
+<details>
+<summary><strong>Steer it while it works</strong></summary>
+
+If something occurs to you after a task starts, send another message at any time. Dirac queues it and delivers it to the model with the next tool response, updating the work without cancelling or restarting the task.
+
+![A steering message delivered without interrupting the active task](assets/media/steering.png)
+
+</details>
+
+<details>
+<summary><strong>Use a separate Utility model for supporting work</strong></summary>
+
+Route context compaction, new-task handoffs, commit-message generation, and permission decisions to a separate, cheaper model so the main model can stay focused on implementation. In our context-compaction case study, this model arbitrage reduced cost by more than 80%: [Sol vs. Luna: token arbitrage for AI agents](https://dirac.run/posts/token-arbitrage-sol-vs-luna).
+
+![Utility model use cases and configuration](assets/media/utility.png)
+
+</details>
+
+<details>
+<summary><strong>No more approval fatigue</strong></summary>
+
+Configure the Utility model as the first pass for permission requests and give it an explicit natural-language policy. It approves requests that satisfy the policy and escalates unsafe or uncertain requests to you. Every automatic approval remains visible in the transcript with its reason.
+
+</details>
+
+<details>
+<summary><strong>Hash-anchored file editing</strong></summary>
+
+Dirac uses a custom stable line-anchor protocol instead of brittle search-and-replace blocks. The model can identify an exact source range by its anchors and replace only that range, even after nearby lines move. This reduces edit payloads, ambiguity, and retries. [Read how hash anchors and Myers diff make editing more efficient](https://dirac.run/posts/hash-anchors-myers-diff-single-token).
+
+![Dirac applying precise edits through stable source anchors](assets/media/multiple_edit.png)
+
+</details>
+
+<details>
+<summary><strong>AST code inspection</strong></summary>
+
+Dirac uses the codebase's syntax trees to inspect structure without reading entire files. The model can request outlines of many files or retrieve one exact implementation and its references:
+
+```text
+inspect_ast(operation: "outline", paths: ["utils/db.py"])
+inspect_ast(operation: "implementation", paths: ["utils/db.py"], symbols: ["DBManager.init_db"])
+```
+
+![Dirac AST inspection results listing extracted functions and inspected files](assets/media/inspect-ast.png)
+
+Structural results depend on parser and index coverage. Dynamic references require separate verification.
+
+</details>
+
+<details>
+<summary><strong>AST code manipulation</strong></summary>
+
+Structural edits operate on symbols rather than approximate text matches. Dirac can replace one complete function or rename hundreds of indexed references in one call:
+
+```text
+edit_ast(operation: "replace", targets: [{ path: "utils/db.py", symbol: "DBManager.init_db", replacement: "..." }])
+edit_ast(operation: "rename", targets: [{ path: "src/", symbol: "old_name", replacement: "new_name" }])
+```
+
+![Dirac renaming exact symbols across a codebase](assets/media/parallel_AST_edit.png)
+
+</details>
+
+<details>
+<summary><strong>Ask Dirac questions about itself</strong></summary>
+
+Every Dirac build ships with its source. Use `/askDirac <question>` to ask how the installed version works; Dirac receives read-only access to its own functional source so it can answer against the build you are running.
+
+![An askDirac question about the edit_file tool and Dirac's answer](assets/media/ask-dirac.png)
+
+</details>
+
+<details>
+<summary><strong>Parallel code edits</strong></summary>
+
+Dirac's tool protocol lets models batch independent reads, searches, edits, and commands in one response. Coordinated changes across multiple files happen together instead of requiring a separate model round trip for every operation.
+
+![Dirac applying many independent file edits in parallel](assets/media/parallel_edits.png)
+
+</details>
+
+<details>
+<summary><strong>Review one multi-file change</strong></summary>
+
+When automatic approval is disabled, Dirac groups related changes into a single multi-file diff view. You can review the complete change as one unit instead of opening and approving a sequence of disconnected file edits.
+
+</details>
+
+<details>
+<summary><strong>Opportunistic first-request enrichment</strong></summary>
+
+Before the first request reaches the model, Dirac detects likely filenames, directory paths, and symbol names and assembles a bounded context packet. Named symbols receive definition-first context and indexed references.
+
+You can also mention Git changes, workspace diagnostics, terminal output, URLs, text files, PDFs, DOCX files, spreadsheets, notebooks, and images. Applicable `AGENTS.md` instructions, matching rules, and active skills join the request as repository guidance.
+
+</details>
+
+<details>
+<summary><strong>Concurrent, first-class subagents</strong></summary>
+
+Subagents can research, edit, run commands, and validate work concurrently. Each can receive its own prompt, tools, timeout, and optional parent context. Dirac tracks source freshness and rejects stale edits at write time, allowing independent agents to work safely in the same codebase.
+
+![Multiple subagents working concurrently](assets/media/subagents.png)
+
+</details>
+
+<details>
+<summary><strong>Repository-aware execution</strong></summary>
+
+Path-aware instructions, rules, skills, workflows, and hooks carry repository guidance into each task. Permissions are evaluated at tool boundaries, command batches report exit status and bounded output, and Chromium checks return screenshots, console messages, page errors, and the current URL.
+
+Dirac can also isolate work in a Git worktree with integration and cleanup controls. Browser interaction uses screenshots and coordinates; the main-worktree flow expects a clean, single-root Git workspace.
+
+</details>
+
+<details>
+<summary><strong>Continuity for long-running tasks</strong></summary>
+
+Context condensation preserves decisions, exact paths, failed attempts, and validation state. Separate bounded recovery paths handle transient provider errors, context overflow, empty responses, and interrupted tool loops.
+
+Plan, Act, and Utility work can use separate model configurations. Reviewed handoffs can move remaining work into a fresh task, while task IDs support resuming work across VS Code, the CLI, pipelines, and compatible ACP clients.
+
+</details>
+
+<details>
+<summary><strong>Completion checks and restore points</strong></summary>
+
+The optional completion verifier reviews acceptance criteria and claimed validation in a separate model pass. If a required criterion is missing, it returns concrete follow-up work to the active task. This model-based check does not replace tests or human review.
+
+Checkpoints capture workspace files and operational task state. Restore can apply to the workspace, the task, or both, including queued steering, active skills, task tools, and context tracking.
+
+</details>
+
+## Harness comparison
+
+We benchmarked Dirac and other open-source agent harnesses on eight multi-file refactoring tasks from public GitHub repositories. In this comparison, every harness used `gemini-3-flash-preview` with thinking set to `high`. Dirac completed all eight tasks at the lowest average cost.
+
+> **Cost note:** A bug discovered in Cline after these runs ([issue #10314](https://github.com/cline/cline/issues/10314), [PR #10315](https://github.com/cline/cline/pull/10315)) caused the Dirac and Cline results to slightly underreport cache-read costs ($0.03 instead of $0.05 per million tokens).
+
+| Task (repository) | Files* | Cline | Kilo | Ohmypi | Opencode | Pimono | Roo | **Dirac** |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| Task1 ([transformers](https://github.com/huggingface/transformers)) | 8 | 🟢 [(diff)](evals/cline/cline_refactor_DynamicCache) [$0.37] | 🔴 [(diff)](evals/kilo/kilo_code_refactor_DynamicCache_FAILURE) [N/A] | 🟡 [(diff)](evals/ohmypi/ohmypi_refactor_DynamicCache) [$0.24] | 🟢 [(diff)](evals/opencode/opencode_refactor_DynamicCache) [$0.20] | 🟢 [(diff)](evals/pimono/pimono_refactor_DynamicCache) [$0.34] | 🟢 [(diff)](evals/roo/roo_code_refactor_DynamicCache) [$0.49] | **🟢 [(diff)](evals/dirac/dirac_refactor_DynamicCache) [$0.13]** |
-| Task2 ([vscode](https://github.com/microsoft/vscode)) | 21 | 🟢 [(diff)](evals/cline/cline_refactor_IOverlayWidget) [$0.67] | 🟡 [(diff)](evals/kilo/kilo_code_refactor_IOverlayWidget) [$0.78] | 🟢 [(diff)](evals/ohmypi/ohmypi_refactor_IOverlayWidget) [$0.63] | 🟢 [(diff)](evals/opencode/opencode_refactor_IOverlayWidget) [$0.40] | 🟢 [(diff)](evals/pimono/pimono_refactor_IOverlayWidget) [$0.48] | 🟡 [(diff)](evals/roo/roo_code_refactor_IOverlayWidget) [$0.58] | **🟢 [(diff)](evals/dirac/dirac_refactor_IOverlayWidget) [$0.23]** |
-| Task3 ([vscode](https://github.com/microsoft/vscode)) | 12 | 🟡 [(diff)](evals/cline/cline_refactor_addLogging) [$0.42] | 🟢 [(diff)](evals/kilo/kilo_code_refactor_addLogging) [$0.70] | 🟢 [(diff)](evals/ohmypi/ohmypi_refactor_addLogging) [$0.64] | 🟢 [(diff)](evals/opencode/opencode_refactor_addLogging) [$0.32] | 🟢 [(diff)](evals/pimono/pimono_refactor_addLogging) [$0.25] | 🟡 [(diff)](evals/roo/roo_code_refactor_addLogging) [$0.45] | **🟢 [(diff)](evals/dirac/dirac_refactor_addLogging) [$0.16]** |
-| Task4 ([django](https://github.com/django/django)) | 14 | 🟢 [(diff)](evals/cline/cline_refactor_datadict) [$0.36] | 🟢 [(diff)](evals/kilo/kilo_code_refactor_datadict) [$0.42] | 🟡 [(diff)](evals/ohmypi/ohmypi_refactor_datadict) [$0.32] | 🟢 [(diff)](evals/opencode/opencode_refactor_datadict) [$0.24] | 🟡 [(diff)](evals/pimono/pimono_refactor_datadict) [$0.24] | 🟢 [(diff)](evals/roo/roo_code_refactor_datadict) [$0.17] | **🟢 [(diff)](evals/dirac/dirac_refactor_datadict) [$0.08]** |
-| Task5 ([vscode](https://github.com/microsoft/vscode)) | 3 | 🔴 [(diff)](evals/cline/cline_refactor_extensionswb_service_FAILURE) [N/A] | 🟢 [(diff)](evals/kilo/kilo_code_refactor_extensionswb_service) [$0.71] | 🟢 [(diff)](evals/ohmypi/ohmypi_refactor_extensionswb_service) [$0.43] | 🟢 [(diff)](evals/opencode/opencode_refactor_extensionswb_service) [$0.53] | 🟢 [(diff)](evals/pimono/pimono_refactor_extensionswb_service) [$0.50] | 🟢 [(diff)](evals/roo/roo_code_refactor_extensionswb_service) [$0.36] | **🟢 [(diff)](evals/dirac/dirac_refactor_extensionswb_service) [$0.17]** |
-| Task6 ([transformers](https://github.com/huggingface/transformers)) | 25 | 🟢 [(diff)](evals/cline/cline_refactor_latency) [$0.87] | 🟡  [(diff)](evals/kilo/kilo_code_refactor_latency_WRONG) [$1.51] | 🟢 [(diff)](evals/ohmypi/ohmypi_refactor_latency) [$0.94] | 🟢 [(diff)](evals/opencode/opencode_refactor_latency) [$0.90] | 🟢 [(diff)](evals/pimono/pimono_refactor_latency) [$0.52] | 🟢 [(diff)](evals/roo/roo_code_refactor_latency) [$1.44] | **🟢 [(diff)](evals/dirac/dirac_refactor_latency) [$0.34]** |
-| Task7 ([vscode](https://github.com/microsoft/vscode)) | 13 | 🟡 [(diff)](evals/cline/cline_refactor_sendRequest_2missing) [$0.51] | 🟢 [(diff)](evals/kilo/kilo_code_refactor_sendRequest) [$0.77] | 🟢 [(diff)](evals/ohmypi/ohmypi_refactor_sendRequest) [$0.74] | 🟢 [(diff)](evals/opencode/opencode_refactor_sendRequest) [$0.67] | 🟡 [(diff)](evals/pimono/pimono_refactor_sendRequest) [$0.45] | 🟢 [(diff)](evals/roo/roo_code_refactor_sendRequest) [$1.05] | **🟢 [(diff)](evals/dirac/dirac_refactor_sendRequest) [$0.25]** |
-| Task8 ([transformers](https://github.com/huggingface/transformers)) | 3 | 🟢 [(diff)](evals/cline/cline_refactor_stoppingcriteria) [$0.25] | 🟢 [(diff)](evals/kilo/kilo_code_refactor_stoppingcriteria) [$0.19] | 🟢 [(diff)](evals/ohmypi/ohmypi_code_refactor_stoppingcriteria) [$0.17] | 🟢 [(diff)](evals/opencode/opencode_refactor_stoppingcriteria) [$0.26] | 🟢 [(diff)](evals/pimono/pimono_code_refactor_stoppingcriteria) [$0.23] | 🟢 [(diff)](evals/roo/roo_code_refactor_stoppingcriteria) [$0.29] | **🟢 [(diff)](evals/dirac/dirac_refactor_stoppingcriteria) [$0.12]** |
-| **Total Correct** | | 5/8 | 5/8 | 6/8 | 8/8 | 6/8 | 6/8 | **8/8** |
-| **Avg Cost** | | $0.49 | $0.73 | $0.51 | $0.44 | $0.38 | $0.60 | **$0.18** |
+| DynamicCache ([Transformers](https://github.com/huggingface/transformers)) | 8 | 🟢 [(diff)](evals/cline/cline_refactor_DynamicCache) [$0.37] | 🔴 [(diff)](evals/kilo/kilo_code_refactor_DynamicCache_FAILURE) [N/A] | 🟡 [(diff)](evals/ohmypi/ohmypi_refactor_DynamicCache) [$0.24] | 🟢 [(diff)](evals/opencode/opencode_refactor_DynamicCache) [$0.20] | 🟢 [(diff)](evals/pimono/pimono_refactor_DynamicCache) [$0.34] | 🟢 [(diff)](evals/roo/roo_code_refactor_DynamicCache) [$0.49] | **🟢 [(diff)](evals/dirac/dirac_refactor_DynamicCache) [$0.13]** |
+| IOverlayWidget ([VS Code](https://github.com/microsoft/vscode)) | 21 | 🟢 [(diff)](evals/cline/cline_refactor_IOverlayWidget) [$0.67] | 🟡 [(diff)](evals/kilo/kilo_code_refactor_IOverlayWidget) [$0.78] | 🟢 [(diff)](evals/ohmypi/ohmypi_refactor_IOverlayWidget) [$0.63] | 🟢 [(diff)](evals/opencode/opencode_refactor_IOverlayWidget) [$0.40] | 🟢 [(diff)](evals/pimono/pimono_refactor_IOverlayWidget) [$0.48] | 🟡 [(diff)](evals/roo/roo_code_refactor_IOverlayWidget) [$0.58] | **🟢 [(diff)](evals/dirac/dirac_refactor_IOverlayWidget) [$0.23]** |
+| addLogging ([VS Code](https://github.com/microsoft/vscode)) | 12 | 🟡 [(diff)](evals/cline/cline_refactor_addLogging) [$0.42] | 🟢 [(diff)](evals/kilo/kilo_code_refactor_addLogging) [$0.70] | 🟢 [(diff)](evals/ohmypi/ohmypi_refactor_addLogging) [$0.64] | 🟢 [(diff)](evals/opencode/opencode_refactor_addLogging) [$0.32] | 🟢 [(diff)](evals/pimono/pimono_refactor_addLogging) [$0.25] | 🟡 [(diff)](evals/roo/roo_code_refactor_addLogging) [$0.45] | **🟢 [(diff)](evals/dirac/dirac_refactor_addLogging) [$0.16]** |
+| datadict ([Django](https://github.com/django/django)) | 14 | 🟢 [(diff)](evals/cline/cline_refactor_datadict) [$0.36] | 🟢 [(diff)](evals/kilo/kilo_code_refactor_datadict) [$0.42] | 🟡 [(diff)](evals/ohmypi/ohmypi_refactor_datadict) [$0.32] | 🟢 [(diff)](evals/opencode/opencode_refactor_datadict) [$0.24] | 🟡 [(diff)](evals/pimono/pimono_refactor_datadict) [$0.24] | 🟢 [(diff)](evals/roo/roo_code_refactor_datadict) [$0.17] | **🟢 [(diff)](evals/dirac/dirac_refactor_datadict) [$0.08]** |
+| extensionsWorkbenchService ([VS Code](https://github.com/microsoft/vscode)) | 3 | 🔴 [(diff)](evals/cline/cline_refactor_extensionswb_service_FAILURE) [N/A] | 🟢 [(diff)](evals/kilo/kilo_code_refactor_extensionswb_service) [$0.71] | 🟢 [(diff)](evals/ohmypi/ohmypi_refactor_extensionswb_service) [$0.43] | 🟢 [(diff)](evals/opencode/opencode_refactor_extensionswb_service) [$0.53] | 🟢 [(diff)](evals/pimono/pimono_refactor_extensionswb_service) [$0.50] | 🟢 [(diff)](evals/roo/roo_code_refactor_extensionswb_service) [$0.36] | **🟢 [(diff)](evals/dirac/dirac_refactor_extensionswb_service) [$0.17]** |
+| latency ([Transformers](https://github.com/huggingface/transformers)) | 25 | 🟢 [(diff)](evals/cline/cline_refactor_latency) [$0.87] | 🟡 [(diff)](evals/kilo/kilo_code_refactor_latency_WRONG) [$1.51] | 🟢 [(diff)](evals/ohmypi/ohmypi_refactor_latency) [$0.94] | 🟢 [(diff)](evals/opencode/opencode_refactor_latency) [$0.90] | 🟢 [(diff)](evals/pimono/pimono_refactor_latency) [$0.52] | 🟢 [(diff)](evals/roo/roo_code_refactor_latency) [$1.44] | **🟢 [(diff)](evals/dirac/dirac_refactor_latency) [$0.34]** |
+| sendRequest ([VS Code](https://github.com/microsoft/vscode)) | 13 | 🟡 [(diff)](evals/cline/cline_refactor_sendRequest_2missing) [$0.51] | 🟢 [(diff)](evals/kilo/kilo_code_refactor_sendRequest) [$0.77] | 🟢 [(diff)](evals/ohmypi/ohmypi_refactor_sendRequest) [$0.74] | 🟢 [(diff)](evals/opencode/opencode_refactor_sendRequest) [$0.67] | 🟡 [(diff)](evals/pimono/pimono_refactor_sendRequest) [$0.45] | 🟢 [(diff)](evals/roo/roo_code_refactor_sendRequest) [$1.05] | **🟢 [(diff)](evals/dirac/dirac_refactor_sendRequest) [$0.25]** |
+| stoppingcriteria ([Transformers](https://github.com/huggingface/transformers)) | 3 | 🟢 [(diff)](evals/cline/cline_refactor_stoppingcriteria) [$0.25] | 🟢 [(diff)](evals/kilo/kilo_code_refactor_stoppingcriteria) [$0.19] | 🟢 [(diff)](evals/ohmypi/ohmypi_code_refactor_stoppingcriteria) [$0.17] | 🟢 [(diff)](evals/opencode/opencode_refactor_stoppingcriteria) [$0.26] | 🟢 [(diff)](evals/pimono/pimono_code_refactor_stoppingcriteria) [$0.23] | 🟢 [(diff)](evals/roo/roo_code_refactor_stoppingcriteria) [$0.29] | **🟢 [(diff)](evals/dirac/dirac_refactor_stoppingcriteria) [$0.12]** |
+| **Total correct** | | 5/8 | 5/8 | 6/8 | 8/8 | 6/8 | 6/8 | **8/8** |
+| **Average cost** | | $0.49 | $0.73 | $0.51 | $0.44 | $0.38 | $0.60 | **$0.18** |
 
 > 🟢 Success \| 🟡 Incomplete \| 🔴 Failure
-
-> **Cost Comparison**: Dirac is **64.8% cheaper** than the competition (a **2.8x** cost reduction).
 >
-> \* Expected number of files to be modified/created to complete the task.
->
-> See [evals/README.md](evals/README.md) for detailed task descriptions and methodology.
+> \* Expected number of files to be modified or created. See [evals/README.md](evals/README.md) for the exact tasks and methodology.
 
+## Install Dirac
 
-## 🚀 Key Features
+| Interface | Installation |
+| --- | --- |
+| VS Code | [Install from the Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=dirac-run.dirac) |
+| Open VSX | [Install from Open VSX](https://open-vsx.org/extension/dirac-run/dirac) |
+| CLI | `npm install -g dirac-cli` |
+| ACP | Install Dirac from your editor's ACP Registry, or run `dirac --acp` manually |
 
-- **Line-Anchored Edits**: Dirac uses opaque, stateful line IDs paired with exact source content to target edits precisely without relying on line numbers.
-  ![Line-Anchored Edits](https://www.dirac.run/static/images/multiple_edit.png)
-- **AST-Native Precision**: Built-in understanding of language syntax (TypeScript, Python, C++, etc.) allows Dirac to perform structural manipulations like function extraction or class refactoring with 100% accuracy.
-  ![AST-Native Precision](https://www.dirac.run/static/images/parallel_AST_edit.png)
-- **Multi-File Batching**: Dirac can process and edit multiple files in a single LLM roundtrip, significantly reducing latency and API costs.
-  ![Multi-File Batching](https://www.dirac.run/static/images/multi_function_read.png)
-- **High-Bandwidth Context**: Optimized context curation keeps the agent lean and fast, ensuring the LLM always has the most relevant information without wasting tokens.
-- **Autonomous Tool Use**: Dirac can read/write files, execute terminal commands, use a headless browser, and more - all while keeping you in control with an approval-based workflow.
-- **Skills & AGENTS.md**: Customize Dirac's behavior with project-specific instructions using `AGENTS.md` files. It also seamlessly picks up Claude's skills by automatically reading from `.ai`, `.claude`, and `.agents` directories.
-- **Native Tool Calling Only**: To ensure maximum reliability and performance, Dirac exclusively supports models with native tool calling enabled. (Note: MCP is not supported).
+The CLI requires Node.js 22.13 through 24.x and npm. Node.js 25 is not supported because of known memory issues.
 
-## 📦 Installation
+## Quick start
 
-### VS Code Extension
-Install Dirac from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=dirac-run.dirac).
+### VS Code or an Open VSX editor
 
-### CLI (Terminal)
-Install the Dirac CLI globally using npm:
+1. Install Dirac and open its sidebar.
+2. Select a provider and model, then add the provider credentials.
+3. Describe what you want to build, fix, investigate, or review.
+4. Approve actions as needed, or configure an autonomy policy in **Settings**.
+
+### CLI
+
 ```bash
 npm install -g dirac-cli
+dirac auth
+dirac "Analyze the architecture of this project"
 ```
 
-> **Note**: Node.js v25 is currently not supported due to an upstream V8 Turboshaft compiler bug that causes out-of-memory crashes during WASM initialization. Please use Node.js v20, v22, or v24 (LTS versions).
+Useful ways to start:
 
-## 🚀 CLI Quick Start 
-
-1. **Authenticate**:
-   ```bash
-   dirac auth
-   ```
-2. **Run your first task**:
-   ```bash
-   dirac "Analyze the architecture of this project"
-   ```
-
-### Configuration (Environment Variables)
-You can provide API keys via environment variables to skip the `dirac auth` step. This is ideal for CI/CD or non-persistent environments.
-
-For provider-specific setup (e.g. [AWS Bedrock](docs/providers/README.md#aws-bedrock), [Google Cloud Vertex AI](docs/providers/README.md#google-cloud-vertex-ai)), see the [Provider Settings](docs/providers/README.md) guide.
-
-Common API Keys:
-
-- `ANTHROPIC_API_KEY`
-- `OPENAI_API_KEY`
-- `OPENROUTER_API_KEY`
-- `GEMINI_API_KEY`
-- `GROQ_API_KEY`
-- `MISTRAL_API_KEY`
-- `XAI_API_KEY` (x.ai)
-- `HF_TOKEN` (HuggingFace)
-- ... and others (see `src/shared/storage/env-config.ts` for the full list).
-
-#### Using Any OpenAI compatible endpoint
-
-You can use any OpenAI-compatible provider (e.g., DeepSeek, DeepInfra, OpenRouter, or your own local proxy) by providing the base URL and model ID.
-
-**Environment Variables:**
-- `OPENAI_API_BASE`: Your API base URL (e.g., `https://api.deepseek.com/v1`).
-- `OPENAI_API_KEY` (or `OPENAI_COMPATIBLE_CUSTOM_KEY`): Your API key.
-- `CUSTOM_HEADERS`: Optional custom headers (e.g., `"Authorization=Bearer token,X-Account-Id=123"` or JSON format).
-
-**CLI Example:**
 ```bash
-# Using environment variables
-export OPENAI_API_BASE="https://api.yourprovider.com/v1"
-export OPENAI_API_KEY="your-api-key"
-export CUSTOM_HEADERS="Authorization=Bearer XXX"
-
-dirac "explain Dirac Delta function" \
-  # --provider is now optional if OPENAI_API_BASE is set
-  --model "your-model-id"
+dirac                              # Open the interactive composer
+dirac --plan "Design this feature" # Start in Plan mode
+dirac --yolo "Fix the tests"       # Run unattended with plain output
+git diff | dirac "Review this"     # Pipe context directly to Dirac
+dirac history                      # Resume previous work
 ```
 
-**CLI Flag Example:**
-```bash
-dirac "explain Dirac Delta function" \
-  --provider "https://api.deepseek.com/v1" \
-  --model "deepseek-v4-pro" \
-  --headers "X-Custom-Header=Value"
-```
+See the [CLI guide](cli/README.md) for Goal mode, custom tools, task resumption, JSON output, model overrides, and the complete configuration reference.
 
+### ACP editors
 
-### Common Commands
-- `dirac "prompt"`: Start an interactive task.
-- `dirac -p "prompt"`: Run in **Plan Mode** to see the strategy before executing.
-- `dirac -y "prompt"`: **Yolo Mode** (auto-approve all actions, great for simple fixes).
-- `git diff | dirac "Review these changes"`: Pipe context directly into Dirac.
-- `dirac history`: View and resume previous tasks.
-- `dirac --acp`: Run Dirac as an ACP agent for editor integration.
+Dirac can run as an external agent in ACP-compatible editors, including JetBrains IDEs and Zed. Installing it from the editor's ACP Registry is recommended so the client can manage installation and updates.
 
-## 🔌 ACP Editor Integration
+- **JetBrains IDEs 2025.3 and later:** open **Settings → Tools → AI Assistant → Agents**, or select **Install From ACP Registry…** from the agent picker.
+- **Zed:** open **Agent Settings → External Agents**, then select **Add Agent → Install from Registry**.
 
-Dirac can run as an external coding agent in editors that support the [Agent Client Protocol (ACP)](https://agentclientprotocol.com/), including JetBrains IDEs and Zed. Installing from the ACP Registry is recommended so the editor can manage the agent package and updates.
+Dirac manages its provider credentials independently from the editor. See the [ACP setup guide](cli/README.md#agent-client-protocol-acp) for authentication, environment variables, manual configuration, and troubleshooting.
 
-- **JetBrains IDEs 2025.3 and later**: open **Settings → Tools → AI Assistant → Agents**, or select **Install From ACP Registry…** in the agent picker, then install Dirac.
-- **Zed**: open **Agent Settings → External Agents**, select **Add Agent → Install from Registry**, then install Dirac.
+## Providers and configuration
 
-Dirac owns its provider configuration independently of the editor. On first use, choose **Configure a Dirac provider** to enter a provider, model, and API key. **ChatGPT sign-in is optional**; you can instead use DeepSeek or another supported provider with your own credentials.
+Dirac supports API-key providers, subscription-backed providers, cloud platforms, and OpenAI-compatible endpoints. Configure interactively in the extension or with `dirac auth` in the CLI.
 
-For environment-variable setup, manual `dirac --acp` configuration, and troubleshooting, see the [CLI ACP guide](cli/README.md#agent-client-protocol-acp).
+Common environment variables include `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY`, `GROQ_API_KEY`, `MISTRAL_API_KEY`, `XAI_API_KEY`, and `HF_TOKEN`. For process-specific CLI or ACP configuration, use `DIRAC_PROVIDER`, `DIRAC_MODEL`, `DIRAC_API_KEY`, and optional `DIRAC_BASE_URL`.
 
-## 🛠️ Getting Started
+See [Provider-specific settings](docs/providers/README.md) for AWS Bedrock and Google Cloud Vertex AI, and the [CLI authentication guide](cli/README.md#authentication) for terminal setup.
 
-1. Open the Dirac sidebar in VS Code.
-2. Configure your preferred AI provider (Anthropic, OpenAI, OpenRouter, etc.).
-3. Start a new task by describing what you want to build or fix.
-4. Watch Dirac go!
+## Development
 
-
-## 🛠️ Development
-
-### Setup
 ```bash
 npm run install:all
-```
-
-### Protobufs (required before build)
-```bash
 npm run protos
-```
-
-### Build
-```bash
 npm run compile
-```
-
-### Lint
-```bash
 npm run lint
 ```
 
-### Running Tests
+See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines. Unit and integration test commands are documented in the root [`package.json`](package.json).
 
-Unit tests require the `TS_NODE_PROJECT` environment variable set to `./tsconfig.unit-test.json`. This is because VS Code's test runner requires CommonJS modules while the main project uses ESM.
-
-```bash
-# Run all tests (unit + integration)
-npm test
-
-# Run only unit tests
-npm run test:unit
-```
-
-The `test:unit` script already sets `TS_NODE_PROJECT=./tsconfig.unit-test.json` automatically. If you need to run mocha directly, set it manually:
-
-```bash
-TS_NODE_PROJECT=./tsconfig.unit-test.json npx mocha "src/**/__tests__/*.ts" "src/**/*.test.ts"
-```
-
-
-## 📈 Star History
+## Star history
 
 <a href="https://star-history.com/#dirac-run/dirac&Date">
   <picture>
@@ -204,15 +281,12 @@ TS_NODE_PROJECT=./tsconfig.unit-test.json npx mocha "src/**/__tests__/*.ts" "src
   </picture>
 </a>
 
+## License
 
-## 📄 License
+Dirac is open source under the [Apache License 2.0](LICENSE).
 
-Dirac is **open source** and licensed under the [Apache License 2.0](LICENSE).
+## Acknowledgments
 
-## 🤝 Acknowledgments
+Dirac is a fork of [Cline](https://github.com/cline/cline). We are grateful to the Cline team and contributors for their foundational work.
 
-Dirac is a fork of the excellent [Cline](https://github.com/cline/cline) project. We are grateful to the Cline team and contributors for their foundational work.
-
----
-
-Built with ❤️ by [Max Trivedi](https://www.linkedin.com/in/max-trivedi-49993aab/) at [Dirac Delta Labs](https://dirac.run)
+Built by [Max Trivedi](https://www.linkedin.com/in/max-trivedi-49993aab/) at [Dirac Delta Labs](https://dirac.run).

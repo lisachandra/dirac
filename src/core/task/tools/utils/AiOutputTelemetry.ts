@@ -1,6 +1,6 @@
-import { telemetryService } from "@/services/telemetry"
-import type { TaskConfig } from "../types/TaskConfig"
-import { computeLineDiffStats } from "./lineDiffStats"
+import { telemetryService } from "@/services/telemetry";
+import type { TaskConfig } from "../types/TaskConfig";
+import { computeLineDiffStats } from "./lineDiffStats";
 
 /**
  * Shared utility for emitting AI output telemetry from file editing tools.
@@ -11,10 +11,8 @@ import { computeLineDiffStats } from "./lineDiffStats"
  * Extracts provider and model information from task config for telemetry.
  */
 export function getModelInfo(config: TaskConfig): { providerId: string; modelId: string } {
-	const apiConfig = config.services.stateManager.getApiConfiguration()
-	const currentMode = config.services.stateManager.getGlobalSettingsKey("mode")
-	const providerId = (currentMode === "plan" ? apiConfig.planModeApiProvider : apiConfig.actModeApiProvider) as string
-	const modelId = config.api.getModel().id
+	const providerId = config.providerId
+	const modelId = config.model.id
 	return { providerId, modelId }
 }
 

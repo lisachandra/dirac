@@ -2,7 +2,7 @@ import { expectLoggerErrors } from "@/test/loggerGuard"
 import { Anthropic } from "@anthropic-ai/sdk"
 import { afterEach, beforeEach, describe, it } from "mocha"
 import "should"
-import { HistoryItem } from "@shared/HistoryItem"
+import { type HistoryItem, isTaskHistoryItem } from "@shared/HistoryItem"
 import * as fsUtils from "@utils/fs"
 import fs from "fs/promises"
 import os from "os"
@@ -12,6 +12,7 @@ import { HostProvider } from "@/hosts/host-provider"
 import { setVscodeHostProviderMock } from "@/test/host-provider-test-utils"
 import {
 	cleanupConversationHistoryFile,
+	commitTaskHistoryMutations,
 	ensureCacheDirectoryExists,
 	ensureSettingsDirectoryExists,
 	ensureStateDirectoryExists,
@@ -418,6 +419,36 @@ describe("disk - atomic writes", () => {
 			result[0].should.have.property("task")
 		})
 
+		it("should merge concurrent ID-scoped upserts instead of losing writers", async function () {
+			this.timeout(30000)
+			const base = createTestHistoryItem("transaction-base", "Base")
+			await writeTaskHistoryToState([base])
+			const additions = Array.from({ length: 5 }, (_, index) =>
+				createTestHistoryItem(`transaction-${index}`, `Task ${index}`),
+			)
+
+			await Promise.all(
+				additions.map((item) => commitTaskHistoryMutations([{ kind: "upsert", item }])),
+			)
+
+			const resultIds = new Set((await readTaskHistoryFromState()).map((item) => item.id))
+			resultIds.has(base.id).should.be.true()
+			for (const item of additions) resultIds.has(item.id).should.be.true()
+		})
+
+		it("should preserve a concurrent favorite flag while refreshing a run summary", async () => {
+			const initial = createTestHistoryItem("favorite-merge", "Initial")
+			await writeTaskHistoryToState([initial])
+			await commitTaskHistoryMutations([{ kind: "setFavorite", id: initial.id, isFavorited: true }])
+			await commitTaskHistoryMutations([
+				{ kind: "upsert", item: { ...initial, task: "Refreshed", ts: initial.ts + 1 } },
+			])
+
+			const [result] = await readTaskHistoryFromState()
+			result.task.should.equal("Refreshed")
+			;(result.isFavorited === true).should.be.true()
+		})
+
 		it("should preserve data integrity with special characters", async () => {
 			const items = [
 				createTestHistoryItem("special-1", "Test\nwith\nnewlines"),
@@ -498,12 +529,82 @@ describe("disk - atomic writes", () => {
 			result[0].id.should.equal("full-test")
 			result[0].ts.should.equal(1234567890)
 			result[0].task.should.equal("Complete task")
+			isTaskHistoryItem(result[0]).should.equal(true)
+			if (!isTaskHistoryItem(result[0])) throw new Error("Expected Task history")
 			result[0].tokensIn.should.equal(500)
 			result[0].tokensOut.should.equal(1000)
 			result[0].totalCost.should.equal(0.15)
 			result[0].cacheWrites!.should.equal(100)
 			result[0].cacheReads!.should.equal(200)
 		})
+
+		it("should preserve image-only tasks with an empty description", async () => {
+			const imageOnlyItem = createTestHistoryItem("image-only", "")
+
+			await writeTaskHistoryToState([imageOnlyItem])
+			const result = await readTaskHistoryFromState()
+
+			result.should.deepEqual([imageOnlyItem])
+		})
+
+		it("should skip unreadable history records while preserving valid records", async () => {
+			const validItem = createTestHistoryItem("valid-record", "Readable task")
+			const filePath = await getTaskHistoryStateFilePath()
+			await fs.writeFile(
+				filePath,
+				JSON.stringify([
+					validItem,
+					null,
+					{ id: "missing-task", ts: Date.now() },
+					{ id: 42, ts: Date.now(), task: "bad id" },
+					{ ...validItem, id: "bad-cost", totalCost: { amount: 1 } },
+					{ ...validItem, id: "bad-workspace", cwdOnTaskInitialization: { path: "/workspace" } },
+				]),
+				"utf8",
+			)
+
+			const result = await readTaskHistoryFromState()
+
+			result.should.deepEqual([validItem])
+		})
+
+		it("should recover numeric and UUID task directories without prompting or recurring", async function () {
+			this.timeout(2_000)
+			const recoveryStorage = path.join(testGlobalStorageDir, `history-recovery-${Date.now()}`)
+			await fs.mkdir(recoveryStorage, { recursive: true })
+			sandbox.stub(HostProvider.get(), "globalStorageFsPath").value(recoveryStorage)
+
+			const taskIds = ["1780000000000", "550e8400-e29b-41d4-a716-446655440000"]
+			for (const [index, taskId] of taskIds.entries()) {
+				const taskDir = await ensureTaskDirectoryExists(taskId)
+				await fs.writeFile(
+					path.join(taskDir, "ui_messages.json"),
+					JSON.stringify([
+						{
+							id: `${taskId}-message`,
+							ts: Date.now() + index,
+							content: { type: "markdown", content: `Recovered ${taskId}`, role: "user" },
+						},
+					]),
+					"utf8",
+				)
+			}
+
+			const filePath = await getTaskHistoryStateFilePath()
+			await fs.writeFile(filePath, "{not-json", "utf8")
+			const showMessage = sandbox.stub(HostProvider.window, "showMessage").resolves(undefined as any)
+
+			const result = await readTaskHistoryFromState()
+
+			result.map((item) => item.id).sort().should.deepEqual([...taskIds].sort())
+			sinon.assert.notCalled(showMessage)
+			JSON.parse(await fs.readFile(filePath, "utf8")).should.have.length(2)
+			const backups = (await fs.readdir(path.dirname(filePath))).filter((name) =>
+				name.startsWith("taskHistory.unreadable."),
+			)
+			backups.length.should.be.greaterThan(0)
+		})
+
 	})
 
 	describe("atomic write failure scenarios", () => {
@@ -794,12 +895,11 @@ describe("disk - core read/write/mkdir operations", () => {
 			result.should.have.length(0)
 		})
 
-		it("saveApiConversationHistory does not throw on write failure (swallows error)", async () => {
+		it("saveApiConversationHistory propagates write failures", async () => {
 			expectLoggerErrors()
 			const taskId = `api-fail-${Date.now()}`
 			sandbox.stub(fs, "writeFile").rejects(new Error("disk full"))
-			// Should not throw - error is logged and swallowed
-			await saveApiConversationHistory(taskId, [{ role: "user", content: "x" }])
+			await saveApiConversationHistory(taskId, [{ role: "user", content: "x" }]).should.be.rejectedWith("disk full")
 		})
 	})
 
@@ -812,32 +912,161 @@ describe("disk - core read/write/mkdir operations", () => {
 
 		it("saveDiracMessages persists and round-trips messages", async () => {
 			const taskId = `dirac-msgs-${Date.now()}`
-			const messages = [{ ask: "test", say: "hello", ts: Date.now() } as any]
+			const messages = [
+				{
+					id: "message-1",
+					ts: Date.now(),
+					content: { type: "markdown", content: "hello", role: "user" },
+				} as any,
+			]
 			await saveDiracMessages(taskId, messages)
 			const result = await getSavedDiracMessages(taskId)
-			result.should.have.length(1)
+			result.should.deepEqual(messages)
 		})
 
-		it("saveDiracMessages does not throw on write failure (swallows error)", async () => {
+		it("saveDiracMessages propagates write failures", async () => {
 			expectLoggerErrors()
 			const taskId = `dirac-fail-${Date.now()}`
 			sandbox.stub(fs, "writeFile").rejects(new Error("disk full"))
-			await saveDiracMessages(taskId, [{ ask: "test" } as any])
+			await saveDiracMessages(taskId, [{ ask: "test" } as any]).should.be.rejectedWith("disk full")
 		})
 
-		it("persists legacy UI messages before deleting their old file", async () => {
-			const taskId = `dirac-legacy-${Date.now()}`
+		it("migrates a readable transcript from the legacy filename", async () => {
+			const taskId = `dirac-legacy-filename-${Date.now()}`
 			const taskDir = await ensureTaskDirectoryExists(taskId)
 			const oldPath = path.join(taskDir, "claude_messages.json")
 			const newPath = path.join(taskDir, "ui_messages.json")
-			await fs.writeFile(oldPath, JSON.stringify([{ ask: "legacy" }]))
+			const messages = [
+				{
+					id: "message-1",
+					ts: Date.now(),
+					content: { type: "markdown", content: "legacy filename", role: "user" },
+				},
+			]
+			await fs.writeFile(oldPath, JSON.stringify(messages))
 
-			const messages = await getSavedDiracMessages(taskId)
+			const result = await getSavedDiracMessages(taskId)
 
-			messages.should.have.length(1)
+			result.should.deepEqual(messages)
 			JSON.parse(await fs.readFile(newPath, "utf8")).should.deepEqual(messages)
 			await fs.access(oldPath).should.be.rejected()
 		})
+
+		it("rejects pre-modular transcripts without deleting the source file", async () => {
+			const taskId = `dirac-unsupported-legacy-${Date.now()}`
+			const taskDir = await ensureTaskDirectoryExists(taskId)
+			const oldPath = path.join(taskDir, "claude_messages.json")
+			const newPath = path.join(taskDir, "ui_messages.json")
+			await fs.writeFile(oldPath, JSON.stringify([{ ts: Date.now(), type: "say", say: "task", text: "old task" }]))
+
+			let failure: unknown
+			try {
+				await getSavedDiracMessages(taskId)
+			} catch (error) {
+				failure = error
+			}
+			String(failure).should.containEql("unsupported or unreadable format")
+			await fs.access(oldPath)
+			await fs.access(newPath).should.be.rejected()
+		})
+
+		it("skips unreadable messages when a transcript still contains readable messages", async () => {
+			const taskId = `dirac-partial-${Date.now()}`
+			const taskDir = await ensureTaskDirectoryExists(taskId)
+			const filePath = path.join(taskDir, "ui_messages.json")
+			const readable = {
+				id: "message-1",
+				ts: Date.now(),
+				content: { type: "markdown", content: "readable", role: "user" },
+			}
+			await fs.writeFile(filePath, JSON.stringify([readable, { ts: Date.now(), type: "say", say: "text" }, null]))
+
+			const result = await getSavedDiracMessages(taskId)
+
+			result.should.deepEqual([readable])
+			const backups = (await fs.readdir(taskDir)).filter((name) => name.startsWith("ui_messages.unreadable."))
+			backups.length.should.equal(1)
+			JSON.parse(await fs.readFile(path.join(taskDir, backups[0]), "utf8")).should.have.length(3)
+		})
+
+		it("skips messages with nested fields that are unsafe for transcript renderers", async () => {
+			const taskId = `dirac-malformed-nested-${Date.now()}`
+			const taskDir = await ensureTaskDirectoryExists(taskId)
+			const filePath = path.join(taskDir, "ui_messages.json")
+			const readable = {
+				id: "readable-message",
+				ts: Date.now(),
+				content: { type: "markdown", content: "readable", role: "assistant" },
+			}
+			const card = {
+				id: "card",
+				header: "Saved tool",
+				status: "success",
+				renderType: "markdown",
+			}
+			const unreadableMessages = [
+				{
+					id: "invalid-images",
+					ts: Date.now(),
+					content: { type: "markdown", content: "bad images", images: [42] },
+				},
+				{
+					id: "invalid-files",
+					ts: Date.now(),
+					content: { type: "markdown", content: "bad files", files: "not-an-array" },
+				},
+				{
+					id: "invalid-api-cost",
+					ts: Date.now(),
+					content: { type: "api_status", status: { cost: "free" } },
+				},
+				{
+					id: "invalid-card-action",
+					ts: Date.now(),
+					content: { type: "card", card: { ...card, actions: [{ label: { text: "Open" }, value: "open" }] } },
+				},
+				{
+					id: "invalid-card-location",
+					ts: Date.now(),
+					content: { type: "card", card: { ...card, locations: [{ path: 42 }] } },
+				},
+				{
+					id: "invalid-card-diff",
+					ts: Date.now(),
+					content: { type: "card", card: { ...card, diffs: [{ path: "file.ts", oldText: null, newText: "new" }] } },
+				},
+				{
+					id: "invalid-card-render-type",
+					ts: Date.now(),
+					content: { type: "card", card: { ...card, renderType: "html" } },
+				},
+			]
+			await fs.writeFile(filePath, JSON.stringify([readable, ...unreadableMessages]))
+
+			const result = await getSavedDiracMessages(taskId)
+
+			result.should.deepEqual([readable])
+			const backups = (await fs.readdir(taskDir)).filter((name) => name.startsWith("ui_messages.unreadable."))
+			backups.length.should.equal(1)
+		})
+
+		it("continues with readable messages when the unreadable transcript backup fails", async () => {
+			const taskId = `dirac-backup-failure-${Date.now()}`
+			const taskDir = await ensureTaskDirectoryExists(taskId)
+			const filePath = path.join(taskDir, "ui_messages.json")
+			const readable = {
+				id: "readable-message",
+				ts: Date.now(),
+				content: { type: "markdown", content: "readable" },
+			}
+			await fs.writeFile(filePath, JSON.stringify([readable, null]))
+			sandbox.stub(fs, "rename").rejects(new Error("backup denied"))
+
+			const result = await getSavedDiracMessages(taskId)
+
+			result.should.deepEqual([readable])
+		})
+
 	})
 
 	describe("task metadata read/write", () => {

@@ -1,6 +1,12 @@
 import type { ToolUse } from "@core/assistant-message"
 import { formatResponse } from "@core/formatResponse"
 import { DiracDefaultTool } from "@shared/tools"
+import {
+	anchorByteLimitMessage,
+	anchorLimitMessage,
+	MAX_ANCHORED_FILE_BYTES,
+	MAX_ANCHORED_FILE_LINES,
+} from "@shared/anchor-limits"
 import { stripHashesFromDiff } from "@utils/line-hashing"
 import { CardStatus } from "@/shared/ExtensionMessage"
 import { DiracIcon } from "@/shared/icons"
@@ -17,9 +23,8 @@ export class EditFileBatchPreparer {
 		private fileFormatter: EditFileFormatter,
 	) { }
 
-	async prepare(files: FileEdit[], env: IToolEnvironment) {
+	async prepare(files: FileEdit[], env: IToolEnvironment, cards: Record<string, any> = {}) {
 		const preparedBatches: PreparedFileBatch[] = []
-		const cards: Record<string, any> = {}
 		const results: ToolResponse[] = []
 		const totalRequestedEdits = files.reduce((count, file) => count + file.edits.length, 0)
 		let totalResolvedEdits = 0
@@ -107,14 +112,29 @@ export class EditFileBatchPreparer {
 	): Promise<PreparedEdits | { error: string }> {
 		try {
 			await env.workspace.saveOpenDocumentIfDirty({ filePath: absolutePath })
-			const content = await env.workspace.readFile(absolutePath)
+			const fileInfo = await env.workspace.getFileInfo(absolutePath)
+			if (fileInfo.size > MAX_ANCHORED_FILE_BYTES) {
+				return { error: `Cannot edit ${displayPath}: ${anchorByteLimitMessage()}` }
+			}
+			const diskLineCount = await env.workspace.countTextFileLines(absolutePath)
+			if (diskLineCount > MAX_ANCHORED_FILE_LINES) {
+				return { error: `Cannot edit ${displayPath}: ${anchorLimitMessage(diskLineCount)}` }
+			}
+			const content = await env.editor.readText(absolutePath)
 			const lines = content.split(/\r?\n/)
+			if (lines.length > MAX_ANCHORED_FILE_LINES) {
+				return { error: `Cannot edit ${displayPath}: ${anchorLimitMessage(lines.length)}` }
+			}
 			const lineHashes = env.anchors.reconcile(absolutePath, lines)
 			const { resolvedEdits, failedEdits } = this.executor.resolveEdits(
 				[{ type: "tool_use", name: DiracDefaultTool.EDIT_FILE, params: { edits } } as ToolUse],
 				lines,
 				lineHashes,
 			)
+			const { finalLines } = this.executor.applyEdits(lines, resolvedEdits)
+			if (finalLines.length > MAX_ANCHORED_FILE_LINES) {
+				return { error: `Cannot edit ${displayPath}: the requested edits would produce ${finalLines.length.toLocaleString()} lines, above the ${MAX_ANCHORED_FILE_LINES.toLocaleString()}-line hash-anchoring limit.` }
+			}
 			return {
 				content,
 				finalContent: content,

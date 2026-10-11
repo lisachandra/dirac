@@ -12,18 +12,20 @@ const mockStateManager = {
 		return undefined
 	}),
 	getApiConfiguration: vi.fn(() => ({ actModeThinkingBudgetTokens: 1024, planModeThinkingBudgetTokens: 1024 })),
+	captureEffectiveTaskConfiguration: vi.fn((overrides: Record<string, unknown>) => ({
+		apiConfiguration: {
+			actModeApiProvider: "anthropic",
+			planModeApiProvider: "anthropic",
+			actModeThinkingBudgetTokens: 1024,
+			planModeThinkingBudgetTokens: 1024,
+			...overrides,
+		},
+	})),
 	subscribe: vi.fn(() => () => undefined),
 	getGlobalStateKey: vi.fn(() => []),
 	setGlobalState: vi.fn(),
 	flushPendingState: vi.fn(async () => undefined),
 }
-let sessionOverrideCache: Record<string, unknown> = {}
-Object.assign(mockStateManager, {
-	getSessionOverrideCache: vi.fn(() => sessionOverrideCache),
-	setSessionOverrideCache: vi.fn((overrides: Record<string, unknown>) => {
-		sessionOverrideCache = overrides
-	}),
-})
 
 const controllerInstances: any[] = []
 
@@ -42,10 +44,9 @@ vi.mock("@/core/controller", () => ({
 					off: vi.fn(),
 				},
 				setContextCompactionObserver: vi.fn(),
-				rebuildApiHandler: vi.fn(),
-				createApiHandlerForRuntime: vi.fn(() => ({})),
-				setApiHandler: vi.fn(),
-				applyRuntimeModeChange: vi.fn(),
+				applyWorkingConfigurationUpdate: vi.fn(async (_patch: unknown, beforeCommit?: () => void | Promise<void>) => {
+					await beforeCommit?.()
+				}),
 				canAcceptSteeringMessage: vi.fn(() => false),
 			}
 			this.taskRunPromise = Promise.resolve()
@@ -59,10 +60,6 @@ vi.mock("@/core/controller", () => ({
 					off: vi.fn(),
 				},
 				setContextCompactionObserver: vi.fn(),
-				rebuildApiHandler: vi.fn(),
-				createApiHandlerForRuntime: vi.fn(() => ({})),
-				setApiHandler: vi.fn(),
-				applyRuntimeModeChange: vi.fn(),
 				canAcceptSteeringMessage: vi.fn(() => false),
 				submitCardResponse: vi.fn(async () => {}),
 			}

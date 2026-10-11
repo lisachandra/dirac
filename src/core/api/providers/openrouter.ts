@@ -29,6 +29,7 @@ interface OpenRouterHandlerOptions extends CommonApiHandlerOptions {
 }
 
 const dynamicModelInfoDefaults: ModelInfo = { supportsPromptCache: false }
+const OPENROUTER_GENERATION_DETAILS_TIMEOUT_MS = 2_000
 
 export class OpenRouterHandler implements ApiHandler {
 	private options: OpenRouterHandlerOptions
@@ -113,7 +114,7 @@ export class OpenRouterHandler implements ApiHandler {
 		)
 
 		let didLogResponseMetadata = false
-		let didOutputUsage = false
+		let streamUsage: ApiStreamUsageChunk | undefined
 		const toolCallProcessor = new ToolCallProcessor()
 
 		for await (const chunk of stream) {
@@ -196,40 +197,60 @@ export class OpenRouterHandler implements ApiHandler {
 				}
 			}
 
-			if (!didOutputUsage && chunk.usage) {
-				yield formatOpenAiCompatibleUsage(chunk.usage, this.getModel().info)
-				didOutputUsage = true
+			if (!streamUsage && chunk.usage) {
+				streamUsage = formatOpenAiCompatibleUsage(chunk.usage, this.getModel().info, { estimateCost: false })
 			}
 		}
 
-		// Fallback to generation endpoint if usage chunk not returned
-		if (!didOutputUsage) {
-			const apiStreamUsage = await this.getApiStreamUsage(signal)
-			if (apiStreamUsage) {
-				yield apiStreamUsage
-			}
+		if (streamUsage?.totalCost !== undefined) {
+			yield streamUsage
+			return
 		}
+
+		const providerUsage = await this.getApiStreamUsage(signal, streamUsage)
+		if (providerUsage) {
+			yield providerUsage
+			return
+		}
+
+		if (streamUsage) yield streamUsage
 	}
 
-	async getApiStreamUsage(signal?: AbortSignal): Promise<ApiStreamUsageChunk | undefined> {
+	async getApiStreamUsage(
+		signal?: AbortSignal,
+		fallbackUsage?: ApiStreamUsageChunk,
+	): Promise<ApiStreamUsageChunk | undefined> {
 		if (this.lastGenerationId) {
 			try {
 				await setTimeoutPromise(500, undefined, { signal }) // FIXME: necessary delay to ensure generation endpoint is ready
 				const generationIterator = this.fetchGenerationDetails(this.lastGenerationId, signal)
 				const generation = (await generationIterator.next()).value
 				if (signal?.aborted) return undefined
-				// Logger.log("OpenRouter generation details:", generation)
+				if (!generation) return undefined
+
+				const hasProviderUsage = [
+					generation.native_tokens_prompt,
+					generation.native_tokens_completion,
+					generation.native_tokens_cached,
+					generation.native_tokens_cache_write,
+					generation.total_cost,
+				].some((value) => value !== undefined && value !== null)
+				if (!hasProviderUsage) return undefined
+
 				return formatOpenAiCompatibleUsage(
 					{
-						prompt_tokens: generation?.native_tokens_prompt,
-						completion_tokens: generation?.native_tokens_completion,
+						prompt_tokens:
+							generation.native_tokens_prompt ??
+							(fallbackUsage ? fallbackUsage.inputTokens + (fallbackUsage.cacheReadTokens ?? 0) : undefined),
+						completion_tokens: generation.native_tokens_completion ?? fallbackUsage?.outputTokens,
 						prompt_tokens_details: {
-							cached_tokens: generation?.native_tokens_cached,
-							cache_write_tokens: (generation as any)?.native_tokens_cache_write,
+							cached_tokens: generation.native_tokens_cached ?? fallbackUsage?.cacheReadTokens,
+							cache_write_tokens: generation.native_tokens_cache_write ?? fallbackUsage?.cacheWriteTokens,
 						},
-						cost: generation?.total_cost,
+						cost: generation.total_cost,
 					},
 					this.getModel().info,
+					{ estimateCost: false },
 				)
 			} catch (error) {
 				if (signal?.aborted) return undefined
@@ -240,7 +261,7 @@ export class OpenRouterHandler implements ApiHandler {
 		return undefined
 	}
 
-	@withRetry({ maxRetries: 4, baseDelay: 250, maxDelay: 1000, retryAllErrors: true })
+	/** One bounded attempt: billing metadata must not delay an otherwise completed inference response. */
 	async *fetchGenerationDetails(genId: string, signal?: AbortSignal) {
 		// Logger.log("Fetching generation details for:", genId)
 		try {
@@ -248,7 +269,7 @@ export class OpenRouterHandler implements ApiHandler {
 				headers: {
 					Authorization: `Bearer ${this.options.openRouterApiKey}`,
 				},
-				timeout: 15_000, // this request hangs sometimes
+				timeout: OPENROUTER_GENERATION_DETAILS_TIMEOUT_MS,
 				signal,
 				...getAxiosSettings(),
 			})
@@ -267,6 +288,10 @@ export class OpenRouterHandler implements ApiHandler {
 			Logger.error("Error fetching OpenRouter generation details:", error)
 			throw error
 		}
+	}
+
+	shouldEstimateCost(): boolean {
+		return false
 	}
 
 	abort(): void {

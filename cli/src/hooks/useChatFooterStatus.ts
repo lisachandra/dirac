@@ -1,4 +1,4 @@
-import type { ApiProvider, ModelInfo } from "@shared/api"
+import { modelSupportsInferenceSpeed, type ApiProvider, type ModelInfo } from "@shared/api"
 import { DiracMessageType, TaskStatus, type ExtensionState } from "@shared/ExtensionMessage"
 import { getApiMetrics, getLastApiReqTotalTokens } from "@shared/getApiMetrics"
 import { getProviderDefaultModelId, getProviderModelIdKey, getProviderModelInfoKey } from "@shared/storage"
@@ -19,6 +19,7 @@ interface UseChatFooterStatusProps {
 interface ChatFooterStatus {
 	provider: string
 	modelId: string
+	fastModeEnabled: boolean
 	lastApiReqTotalTokens: number
 	contextWindowSize: number
 	totalCost: number
@@ -60,6 +61,18 @@ export function useChatFooterStatus({ ctrl, mode, taskState }: UseChatFooterStat
 			""
 		)
 	}, [mode, provider, taskState.apiConfiguration])
+
+	const inferenceSpeed = useMemo(() => {
+		const inferenceSpeedKey = mode === "act" ? "actModeInferenceSpeed" : "planModeInferenceSpeed"
+		const configValue = (taskState.apiConfiguration as any)?.[inferenceSpeedKey]
+		if (configValue !== undefined) return configValue
+		return StateManager.get().getGlobalSettingsKey(inferenceSpeedKey) ?? "default"
+	}, [mode, taskState.apiConfiguration])
+	const fastModeEnabled =
+		inferenceSpeed === "fast" &&
+		!!provider &&
+		!!modelId &&
+		modelSupportsInferenceSpeed(provider as ApiProvider, modelId)
 
 	const workspacePath = useMemo(() => {
 		const root = ctrl?.getWorkspaceManagerSync?.()?.getPrimaryRoot?.()
@@ -115,6 +128,7 @@ export function useChatFooterStatus({ ctrl, mode, taskState }: UseChatFooterStat
 	return {
 		provider,
 		modelId,
+		fastModeEnabled,
 		lastApiReqTotalTokens,
 		contextWindowSize,
 		totalCost: metrics.totalCost,

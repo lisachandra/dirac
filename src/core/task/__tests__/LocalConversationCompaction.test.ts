@@ -44,15 +44,13 @@ function createMocks() {
 		contextManager: {
 			getNextTruncationRange: sinon.stub().returns([0, 1]),
 		},
-		stateManager: {
-			getGlobalSettingsKey: sinon.stub().callsFake((key: string) => {
-				if (key === "utilityModelEnabled") return true
-				if (key === "utilityModelSelection") return selection
-				if (key === "hooksEnabled") return false
-				return undefined
-			}),
-			getApiConfiguration: sinon.stub().returns({ apiKey: "test-key" }),
-		},
+		getWorkingConfiguration: sinon.stub().returns({
+			settings: {
+				utilityModelEnabled: true, utilityModelUseCondense: true, utilityModelUseNewTask: true,
+				utilityModelSelection: selection, hooksEnabled: false, mode: "act",
+			},
+			apiConfiguration: { apiKey: "test-key" },
+		}),
 		taskMessenger: { createCard: sinon.stub().resolves(card) },
 		getApi: sinon.stub().returns({}),
 		postStateToWebview: sinon.stub().resolves(),
@@ -78,7 +76,7 @@ describe("LocalConversationCompaction", () => {
 
 	it("silently declines when no Utility model is configured", async () => {
 		const { card, compaction, dependencies } = createMocks()
-		dependencies.stateManager.getGlobalSettingsKey.withArgs("utilityModelEnabled").returns(false)
+		dependencies.getWorkingConfiguration.returns({ ...dependencies.getWorkingConfiguration(), settings: { ...dependencies.getWorkingConfiguration().settings, utilityModelEnabled: false, utilityModelUseCondense: false } })
 
 		assert.equal(compaction.isAvailable(), false)
 		const outcome = await compaction.run({ source: "automatic" })

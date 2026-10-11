@@ -1,46 +1,46 @@
-import { Empty, EmptyRequest } from "@shared/proto/dirac/common"
+import { OpenAiCodexAuthEvent, OpenAiCodexAuthMethod, OpenAiCodexAuthRequest } from "@shared/proto/dirac/models"
 import { openAiCodexOAuthManager } from "@/integrations/openai-codex/oauth"
 import { openAiCodexUsageService } from "@/integrations/openai-codex/OpenAiCodexUsageService"
-import { openExternal } from "@/utils/env"
-import { Logger } from "@/shared/services/Logger"
+import { getRequestRegistry, type StreamingResponseHandler } from "../grpc-handler"
 import type { Controller } from "../index"
 
-/**
- * Authenticates with OpenAI Codex (ChatGPT subscription)
- * @param controller The controller instance
- * @param _request The empty request
- * @returns Empty response
- */
-export async function authenticateOpenAiCodex(controller: Controller, _request: EmptyRequest): Promise<Empty> {
+/** Stream public instructions followed by completion; disconnecting cancels the attempt. */
+export async function authenticateOpenAiCodex(
+	controller: Controller,
+	request: OpenAiCodexAuthRequest,
+	responseStream: StreamingResponseHandler<OpenAiCodexAuthEvent>,
+	requestId?: string,
+): Promise<void> {
+	const abortController = new AbortController()
+	if (requestId) {
+		getRequestRegistry().registerRequest(
+			requestId,
+			() => abortController.abort(),
+			{ type: "openai_codex_auth" },
+			responseStream,
+		)
+	}
 	try {
-		Logger.log("[openai-codex-oauth] Starting authentication flow...")
-
-		// 1. Start the authorization flow and get the URL
-		const authUrl = openAiCodexOAuthManager.startAuthorizationFlow()
-
-		// 2. Open the URL in the user's browser
-		await openExternal(authUrl)
-
-		// 3. Wait for the callback (this will block until auth is complete or times out)
-		Logger.log("[openai-codex-oauth] Waiting for browser callback...")
-		await openAiCodexOAuthManager.waitForCallback()
-
-		Logger.log("[openai-codex-oauth] Authentication successful!")
-
-		openAiCodexUsageService.clear()
-
-		try {
-			await openAiCodexUsageService.refresh({ force: true })
-		} catch (usageError) {
-			Logger.error("[openai-codex-usage] Initial usage refresh failed:", usageError)
+		if (
+			request.method !== OpenAiCodexAuthMethod.OPEN_AI_CODEX_AUTH_METHOD_BROWSER &&
+			request.method !== OpenAiCodexAuthMethod.OPEN_AI_CODEX_AUTH_METHOD_DEVICE
+		) {
+			throw new Error("Unknown ChatGPT sign-in method")
 		}
-
-		// 4. Post updated state to webview so it knows we're authenticated
+		await openAiCodexOAuthManager.authenticate(
+			request.method === OpenAiCodexAuthMethod.OPEN_AI_CODEX_AUTH_METHOD_DEVICE ? "device" : "browser",
+			async ({ url, userCode }) => {
+				await responseStream(OpenAiCodexAuthEvent.create({ url, userCode }))
+			},
+			abortController.signal,
+		)
+		abortController.signal.throwIfAborted()
+		openAiCodexUsageService.clear()
 		await controller.postStateToWebview()
-
-		return Empty.create({})
+		await responseStream(OpenAiCodexAuthEvent.create({ completed: true }), true)
 	} catch (error) {
-		Logger.error("[openai-codex-oauth] Authentication failed:", error)
-		throw error
+		if (!abortController.signal.aborted) throw error
+	} finally {
+		if (requestId) getRequestRegistry().cancelRequest(requestId)
 	}
 }

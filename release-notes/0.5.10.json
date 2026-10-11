@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "version": "0.5.10",
+  "kind": "patch",
+  "announce": true,
+  "sourceTag": "v0.5.9",
+  "analyzedCommit": "9eb30b63efc4359502c9b6f52c79c08476947aef",
+  "headline": "Updates and improvements",
+  "highlights": [
+    {
+      "id": "feat-a92f11a8",
+      "title": "add login with device code for chatgpt/codex",
+      "category": "feat",
+      "evidence": [
+        "a92f11a83557cbbf10ee99d8f69a2956f7d47cbd"
+      ]
+    },
+    {
+      "id": "fix-30d4a3c0",
+      "title": "clamp thinking budget and add dynamic tiers",
+      "category": "fix",
+      "evidence": [
+        "30d4a3c09a9de0979a8e048b7f3e776ca050c65e"
+      ]
+    },
+    {
+      "id": "fix-6c316d9a",
+      "title": "emit agent_message_chunk on task completion",
+      "category": "fix",
+      "evidence": [
+        "6c316d9af4a95a2f1f42aec57c78d25d57efec93"
+      ]
+    },
+    {
+      "id": "fix-55c729e9",
+      "title": "skip diagnostics for unsupported file extensions (ERR-5)",
+      "category": "fix",
+      "evidence": [
+        "55c729e9c4e6505a0a7e4fa80a8a158a93316bcf"
+      ]
+    },
+    {
+      "id": "fix-a32781a8",
+      "title": "demote routine Controller disposed log to DEBUG",
+      "category": "fix",
+      "evidence": [
+        "a32781a80c5a22c3344b54ef65d35a989f4ba148"
+      ]
+    }
+  ]
+}

@@ -1,12 +1,17 @@
-import { openAiCodexModels } from "@shared/api"
+import { modelSupportsInferenceSpeed, openAiCodexModels } from "@shared/api"
 import { Mode } from "@shared/ExtensionMessage"
 import { EmptyRequest } from "@shared/proto/dirac/common"
 import { useEffect, useRef, useState } from "react"
 import { useAppStore } from "@/app/store/appStore"
-import { normalizeApiConfiguration, supportsReasoningEffortForModelId } from "@/features/settings/components/utils/providerUtils"
+import {
+	getModeSpecificFields,
+	normalizeApiConfiguration,
+	supportsReasoningEffortForModelId,
+} from "@/features/settings/components/utils/providerUtils"
 import { useSettingsStore } from "@/features/settings/store/settingsStore"
 import { ModelsServiceClient } from "@/shared/api/grpc-client"
 import { ModelInfoView } from "../common/ModelInfoView"
+import InferenceSpeedSelector from "../InferenceSpeedSelector"
 import { ModelSelector } from "../common/ModelSelector"
 import ReasoningEffortSelector from "../ReasoningEffortSelector"
 import { useApiConfigurationHandlers } from "../utils/useApiConfigurationHandlers"
@@ -32,7 +37,6 @@ export const OpenAiCodexProvider = ({ showModelOptions, isPopup, currentMode }: 
 		refreshOpenAiCodexUsage,
 	} = useSettingsStore()
 	const navigateToSettings = useAppStore((state) => state.navigateToSettings)
-	const [isAuthenticating, setIsAuthenticating] = useState(false)
 	const [authError, setAuthError] = useState<string>()
 	const lazyRefreshRequested = useRef(false)
 
@@ -47,25 +51,13 @@ export const OpenAiCodexProvider = ({ showModelOptions, isPopup, currentMode }: 
 		const quotaFetchedAt = getOpenAiCodexQuotaFetchedAt(openAiCodexUsage)
 		const activityFetchedAt = openAiCodexUsage?.activityFetchedAt
 		const quotaIsFresh = quotaFetchedAt !== undefined && now - quotaFetchedAt <= OPENAI_CODEX_USAGE_LAZY_REFRESH_MS
-		const activityIsFresh =
-			activityFetchedAt !== undefined && now - activityFetchedAt <= OPENAI_CODEX_USAGE_LAZY_REFRESH_MS
+		const activityIsFresh = activityFetchedAt !== undefined && now - activityFetchedAt <= OPENAI_CODEX_USAGE_LAZY_REFRESH_MS
 		if (quotaIsFresh && activityIsFresh) return
 
 		lazyRefreshRequested.current = true
 		void refreshOpenAiCodexUsage(false)
 	}, [openAiCodexIsAuthenticated, openAiCodexUsage, refreshOpenAiCodexUsage])
 
-	const handleSignIn = async () => {
-		setAuthError(undefined)
-		setIsAuthenticating(true)
-		try {
-			await ModelsServiceClient.authenticateOpenAiCodex(EmptyRequest.create({}))
-		} catch (error) {
-			setAuthError(error instanceof Error ? error.message : "Browser sign-in did not complete")
-		} finally {
-			setIsAuthenticating(false)
-		}
-	}
 
 	const handleSignOut = async () => {
 		setAuthError(undefined)
@@ -76,9 +68,23 @@ export const OpenAiCodexProvider = ({ showModelOptions, isPopup, currentMode }: 
 		}
 	}
 
-	const { handleModeFieldChange } = useApiConfigurationHandlers()
+	const { handleModeFieldChange, handleModeFieldsChange } = useApiConfigurationHandlers()
 	const { selectedModelId, selectedModelInfo } = normalizeApiConfiguration(apiConfiguration, currentMode)
+	const configuredInferenceSpeed = getModeSpecificFields(apiConfiguration, currentMode).inferenceSpeed
 	const showReasoningEffort = supportsReasoningEffortForModelId(selectedModelId, selectedModelInfo)
+	const setSelectedModel = (modelId: string) => {
+		if (modelSupportsInferenceSpeed("openai-codex", modelId) || configuredInferenceSpeed !== "fast") {
+			return handleModeFieldChange({ plan: "planModeApiModelId", act: "actModeApiModelId" }, modelId, currentMode)
+		}
+		return handleModeFieldsChange(
+			{
+				apiModelId: { plan: "planModeApiModelId", act: "actModeApiModelId" },
+				inferenceSpeed: { plan: "planModeInferenceSpeed", act: "actModeInferenceSpeed" },
+			},
+			{ apiModelId: modelId, inferenceSpeed: "default" },
+			currentMode,
+		)
+	}
 
 	return (
 		<div className="space-y-3">
@@ -86,8 +92,6 @@ export const OpenAiCodexProvider = ({ showModelOptions, isPopup, currentMode }: 
 				authError={authError}
 				email={openAiCodexEmail}
 				isAuthenticated={openAiCodexIsAuthenticated}
-				isAuthenticating={isAuthenticating}
-				onSignIn={() => void handleSignIn()}
 				onSignOut={() => void handleSignOut()}
 				planType={openAiCodexUsage?.planType}
 			/>
@@ -97,7 +101,7 @@ export const OpenAiCodexProvider = ({ showModelOptions, isPopup, currentMode }: 
 					isPopup={isPopup}
 					isRefreshing={openAiCodexUsageRefreshing}
 					onRefresh={refreshOpenAiCodexUsage}
-					onViewDetails={isPopup ? () => navigateToSettings("api-config") : undefined}
+					onViewDetails={isPopup ? () => navigateToSettings("models-api") : undefined}
 					refreshError={openAiCodexUsageRefreshError}
 					snapshot={openAiCodexUsage}
 				/>
@@ -108,16 +112,15 @@ export const OpenAiCodexProvider = ({ showModelOptions, isPopup, currentMode }: 
 					<ModelSelector
 						label="Model"
 						models={openAiCodexModels}
-						onChange={(event: any) =>
-							handleModeFieldChange(
-								{ plan: "planModeApiModelId", act: "actModeApiModelId" },
-								event.target.value,
-								currentMode,
-							)
-						}
+						onChange={(event: any) => setSelectedModel(event.target.value)}
 						selectedModelId={selectedModelId}
 					/>
 					{showReasoningEffort && <ReasoningEffortSelector currentMode={currentMode} />}
+					<InferenceSpeedSelector
+						currentMode={currentMode}
+						description="Fast provides higher Codex throughput and consumes subscription credits at a premium rate."
+						supportsFastMode={selectedModelInfo.supportsFastMode === true}
+					/>
 					<ModelInfoView isPopup={isPopup} modelInfo={selectedModelInfo} selectedModelId={selectedModelId} />
 				</>
 			)}

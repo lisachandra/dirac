@@ -20,7 +20,14 @@ import type { OpenaiReasoningEffort } from "@shared/ExtensionMessage"
 import type { ModelProviderPreset } from "@shared/api"
 interface ModularChatTextAreaProps {
 	mode: "plan" | "act"
+	modeSwitchingDisabled?: boolean
+	modeSwitchingExplanation?: string
 	modelDisplayName: string
+	fastModeSupported: boolean
+	fastModeEnabled: boolean
+	fastModeError?: string
+	isUpdatingFastMode: boolean
+	onFastModeToggle: () => Promise<void>
 	onModelButtonClick: () => void
 	modelProviderPresets: ModelProviderPreset[]
 	activeModelProviderPresetId?: string
@@ -33,8 +40,6 @@ interface ModularChatTextAreaProps {
 	onReasoningEffortSelect: (effort: OpenaiReasoningEffort) => Promise<void>
 	reasoningEffortError?: string
 	isUpdatingReasoningEffort: boolean
-	onSelectFilesAndImages: () => void
-	shouldDisableFilesAndImages: boolean
 	placeholder?: string
 	onSend?: () => void
 	inputValue?: string
@@ -51,7 +56,14 @@ interface ModularChatTextAreaProps {
 
 export const ModularChatTextArea: React.FC<ModularChatTextAreaProps> = ({
 	mode,
+	modeSwitchingDisabled = false,
+	modeSwitchingExplanation,
 	modelDisplayName,
+	fastModeSupported,
+	fastModeEnabled,
+	fastModeError,
+	isUpdatingFastMode,
+	onFastModeToggle,
 	onModelButtonClick,
 	modelProviderPresets,
 	activeModelProviderPresetId,
@@ -64,8 +76,6 @@ export const ModularChatTextArea: React.FC<ModularChatTextAreaProps> = ({
 	onReasoningEffortSelect,
 	reasoningEffortError,
 	isUpdatingReasoningEffort,
-	onSelectFilesAndImages,
-	shouldDisableFilesAndImages,
 	placeholder,
 	inputValue,
 	setInputValue,
@@ -83,7 +93,7 @@ export const ModularChatTextArea: React.FC<ModularChatTextAreaProps> = ({
 	const mentionTrait = useMentionTrait()
 	const slashCommandTrait = useSlashCommandTrait()
 	const fileHandlingTrait = useFileHandlingTrait()
-	const modeTrait = useModeTrait(mode)
+	const modeTrait = useModeTrait(mode, modeSwitchingDisabled)
 
 	const traits = useMemo<InputTrait[]>(
 		() => [mentionTrait, slashCommandTrait, fileHandlingTrait, modeTrait],
@@ -100,7 +110,14 @@ export const ModularChatTextArea: React.FC<ModularChatTextAreaProps> = ({
 		() =>
 			createActionDecorator({
 				mode,
+				modeSwitchingDisabled,
+				modeSwitchingExplanation,
 				modelDisplayName,
+				fastModeSupported,
+				fastModeEnabled,
+				fastModeError,
+				isUpdatingFastMode,
+				onFastModeToggle,
 				onModelButtonClick,
 				modelProviderPresets,
 				activeModelProviderPresetId,
@@ -113,8 +130,6 @@ export const ModularChatTextArea: React.FC<ModularChatTextAreaProps> = ({
 				onReasoningEffortSelect,
 				reasoningEffortError,
 				isUpdatingReasoningEffort,
-				onSelectFilesAndImages,
-				shouldDisableFilesAndImages,
 				sendingDisabled,
 				taskStatus,
 				onModeToggle: modeTrait.onModeToggle,
@@ -122,7 +137,14 @@ export const ModularChatTextArea: React.FC<ModularChatTextAreaProps> = ({
 			}),
 		[
 			mode,
+			modeSwitchingDisabled,
+			modeSwitchingExplanation,
 			modelDisplayName,
+			fastModeSupported,
+			fastModeEnabled,
+			fastModeError,
+			isUpdatingFastMode,
+			onFastModeToggle,
 			onModelButtonClick,
 			modelProviderPresets,
 			activeModelProviderPresetId,
@@ -135,8 +157,6 @@ export const ModularChatTextArea: React.FC<ModularChatTextAreaProps> = ({
 			onReasoningEffortSelect,
 			reasoningEffortError,
 			isUpdatingReasoningEffort,
-			onSelectFilesAndImages,
-			shouldDisableFilesAndImages,
 			sendingDisabled,
 			taskStatus,
 			modeTrait.onModeToggle,
@@ -161,10 +181,10 @@ export const ModularChatTextArea: React.FC<ModularChatTextAreaProps> = ({
 
 	// Register keyboard shortcut for Plan/Act toggle
 	const handleModeToggleWithInput = useCallback(() => {
-		if (context) {
+		if (context && !modeSwitchingDisabled) {
 			modeTrait.onModeToggle(context)
 		}
-	}, [context, modeTrait])
+	}, [context, modeSwitchingDisabled, modeTrait])
 	useShortcut(platform.togglePlanActKeys, handleModeToggleWithInput, { disableTextInputs: false })
 
 	const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {

@@ -9,25 +9,25 @@ describe("StateController", () => {
 	function createController(status: TaskStatus) {
 		const task = {
 			ulid: "task-ulid",
-			api: undefined,
-			setApiHandler: sinon.stub().callsFake((nextApi) => {
-				task.api = nextApi
+			applyWorkingConfigurationUpdate: sinon.stub().callsFake(async (_patch, beforeCommit) => {
+				await beforeCommit?.()
 			}),
 			taskState: {
 				status,
-				didSwitchToActMode: false,
+				pendingModeNotice: undefined,
 				isAwaitingPlanResponse: false,
 			},
 		} as any
 		const stateManager = {
+			getSystemDefaultSettingsKey: sinon.stub().returns("act"),
 			setGlobalState: sinon.stub(),
 			setSessionOverride: sinon.stub(),
-			getApiConfiguration: sinon.stub().returns({}),
+			hasSessionOverride: sinon.stub().returns(false),
+			clearSessionOverride: sinon.stub(),
 		} as any
 		const postStateToWebviewFn = sinon.stub().resolves()
 		const cancelTaskFn = sinon.stub().resolves()
-		const api = {} as any
-		const buildApiHandlerFn = sinon.stub().returns(api) as any
+		const buildApiHandlerFn = sinon.stub() as any
 		const captureModeSwitchFn = sinon.stub()
 
 		const controller = new StateController({
@@ -41,13 +41,11 @@ describe("StateController", () => {
 			captureModeSwitchFn,
 		})
 
-		return { controller, task, stateManager, postStateToWebviewFn, cancelTaskFn, buildApiHandlerFn, api }
+		return { controller, task, stateManager, postStateToWebviewFn, cancelTaskFn }
 	}
 
 	it("switches mode without cancelling a completed task", async () => {
-		const { controller, task, stateManager, postStateToWebviewFn, cancelTaskFn, buildApiHandlerFn, api } = createController(
-			TaskStatus.COMPLETED,
-		)
+		const { controller, task, stateManager, postStateToWebviewFn, cancelTaskFn } = createController(TaskStatus.COMPLETED)
 
 		const sentMessage = await controller.togglePlanActMode("plan")
 
@@ -55,8 +53,7 @@ describe("StateController", () => {
 		sinon.assert.calledWith(stateManager.setGlobalState, "mode", "plan")
 		sinon.assert.calledWith(stateManager.setSessionOverride, "mode", "plan")
 		sinon.assert.calledOnce(postStateToWebviewFn)
-		sinon.assert.calledOnce(buildApiHandlerFn)
-		sinon.assert.calledOnceWithExactly(task.setApiHandler, api)
+		sinon.assert.calledOnce(task.applyWorkingConfigurationUpdate)
 		sinon.assert.notCalled(cancelTaskFn)
 	})
 

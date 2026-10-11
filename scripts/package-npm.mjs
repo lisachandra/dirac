@@ -124,7 +124,7 @@ async function copyPackageJson() {
 	// Remove scripts that are not needed in the published package
 	// and would cause npm publish to fail in a standalone directory
 	if (packageJson.scripts) {
-		delete packageJson.scripts.prepare
+		delete packageJson.scripts.prepack
 		delete packageJson.scripts.build
 		delete packageJson.scripts.typecheck
 		delete packageJson.scripts["build:production"]

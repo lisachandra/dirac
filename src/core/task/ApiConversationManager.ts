@@ -1,4 +1,4 @@
-import { getHookModelContext } from "@core/hooks/hook-model-context"
+import { getTaskHookModelContext } from "./runtime/TaskRuntimeModelContext"
 import { getHooksEnabledSafe } from "@core/hooks/hooks-utils"
 import { executePreCompactHookWithCleanup, HookCancellationError } from "@core/hooks/precompact-executor"
 import { autoCondensePrompt } from "@core/prompts/contextManagement"
@@ -6,8 +6,7 @@ import type { SlashCommandDirectAction } from "@core/slash-commands"
 import type { ApiConversationCheckpoint, ApiConversationRequestOptions } from "@core/api/conversation"
 import { formatContentBlockToMarkdown } from "@integrations/misc/export-markdown"
 import { telemetryService } from "@services/telemetry"
-import { findLastIndex } from "@shared/array"
-import { CardStatus, DiracMessageType, Mode } from "@shared/ExtensionMessage"
+import { CardStatus, Mode } from "@shared/ExtensionMessage"
 import { DiracContent, DiracStorageMessage, removeProviderBoundaryMetadataFromMessage } from "@shared/messages/content"
 import type { DiracTool } from "@shared/tools"
 import { NATIVE_WEB_SEARCH_SKILL_NAME } from "@shared/skills"
@@ -33,6 +32,10 @@ export class ApiConversationManager {
 
 	setApi(api: ApiConversationManagerDependencies["api"]): void {
 		this.dependencies.api = api
+	}
+
+	private getOperationalApi(): ApiConversationManagerDependencies["api"] {
+		return this.dependencies.getRequestRuntime()?.api ?? this.dependencies.api
 	}
 
 	public async scheduleProviderConversationCompaction(
@@ -62,7 +65,7 @@ export class ApiConversationManager {
 		const apiConversationHistory = this.dependencies.messageStateHandler.getApiConversationHistory()
 
 		// Run PreCompact hook before truncation
-		const hooksEnabled = getHooksEnabledSafe(this.dependencies.stateManager.getGlobalSettingsKey("hooksEnabled"))
+		const hooksEnabled = getHooksEnabledSafe(this.dependencies.getWorkingConfiguration().settings.hooksEnabled)
 		if (hooksEnabled) {
 			try {
 				// Calculate what the new deleted range will be
@@ -72,7 +75,10 @@ export class ApiConversationManager {
 				await executePreCompactHookWithCleanup({
 					taskId: this.dependencies.taskId,
 					ulid: this.dependencies.ulid,
-					modelContext: getHookModelContext(this.dependencies.api, this.dependencies.stateManager),
+					modelContext: getTaskHookModelContext(
+						this.getOperationalApi(),
+						this.dependencies.getRequestRuntime()?.workingConfiguration ?? this.dependencies.getWorkingConfiguration(),
+					),
 					apiConversationHistory,
 					conversationHistoryDeletedRange: this.dependencies.taskState.conversationHistoryDeletedRange,
 					contextManager: this.dependencies.contextManager,
@@ -117,7 +123,8 @@ export class ApiConversationManager {
 	}
 
 	public async determineContextCompaction(previousApiReqIndex: number): Promise<boolean> {
-		const useAutoCondense = this.dependencies.stateManager.getGlobalSettingsKey("useAutoCondense")
+		const useAutoCondense = this.dependencies.getRequestRuntime()?.workingConfiguration.settings.useAutoCondense ??
+			this.dependencies.getWorkingConfiguration().settings.useAutoCondense
 		if (!useAutoCondense) return false
 
 		if (this.dependencies.taskState.skipNextAutoCondenseCheck) {
@@ -127,12 +134,12 @@ export class ApiConversationManager {
 
 		const providerId = this.dependencies.getCurrentProviderInfo().providerId
 		const configuredLimit = getAutoCondenseContextLimit(
-			this.dependencies.stateManager.getGlobalSettingsKey("autoCondenseContextLimits"),
+			(this.dependencies.getRequestRuntime()?.workingConfiguration ?? this.dependencies.getWorkingConfiguration()).settings.autoCondenseContextLimits,
 			providerId,
 		)
 		const shouldCompact = this.dependencies.contextManager.shouldCompactContextWindow(
 			this.dependencies.messageStateHandler.getDiracMessages(),
-			this.dependencies.api,
+			this.getOperationalApi(),
 			previousApiReqIndex,
 			configuredLimit,
 		)
@@ -230,7 +237,8 @@ export class ApiConversationManager {
 				await this.dependencies.messageStateHandler.saveDiracMessagesAndUpdateHistory()
 			}
 			const boundary = fullHistory.length - 1
-			if (this.dependencies.api.compactConversation) {
+			const api = this.getOperationalApi()
+			if (api.compactConversation) {
 				const messages = checkpoint
 					? fullHistory.slice(checkpoint.compactedThroughHistoryIndex + 1)
 					: (this.dependencies.contextManager.getTruncatedMessages(
@@ -238,7 +246,7 @@ export class ApiConversationManager {
 							pendingCompaction.previousConversationHistoryDeletedRange,
 						) as DiracStorageMessage[])
 				try {
-					const compactionRequest = this.dependencies.api.compactConversation({
+					const compactionRequest = api.compactConversation({
 						systemPrompt: params.systemPrompt,
 						messages: messages.map(removeProviderBoundaryMetadataFromMessage),
 						tools: params.tools,
@@ -330,7 +338,7 @@ export class ApiConversationManager {
 		if (this.dependencies.taskState.abort) throw new Error("Task instance aborted")
 
 		const enableNativeWebSearch =
-			this.dependencies.api.supportsNativeWebSearch?.() === true &&
+			this.getOperationalApi().supportsNativeWebSearch?.() === true &&
 			this.dependencies.taskState.activeSkillIds.includes(NATIVE_WEB_SEARCH_SKILL_NAME)
 
 		return {
@@ -351,6 +359,7 @@ export class ApiConversationManager {
 		providerId: string
 		modelId: string
 		mode: string
+		requestId: string
 		afterUserContentPersisted?: () => Promise<void>
 	}): Promise<{
 		userContent: DiracContent[]
@@ -491,28 +500,16 @@ export class ApiConversationManager {
 				this.dependencies.ulid,
 				this.dependencies.taskId,
 				durationMs,
-				this.dependencies.stateManager.getGlobalSettingsKey("enableCheckpointsSetting"),
+				(this.dependencies.getRequestRuntime()?.workingConfiguration ?? this.dependencies.getWorkingConfiguration()).settings.enableCheckpointsSetting,
 			)
 		}
 
 		// since we sent off a placeholder api_req_started message to update the webview while waiting to actually start the API request (to load potential details for example), we need to update the text of that message
-		const diracMessages = this.dependencies.messageStateHandler.getDiracMessages()
-		const lastApiReqIndex = findLastIndex(diracMessages, (m) => m.id === apiReqId)
-
-		if (lastApiReqIndex !== -1) {
-			const msg = diracMessages[lastApiReqIndex]
-			if (msg.content.type === "api_status") {
-				await this.dependencies.messageStateHandler.updateDiracMessage(lastApiReqIndex, {
-					content: {
-						type: DiracMessageType.API_STATUS,
-						status: {
-							...msg.content.status,
-							request: userContent.map((block) => formatContentBlockToMarkdown(block)).join("\n\n"),
-						},
-					},
-				})
-			}
-		}
+		const lastApiReqIndex = this.dependencies.messageStateHandler.findMessageIndexById(apiReqId)
+		if (lastApiReqIndex === -1) throw new Error(`API status ${apiReqId} not found`)
+		await this.dependencies.messageStateHandler.patchApiStatusById(apiReqId, {
+			request: userContent.map((block) => formatContentBlockToMarkdown(block)).join("\n\n"),
+		})
 
 		await this.dependencies.postStateToWebview()
 
@@ -521,8 +518,13 @@ export class ApiConversationManager {
 			content: userContent,
 			ts: Date.now(),
 		})
-		if (!params.shouldCompact && params.mode === "act") {
-			this.dependencies.taskState.didSwitchToActMode = false
+		const modeNotice = this.dependencies.taskState.pendingModeNotice
+		if (
+			!params.shouldCompact &&
+			modeNotice?.mode === params.mode &&
+			modeNotice.includedInRequestId === params.requestId
+		) {
+			this.dependencies.taskState.pendingModeNotice = undefined
 		}
 		await params.afterUserContentPersisted?.()
 

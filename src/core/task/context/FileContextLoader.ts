@@ -1,7 +1,6 @@
 import { extractSymbolLikeStrings } from "@core/context/instructions/user-instructions/rule-conditionals"
 import { formatResponse } from "@core/formatResponse"
 import { resolveWorkspacePath } from "@core/workspace"
-import { isMultiRootEnabled } from "@core/workspace/multi-root-utils"
 import { listFiles } from "@services/glob/list-files"
 import { mentionRegexGlobal } from "@shared/context-mentions"
 import { SourceAstService } from "@services/source-ast/SourceAstService"
@@ -143,7 +142,7 @@ export class FileContextLoader {
 			{
 				cwd,
 				workspaceManager: this.dependencies.workspaceManager,
-				isMultiRootEnabled: isMultiRootEnabled(this.dependencies.stateManager),
+				isMultiRootEnabled: this.dependencies.getRequestRuntime().workingConfiguration.executionOptions.multiRootEnabled,
 			},
 			relPath,
 			"Task.loadContext.context",

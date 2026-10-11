@@ -14,9 +14,12 @@ import { getErrorMessage } from "@/shared/errors"
 import type { IDiracTool } from "../../interfaces/IDiracTool"
 import type { ICardHandle, IToolEnvironment } from "../../interfaces/IToolEnvironment"
 import type { SurfaceType } from "../../interfaces/SurfaceType"
+import { ToolExecutionDeadline, ToolTimeoutError } from "../../runtime/ToolExecutionDeadline"
+import { presentToolTimeout } from "../../runtime/ToolTimeoutPresentation"
 import {
 	type FormattedInspectAstResult,
 	type ImplementationCacheRecord,
+	implementationCacheKey,
 	InspectAstFormatter,
 } from "./InspectAstFormatter"
 import {
@@ -80,7 +83,7 @@ interface InspectCardRecord {
 	finalized: boolean
 }
 
-type InspectionExecution =
+type InspectionExecution = (
 	| {
 		operation: "outline"
 		result: AstOutlineResult
@@ -99,6 +102,7 @@ type InspectionExecution =
 		groups: InspectAstOccurrenceGroup[]
 		formatted: FormattedInspectAstResult
 	}
+) & { warnings?: string[] }
 
 /** Orchestrates read-only AST execution, logical result reduction, cards, formatting, and telemetry. */
 export class InspectAstTool implements IDiracTool<InspectAstArgs, string> {
@@ -125,9 +129,16 @@ export class InspectAstTool implements IDiracTool<InspectAstArgs, string> {
 		}
 
 		const args = validation.args
-		const execution = await this.executeOperation(args, env)
+		const deadline = new ToolExecutionDeadline(this.spec().name)
+		let execution: InspectionExecution
+		try {
+			execution = await this.executeOperation(args, env, deadline)
+		} catch (error) {
+			if (error instanceof ToolTimeoutError) return await presentToolTimeout(env, error)
+			throw error
+		}
 		const cards: InspectCardRecord[] = []
-		const observabilityFailures: string[] = []
+		const observabilityFailures: string[] = [...(execution.warnings ?? [])]
 		if (!env.config.isSubagentExecution) {
 			observabilityFailures.push(...await this.createCards(args, execution.groups, env, cards))
 		}
@@ -149,13 +160,18 @@ export class InspectAstTool implements IDiracTool<InspectAstArgs, string> {
 		return text
 	}
 
-	private async executeOperation(args: NormalizedInspectAstArgs, env: IToolEnvironment): Promise<InspectionExecution> {
+	private async executeOperation(
+		args: NormalizedInspectAstArgs,
+		env: IToolEnvironment,
+		deadline: ToolExecutionDeadline,
+	): Promise<InspectionExecution> {
 		if (args.operation === "outline") {
-			const result = await env.sourceAst.outline({
-				paths: args.paths,
-				includeAnchors: args.includeAnchors,
-				showCallGraph: true,
-			})
+			const result = await deadline.run("inspecting source outlines", async () =>
+				await env.sourceAst.outline({
+					paths: args.paths,
+					includeAnchors: args.includeAnchors,
+					showCallGraph: true,
+				}))
 			const groups = this.reducer.reduceOutline(args.paths, result)
 			return {
 				operation: args.operation,
@@ -166,17 +182,26 @@ export class InspectAstTool implements IDiracTool<InspectAstArgs, string> {
 		}
 
 		if (args.operation === "implementation") {
-			const result = await env.sourceAst.implementations({
-				paths: args.paths,
-				symbols: args.symbols,
-				includeAnchors: args.includeAnchors,
-			})
+			const result = await deadline.run("inspecting symbol implementations", async () =>
+				await env.sourceAst.implementations({
+					paths: args.paths,
+					symbols: args.symbols,
+					includeAnchors: args.includeAnchors,
+				}))
 			const groups = this.reducer.reduceImplementations(args.paths, args.symbols, result)
+			const cacheKeys = groups.flatMap((group) =>
+				group.status === "success" ? group.matches.map(implementationCacheKey) : [],
+			)
+			const warnings: string[] = []
 			let cache: Record<string, ImplementationCacheRecord | string> = {}
-			try {
-				cache = await env.context.task.get<Record<string, ImplementationCacheRecord | string>>(IMPLEMENTATION_CACHE_KEY) ?? {}
-			} catch {
-				// Cache availability must not affect the source result.
+			if (cacheKeys.length > 0) {
+				try {
+					cache = await deadline.run("loading implementation cache entries", async () =>
+						await env.context.task.getEntries<ImplementationCacheRecord | string>(IMPLEMENTATION_CACHE_KEY, cacheKeys))
+				} catch (error) {
+					if (error instanceof ToolTimeoutError) throw error
+					warnings.push(`implementation cache load failed: ${this.errorMessage(error)}.`)
+				}
 			}
 			const cacheBeforeFormatting = structuredClone(cache)
 			const formatted = this.formatter.formatImplementations(
@@ -188,17 +213,16 @@ export class InspectAstTool implements IDiracTool<InspectAstArgs, string> {
 			const cacheUpdates = Object.fromEntries(
 				Object.entries(cache).filter(([key, value]) => !isDeepStrictEqual(cacheBeforeFormatting[key], value)),
 			)
-			try {
-				if (Object.keys(cacheUpdates).length > 0) {
-					await env.context.task.update<Record<string, ImplementationCacheRecord | string>>(
-						IMPLEMENTATION_CACHE_KEY,
-						(current) => ({ ...current, ...cacheUpdates }),
-					)
+			if (Object.keys(cacheUpdates).length > 0) {
+				try {
+					await deadline.run("saving the implementation cache", async () =>
+						await env.context.task.updateEntries(IMPLEMENTATION_CACHE_KEY, cacheUpdates))
+				} catch (error) {
+					if (error instanceof ToolTimeoutError) throw error
+					warnings.push(`implementation cache save failed: ${this.errorMessage(error)}.`)
 				}
-			} catch {
-				// Cache persistence must not affect the source result.
 			}
-			return { operation: args.operation, result, groups, formatted }
+			return { operation: args.operation, result, groups, formatted, warnings }
 		}
 
 		const kind = args.operation === "definitions"
@@ -206,12 +230,13 @@ export class InspectAstTool implements IDiracTool<InspectAstArgs, string> {
 			: args.operation === "references"
 				? "reference"
 				: "both"
-		const result = await env.sourceAst.occurrences({
-			paths: args.paths,
-			symbols: args.symbols,
-			kind,
-			includeAnchors: args.includeAnchors,
-		})
+		const result = await deadline.run(`finding symbol ${args.operation}`, async () =>
+			await env.sourceAst.occurrences({
+				paths: args.paths,
+				symbols: args.symbols,
+				kind,
+				includeAnchors: args.includeAnchors,
+			}))
 		const groups = this.reducer.reduceOccurrences(args.operation, args.paths, args.symbols, result)
 		return {
 			operation: args.operation,

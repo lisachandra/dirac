@@ -8,6 +8,8 @@ import React, { createContext, ReactNode, useContext, useEffect, useRef, useStat
 import { EmptyRequest } from "@shared/proto/dirac/common"
 import { subscribeToState } from "@/core/controller/state/subscribeToState"
 import { getRequestRegistry } from "@/core/controller/grpc-handler"
+import type { PresentationBatch } from "@shared/PresentationOperation"
+import { applyPresentationBatch, createPresentationState } from "@shared/presentationState"
 
 let taskContextSubscriptionCounter = 0
 
@@ -42,23 +44,59 @@ export const TaskContextProvider: React.FC<TaskContextProviderProps> = ({ contro
 	// Use ref to track latest state for partial message callback
 	const stateRef = useRef(state)
 	stateRef.current = state
+	const presentationRef = useRef(createPresentationState())
 
 	// Subscribe to controller state updates
 	useEffect(() => {
 		let disposed = false
 		const requestId = `cli-task-context-${++taskContextSubscriptionCounter}`
-		const receiveStateUpdate = async ({ stateJson }: { stateJson: string }) => {
+		const receiveStateUpdate = async ({
+			stateJson,
+			presentationJson,
+		}: {
+			stateJson: string
+			presentationJson?: string
+		}) => {
 			try {
-				const newState = JSON.parse(stateJson) as ExtensionState
+				const update = JSON.parse(stateJson) as Partial<ExtensionState>
+				let presentationChanged = update.diracMessages !== undefined
 				if (disposed) return
-				// Preserve the visible transcript across a transient empty snapshot, but
-				// still accept status/buttons/model changes carried by that snapshot.
-				const hadMessages = (stateRef.current.diracMessages?.length ?? 0) > 0
-				const hasMessages = (newState.diracMessages?.length ?? 0) > 0
-				const previousTaskId = stateRef.current.currentTaskItem?.id
-				const nextTaskId = newState.currentTaskItem?.id
-				const preserveTranscript = hadMessages && !hasMessages && (!nextTaskId || nextTaskId === previousTaskId)
-				setState(preserveTranscript ? { ...newState, diracMessages: stateRef.current.diracMessages } : newState)
+				if (update.diracMessages !== undefined) {
+					presentationRef.current = createPresentationState(
+						update.diracMessages,
+						update.presentationSurfaceId,
+						update.presentationOffset,
+					)
+				}
+				if (presentationJson) {
+					const applied = applyPresentationBatch(
+						presentationRef.current,
+						JSON.parse(presentationJson) as PresentationBatch,
+					)
+					presentationChanged ||= applied.result === "applied"
+					if (applied.result === "gap") {
+						const fullState = (await controller.getStateToPostToWebview()) as ExtensionState
+						presentationRef.current = createPresentationState(
+							fullState.diracMessages,
+							fullState.presentationSurfaceId,
+							fullState.presentationOffset,
+						)
+						Object.assign(update, fullState)
+						presentationChanged = true
+					}
+				}
+				const nextState: Partial<ExtensionState> = {
+					...stateRef.current,
+					...update,
+					diracMessages: presentationChanged
+						? [...presentationRef.current.messages]
+						: (stateRef.current.diracMessages ?? presentationRef.current.messages),
+					presentationSurfaceId: presentationRef.current.surfaceId,
+					presentationOffset: presentationRef.current.offset,
+					activeVoiceStreamId: update.activeVoiceStreamId,
+				}
+				stateRef.current = nextState
+				setState(nextState)
 			} catch (error) {
 				if (!disposed) setLastError(error instanceof Error ? error.message : String(error))
 			}
@@ -85,6 +123,7 @@ export const TaskContextProvider: React.FC<TaskContextProviderProps> = ({ contro
 			diracMessages: [],
 			currentTaskItem: null,
 		} as unknown as Partial<ExtensionState>
+		presentationRef.current = createPresentationState()
 		stateRef.current = clearedState
 		setState(clearedState)
 	}

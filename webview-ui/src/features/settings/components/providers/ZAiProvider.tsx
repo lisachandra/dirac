@@ -2,11 +2,16 @@ import { internationalZAiModels, mainlandZAiModels } from "@shared/api"
 import { Mode } from "@shared/ExtensionMessage"
 import { VSCodeDropdown, VSCodeOption } from "@vscode/webview-ui-toolkit/react"
 import { useMemo } from "react"
-import { normalizeApiConfiguration } from "@/features/settings/components/utils/providerUtils"
+import {
+	getReasoningEffortOptionsForModelId,
+	normalizeApiConfiguration,
+	resolveReasoningEffortForModelId,
+} from "@/features/settings/components/utils/providerUtils"
 import { useSettingsStore } from "@/features/settings/store/settingsStore"
 import { ApiKeyField } from "../common/ApiKeyField"
 import { ModelInfoView } from "../common/ModelInfoView"
 import { DropdownContainer, ModelSelector } from "../common/ModelSelector"
+import ReasoningEffortSelector from "../ReasoningEffortSelector"
 import { useApiConfigurationHandlers } from "../utils/useApiConfigurationHandlers"
 
 /**
@@ -27,6 +32,8 @@ export const ZAiProvider = ({ showModelOptions, isPopup, currentMode }: ZAiProvi
 
 	// Get the normalized configuration
 	const { selectedModelId, selectedModelInfo } = normalizeApiConfiguration(apiConfiguration, currentMode)
+	const reasoningEffortOptions = getReasoningEffortOptionsForModelId(selectedModelId, selectedModelInfo)
+	const defaultReasoningEffort = resolveReasoningEffortForModelId(selectedModelId, selectedModelInfo)
 
 	// Determine which models to use based on API line selection
 	const zaiModels = useMemo(
@@ -86,6 +93,14 @@ export const ZAiProvider = ({ showModelOptions, isPopup, currentMode }: ZAiProvi
 						}
 						selectedModelId={selectedModelId}
 					/>
+
+					{defaultReasoningEffort && (
+						<ReasoningEffortSelector
+							allowedEfforts={reasoningEffortOptions}
+							currentMode={currentMode}
+							defaultEffort={defaultReasoningEffort}
+						/>
+					)}
 
 					<ModelInfoView isPopup={isPopup} modelInfo={selectedModelInfo} selectedModelId={selectedModelId} />
 				</>

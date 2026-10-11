@@ -1,12 +1,14 @@
-import { CardKind, DiracMessageType, UIActionButtonType } from "@shared/ExtensionMessage"
+import { CardKind, DiracMessageType, isFinalStatus, UIActionButtonType } from "@shared/ExtensionMessage"
 import { getCardKind } from "@shared/cardIdentity"
 import { DiracAskResponse } from "@shared/WebviewMessage"
 
 import { EmptyRequest, StringRequest } from "@shared/proto/dirac/common"
+import { GoalMessageRequest } from "@shared/proto/dirac/goal"
 import { AskResponseRequest, NewTaskRequest, SteerTaskRequest } from "@shared/proto/dirac/task"
 import { useCallback, useRef } from "react"
 import { useSettingsStore } from "@/features/settings/store/settingsStore"
-import { SlashServiceClient, TaskServiceClient } from "@/shared/api/grpc-client"
+import { useChatStore } from "@/features/chat/store/chatStore"
+import { GoalServiceClient, SlashServiceClient, TaskServiceClient } from "@/shared/api/grpc-client"
 import { InteractionState, useInteractionState } from "../context/InteractionStateContext"
 import type { ButtonActionType } from "../utils/buttonConfig"
 import type { ChatState, MessageHandlers } from "../types/chatTypes"
@@ -14,6 +16,7 @@ export function useMessageHandlers(chatState: ChatState): MessageHandlers {
 	const { state: interactionState } = useInteractionState()
 	const backgroundCommandRunning = useSettingsStore((state) => state.backgroundCommandRunning)
 	const setExpandTaskHeader = useSettingsStore((state) => state.setExpandTaskHeader)
+	const goal = useChatStore((state) => state.goal)
 	const {
 		setInputValue,
 		activeQuote,
@@ -23,8 +26,15 @@ export function useMessageHandlers(chatState: ChatState): MessageHandlers {
 		setSendingDisabled,
 		uiActionState,
 		lastMessage,
-		messages,
 	} = chatState
+	const activeCard = useChatStore((state) => {
+		const activeCardId = state.uiActionState?.activeCardId
+		const activeCardIndex = activeCardId ? state.messageIndexById.get(activeCardId) : undefined
+		const message = activeCardIndex === undefined ? undefined : state.diracMessages[activeCardIndex]
+		return message?.content.type === DiracMessageType.CARD && !isFinalStatus(message.content.card.status)
+			? message
+			: undefined
+	})
 	const cancelInFlightRef = useRef(false)
 
 	// Handle sending a message
@@ -42,65 +52,89 @@ export function useMessageHandlers(chatState: ChatState): MessageHandlers {
 				const suffix = "\n[/context] \n\n"
 				finalMessage = `${prefix} ${formattedQuote} ${suffix} ${messageToSend}`
 			}
+			const activeCardKind =
+				activeCard?.content.type === DiracMessageType.CARD
+					? getCardKind(activeCard.content.card)
+					: CardKind.GENERIC
+			const isGoalPassthrough =
+				activeCard?.content.type === DiracMessageType.CARD &&
+				activeCard.content.card.toolName === "resolve_task_interaction"
 
 			try {
 				setExpandTaskHeader(false)
-				switch (interactionState) {
-					case InteractionState.IDLE:
-						await TaskServiceClient.newTask(
-							NewTaskRequest.create({ text: finalMessage, images, files }),
-						)
-						break
-					case InteractionState.AWAITING_RESPONSE: {
-						const activeCard = messages.find(
-							(message) => message.id === uiActionState?.activeCardId && message.content.type === DiracMessageType.CARD,
-						)
-						const activeCardKind =
-							activeCard?.content.type === DiracMessageType.CARD
-								? getCardKind(activeCard.content.card)
-								: CardKind.GENERIC
-						const isResume =
-							activeCardKind === CardKind.RESUME_TASK ||
-							activeCardKind === CardKind.RESUME_COMPLETED_TASK ||
-							uiActionState?.cardButtons.some(
-								(button) =>
-									button.action === UIActionButtonType.NEW_TASK ||
-									(button.action === UIActionButtonType.UTILITY && button.value === "condense"),
-							) === true
-						await TaskServiceClient.askResponse(
-							AskResponseRequest.create({
-								cardId: uiActionState?.activeCardId || "",
-								responseType: isResume ? DiracAskResponse.APPROVE : DiracAskResponse.MESSAGE,
-								text: finalMessage,
-								images,
-								files,
-							}),
-						)
-						break
+				if (goal && (interactionState !== InteractionState.AWAITING_RESPONSE || isGoalPassthrough)) {
+					if (images.length > 0 || files.length > 0) {
+						throw new Error("Goal messages currently support text only")
 					}
-					case InteractionState.RUNNING:
-						if (images.length > 0 || files.length > 0) {
-							throw new Error("Mid-turn guidance currently supports text only")
+					await GoalServiceClient.sendGoalMessage(GoalMessageRequest.create({ goalId: goal.id, message: finalMessage }))
+				} else if (goal) {
+					const isResume =
+						activeCardKind === CardKind.RESUME_TASK ||
+						activeCardKind === CardKind.RESUME_COMPLETED_TASK ||
+						uiActionState?.cardButtons.some(
+							(button) =>
+								button.action === UIActionButtonType.NEW_TASK ||
+								(button.action === UIActionButtonType.UTILITY && button.value === "condense"),
+						) === true
+					const cardId = uiActionState?.activeCardId
+					if (!cardId) throw new Error(`Goal ${goal.id} interaction is missing its active card identity`)
+					await TaskServiceClient.askResponse(
+						AskResponseRequest.create({
+							cardId,
+							responseType: isResume ? DiracAskResponse.APPROVE : DiracAskResponse.MESSAGE,
+							text: finalMessage,
+							images,
+							files,
+						}),
+					)
+				} else
+					switch (interactionState) {
+						case InteractionState.IDLE:
+							await TaskServiceClient.newTask(NewTaskRequest.create({ text: finalMessage, images, files }))
+							break
+						case InteractionState.AWAITING_RESPONSE: {
+							const isResume =
+								activeCardKind === CardKind.RESUME_TASK ||
+								activeCardKind === CardKind.RESUME_COMPLETED_TASK ||
+								uiActionState?.cardButtons.some(
+									(button) =>
+										button.action === UIActionButtonType.NEW_TASK ||
+										(button.action === UIActionButtonType.UTILITY && button.value === "condense"),
+								) === true
+							await TaskServiceClient.askResponse(
+								AskResponseRequest.create({
+									cardId: uiActionState?.activeCardId || "",
+									responseType: isResume ? DiracAskResponse.APPROVE : DiracAskResponse.MESSAGE,
+									text: finalMessage,
+									images,
+									files,
+								}),
+							)
+							break
 						}
-						await TaskServiceClient.steerTask(SteerTaskRequest.create({ text: finalMessage }))
-						break
-					case InteractionState.COMPLETED:
-						await TaskServiceClient.askResponse(
-							AskResponseRequest.create({
-								cardId: uiActionState?.activeCardId || "",
-								responseType: DiracAskResponse.MESSAGE,
-								text: finalMessage,
-								images,
-								files,
-							}),
-						)
-						break
-				}
+						case InteractionState.RUNNING:
+							if (images.length > 0 || files.length > 0) {
+								throw new Error("Mid-turn guidance currently supports text only")
+							}
+							await TaskServiceClient.steerTask(SteerTaskRequest.create({ text: finalMessage }))
+							break
+						case InteractionState.COMPLETED:
+							await TaskServiceClient.askResponse(
+								AskResponseRequest.create({
+									cardId: uiActionState?.activeCardId || "",
+									responseType: DiracAskResponse.MESSAGE,
+									text: finalMessage,
+									images,
+									files,
+								}),
+							)
+							break
+					}
 
 				// Clear local input state immediately on success
 				setInputValue("")
 				setActiveQuote(null)
-				setSendingDisabled(interactionState !== InteractionState.RUNNING)
+				setSendingDisabled(goal ? false : interactionState !== InteractionState.RUNNING)
 				setSelectedImages([])
 				setSelectedFiles([])
 			} catch (error) {
@@ -109,6 +143,7 @@ export function useMessageHandlers(chatState: ChatState): MessageHandlers {
 		},
 		[
 			interactionState,
+			goal,
 			activeQuote,
 			setInputValue,
 			setActiveQuote,
@@ -117,7 +152,7 @@ export function useMessageHandlers(chatState: ChatState): MessageHandlers {
 			setSelectedFiles,
 			setExpandTaskHeader,
 			uiActionState,
-			messages,
+			activeCard,
 		],
 	)
 

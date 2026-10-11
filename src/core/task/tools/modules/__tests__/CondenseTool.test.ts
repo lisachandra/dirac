@@ -46,7 +46,7 @@ function createMocks(source: "automatic" | "user" = "automatic") {
 			autoApprovalSettings: { enableNotifications: false },
 			ulid: "ulid-1",
 			mode: "act",
-			api: { getModel: () => ({ id: "model-1" }) },
+			model: { id: "model-1", info: { contextWindow: 1_000 } },
 			taskState: state,
 			messageState: {
 				getDiracMessages: sinon.stub().returns([]),
@@ -57,9 +57,6 @@ function createMocks(source: "automatic" | "user" = "automatic") {
 				saveDiracMessagesAndUpdateHistory: sinon.stub().resolves(),
 			},
 			services: {
-				stateManager: {
-					getApiConfiguration: () => ({ actModeApiProvider: "provider-1", planModeApiProvider: "provider-1" }),
-				},
 				contextManager: {
 					getContextTelemetryData: sinon.stub().returns({ tokensUsed: 750, maxContextWindow: 1000 }),
 				},

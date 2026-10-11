@@ -9,8 +9,7 @@ export const openAiModelInfoSaneDefaults: OpenAiCompatibleModelInfo = {
 	supportsReasoning: true,
 	supportsStrictTools: false,
 	isR1FormatRequired: false,
-	inputPrice: 0,
-	outputPrice: 0,
+	// No inputPrice/outputPrice — unknown models have unknown pricing, not $0
 	temperature: 0,
 }
 

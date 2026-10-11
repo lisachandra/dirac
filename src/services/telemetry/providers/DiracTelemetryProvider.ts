@@ -9,6 +9,85 @@ import { diracTelemetryConfig } from "@/shared/services/config/dirac-telemetry-c
 import type { ITelemetryProvider, TelemetryProperties, TelemetrySettings } from "./ITelemetryProvider"
 import { jsonHeaders } from "@shared/net"
 
+// Each pattern carries its own replacement: patterns with a leading capture group
+// keep that prefix (e.g. "Bearer " or "token="), the rest are fully redacted.
+const TELEMETRY_SECRET_PATTERNS: { pattern: RegExp; replacement: string }[] = [
+	{ pattern: /(Bearer\s+)[^\s"']+/gi, replacement: "$1[REDACTED]" },
+	{ pattern: /\bsk-[A-Za-z0-9_-]{16,}\b/g, replacement: "[REDACTED]" }, // OpenAI-style keys (sk-..., sk-ant-...)
+	{ pattern: /\bghp_[A-Za-z0-9]{20,}\b/g, replacement: "[REDACTED]" }, // GitHub PATs
+	{ pattern: /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g, replacement: "[REDACTED]" }, // Slack tokens
+	{ pattern: /\bAKIA[0-9A-Z]{16}\b/g, replacement: "[REDACTED]" }, // AWS access key IDs
+	{ pattern: /((?:api[_-]?key|token|secret|password)\s*[=:]\s*["']?)[^\s"']+/gi, replacement: "$1[REDACTED]" }, // key=value pairs
+]
+const MAX_TELEMETRY_STRING_LENGTH = 2000
+
+// Only exact, explicitly enumerated property names are redacted. Telemetry contains
+// legitimate metric names such as "tokensIn", so substring and wildcard matching
+// must not be used here.
+const SENSITIVE_TELEMETRY_PROPERTY_KEYS = new Set([
+	"api-key",
+	"api_key",
+	"apikey",
+	"authorization",
+	"cookie",
+	"cookies",
+	"password",
+	"passwd",
+	"secret",
+	"client-secret",
+	"client_secret",
+	"clientsecret",
+	"token",
+	"access-token",
+	"access_token",
+	"accesstoken",
+	"refresh-token",
+	"refresh_token",
+	"refreshtoken",
+	"auth-token",
+	"auth_token",
+	"authtoken",
+	"id-token",
+	"id_token",
+	"idtoken",
+	"credential",
+	"credentials",
+	"private-key",
+	"private_key",
+	"privatekey",
+])
+
+export function isSensitiveKey(key: string): boolean {
+	return SENSITIVE_TELEMETRY_PROPERTY_KEYS.has(key.toLowerCase())
+}
+
+export function scrubTelemetryProperties(value: unknown): unknown {
+	if (typeof value === "string") {
+		let result = TELEMETRY_SECRET_PATTERNS.reduce(
+			(redacted, { pattern, replacement }) => redacted.replace(pattern, replacement),
+			value,
+		)
+		if (result.length > MAX_TELEMETRY_STRING_LENGTH) {
+			result = `${result.slice(0, MAX_TELEMETRY_STRING_LENGTH)}…[truncated]`
+		}
+		return result
+	}
+	if (Array.isArray(value)) return value.map(scrubTelemetryProperties)
+	if (value && typeof value === "object") {
+		return Object.fromEntries(
+			Object.entries(value).map(([k, v]) => {
+				if (isSensitiveKey(k)) {
+					if (typeof v !== "object" || v === null) {
+						return [k, "[REDACTED]"]
+					}
+				}
+				return [k, scrubTelemetryProperties(v)]
+			}),
+		)
+	}
+	return value
+}
+
 /**
  * Dirac implementation of the telemetry provider interface
  * Handles Dirac-specific analytics tracking
@@ -87,6 +166,7 @@ export class DiracTelemetryProvider implements ITelemetryProvider {
 		}
 
 		try {
+			const scrubbed = properties ? (scrubTelemetryProperties(properties) as TelemetryProperties) : undefined
 			await fetch(diracTelemetryConfig.host, {
 				method: "POST",
 				headers: {
@@ -96,7 +176,7 @@ export class DiracTelemetryProvider implements ITelemetryProvider {
 				body: JSON.stringify({
 					distinctId: getDistinctId(),
 					event,
-					properties,
+					properties: scrubbed,
 					timestamp: new Date().toISOString(),
 				}),
 			})

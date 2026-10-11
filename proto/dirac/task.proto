@@ -67,12 +67,15 @@ message TaskResponse {
   int64 ts = 3;
   bool is_favorited = 4;
   int64 size = 5;
-  double total_cost = 6;
-  int32 tokens_in = 7;
-  int32 tokens_out = 8;
-  int32 cache_writes = 9;
-  int32 cache_reads = 10;
+  // Legacy Task accounting. Goal clients must use accounting instead.
+  optional double total_cost = 6;
+  optional int32 tokens_in = 7;
+  optional int32 tokens_out = 8;
+  optional int32 cache_writes = 9;
+  optional int32 cache_reads = 10;
   string model_id = 11;
+  optional string run_kind = 12;
+  GoalAccountingItem accounting = 13;
 }
 
 // Request for getting task history with filtering
@@ -97,12 +100,34 @@ message TaskItem {
   int64 ts = 3;
   bool is_favorited = 4;
   int64 size = 5;
-  double total_cost = 6;
-  int32 tokens_in = 7;
-  int32 tokens_out = 8;
-  int32 cache_writes = 9;
-  int32 cache_reads = 10;
+  // Legacy Task accounting. Goal clients must use accounting instead.
+  optional double total_cost = 6;
+  optional int32 tokens_in = 7;
+  optional int32 tokens_out = 8;
+  optional int32 cache_writes = 9;
+  optional int32 cache_reads = 10;
   string model_id = 11;
+  optional string run_kind = 12;
+  optional string conversation_ulid = 13;
+  optional string initial_display_text = 14;
+  optional string objective_preview = 15;
+  optional int32 objective_revision = 16;
+  optional string status = 17;
+  optional string status_reason = 18;
+  optional int64 created_at = 19;
+  optional int64 updated_at = 20;
+  optional int64 active_duration_ms = 21;
+  GoalAccountingItem accounting = 22;
+}
+
+message GoalAccountingItem {
+  optional double total_tokens = 1;
+  optional double input_tokens = 2;
+  optional double output_tokens = 3;
+  optional double reasoning_tokens = 4;
+  optional double cache_read_tokens = 5;
+  optional double cache_write_tokens = 6;
+  optional double cost = 7;
 }
 
 // Request for ask response operation

@@ -1,7 +1,7 @@
 import * as fs from "fs/promises"
-import * as iconv from "iconv-lite"
 import { createDirectoriesForFile } from "@utils/fs"
-import { detectEncoding } from "../misc/extract-text"
+import { NodeTextFileAccess } from "./NodeTextFileAccess"
+import type { TextFileAccess, TextFileWriteResult } from "./TextFileAccess"
 import { sanitizeNotebookForLLM } from "../misc/notebook-utils"
 
 export class FileOperationManager {
@@ -12,51 +12,50 @@ export class FileOperationManager {
 	constructor(
 		private absolutePath: string,
 		private editType: "create" | "modify" | "delete",
+		private textFileAccess: TextFileAccess = new NodeTextFileAccess(),
 	) {
 		this.fileEncoding = "utf8"
 	}
 
 	async setup(): Promise<void> {
 		if (this.editType === "modify") {
-			const fileBuffer = await fs.readFile(this.absolutePath)
-			this.fileEncoding = await detectEncoding(fileBuffer)
-			this.originalContent = iconv.decode(fileBuffer, this.fileEncoding)
+			const result = await this.textFileAccess.readText(this.absolutePath)
+			this.fileEncoding = result.encoding
+			this.originalContent = result.content
 		} else {
 			this.originalContent = ""
 			this.fileEncoding = "utf8"
 		}
 
-		this.createdDirs = await createDirectoriesForFile(this.absolutePath)
+		this.createdDirs = this.editType === "create" ? await createDirectoriesForFile(this.absolutePath) : []
 
-		if (this.editType !== "modify") {
-			await fs.writeFile(this.absolutePath, "")
+		if (this.editType === "create") {
+			await this.textFileAccess.writeText(this.absolutePath, "")
 		}
 	}
 
 	async ensureFileExists(): Promise<void> {
-		if (this.editType !== "modify") {
+		if (this.editType === "create") {
 			const exists = await fs
 				.stat(this.absolutePath)
 				.then(() => true)
 				.catch(() => false)
 			if (!exists) {
-				await fs.writeFile(this.absolutePath, "")
+				await this.textFileAccess.writeText(this.absolutePath, "")
 			}
 		}
 	}
 
-	async writeFile(content: string): Promise<void> {
-		const buffer = Buffer.from(content, this.fileEncoding as BufferEncoding)
-		await fs.writeFile(this.absolutePath, buffer)
+	async writeFile(content: string): Promise<TextFileWriteResult> {
+		return this.textFileAccess.writeText(this.absolutePath, content)
 	}
 
 	async readFile(): Promise<string> {
-		const fileBuffer = await fs.readFile(this.absolutePath)
-		return iconv.decode(fileBuffer, this.fileEncoding as BufferEncoding)
+		return (await this.textFileAccess.readText(this.absolutePath)).content
 	}
 
 	async deleteFile(): Promise<void> {
-		await fs.rm(this.absolutePath, { force: true })
+		await fs.rm(this.absolutePath)
 	}
 
 	async deleteCreatedDirs(): Promise<string[]> {

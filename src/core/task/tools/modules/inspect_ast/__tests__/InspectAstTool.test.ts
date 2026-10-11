@@ -68,9 +68,19 @@ function createEnvironment(options: {
 		context: {
 			task: {
 				get: async (key: string) => taskContext.get(key),
+				getEntries: async (key: string, entryKeys: readonly string[]) => {
+					const entries = (taskContext.get(key) ?? {}) as Record<string, unknown>
+					return Object.fromEntries(entryKeys.filter((entryKey) => entries[entryKey] !== undefined).map((entryKey) => [entryKey, entries[entryKey]]))
+				},
 				set: async (key: string, value: unknown) => taskContext.set(key, value),
 				update: async <T>(key: string, updater: (value: T | undefined) => T) =>
 					taskContext.set(key, updater(taskContext.get(key) as T | undefined)),
+				updateEntries: async (key: string, updates: Record<string, unknown>, deletions: readonly string[] = []) => {
+					const entries = (taskContext.get(key) ?? {}) as Record<string, unknown>
+					Object.assign(entries, updates)
+					for (const entryKey of deletions) delete entries[entryKey]
+					taskContext.set(key, entries)
+				},
 			},
 		},
 		orchestration: {
@@ -339,6 +349,62 @@ describe("InspectAstTool", () => {
 		assert.doesNotMatch(output, /tool execution failed|<error>/)
 	})
 
+
+	it("preserves implementation output when the optional cache cannot load", async () => {
+		const run = definition("A.run")
+		const { env } = createEnvironment({
+			implementationResult: {
+				targets: [{
+					path: "src/a.ts",
+					absolutePath: "/repo/src/a.ts",
+					symbol: "A.run",
+					status: "success",
+					definition: run,
+					contentHash: "hash-a",
+					lines: [{ lineNumber: 1, text: "run() {}" }],
+				}],
+			},
+		})
+			; (env.context.task as any).getEntries = async () => { throw new Error("cache unavailable") }
+
+		const output = await new InspectAstTool().processCall({
+			operation: "implementation",
+			paths: ["src/a.ts"],
+			symbols: ["A.run"],
+		}, env)
+
+		assert.match(output, /run\(\) \{\}/)
+		assert.match(output, /implementation cache load failed: cache unavailable/)
+	})
+
+	it("preserves implementation output when the optional cache cannot save", async () => {
+		const run = definition("A.run")
+		const { env } = createEnvironment({
+			implementationResult: {
+				targets: [{
+					path: "src/a.ts",
+					absolutePath: "/repo/src/a.ts",
+					symbol: "A.run",
+					status: "success",
+					definition: run,
+					contentHash: "hash-a",
+					lines: [{ lineNumber: 1, text: "run() {}" }],
+				}],
+			},
+		})
+			; (env.sourceAst as any).getAnchorFingerprint = () => "fingerprint"
+			; (env.context.task as any).updateEntries = async () => { throw new Error("cache readonly") }
+
+		const output = await new InspectAstTool().processCall({
+			operation: "implementation",
+			paths: ["src/a.ts"],
+			symbols: ["A.run"],
+			include_anchors: true,
+		}, env)
+
+		assert.match(output, /run\(\) \{\}/)
+		assert.match(output, /implementation cache save failed: cache readonly/)
+	})
 	it("increments mistakes only for malformed calls", async () => {
 		const { env, getMistakeCount } = createEnvironment()
 		const result = await new InspectAstTool().processCall({ operation: "implementation", paths: ["src/a.ts"] }, env)

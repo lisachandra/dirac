@@ -1,19 +1,26 @@
-import { VSCodeButton } from "@vscode/webview-ui-toolkit/react"
-import { AtSignIcon, CheckIcon, ChevronDownIcon, PlusIcon } from "lucide-react"
-import { motion } from "framer-motion"
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip"
-import { cn } from "@/lib/utils"
-import DiracRulesToggleModal from "@/features/dirac-rules/components/DiracRulesToggleModal"
-import { InputDecorator, ModularInputContext } from "../types"
+import type { ModelProviderPreset } from "@shared/api"
 import type { TaskStatus } from "@shared/ExtensionMessage"
 import { OPENAI_REASONING_EFFORT_LABELS, type OpenaiReasoningEffort } from "@shared/ExtensionMessage"
-import { TaskStatusIndicator } from "../components/TaskStatusIndicator"
-import type { ModelProviderPreset } from "@shared/api"
+import { motion } from "framer-motion"
+import { CheckIcon, ChevronDownIcon, FastForwardIcon, LockKeyholeIcon } from "lucide-react"
+import DiracRulesToggleModal from "@/features/dirac-rules/components/DiracRulesToggleModal"
+import { cn } from "@/lib/utils"
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover"
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip"
+import { TaskStatusIndicator } from "../components/TaskStatusIndicator"
+import { InputDecorator, ModularInputContext } from "../types"
+
 interface ActionDecoratorProps {
 	onModeToggle: (context: ModularInputContext) => void
 	mode: "plan" | "act"
+	modeSwitchingDisabled?: boolean
+	modeSwitchingExplanation?: string
 	modelDisplayName: string
+	fastModeSupported: boolean
+	fastModeEnabled: boolean
+	fastModeError?: string
+	isUpdatingFastMode: boolean
+	onFastModeToggle: () => Promise<void>
 	onModelButtonClick: () => void
 	modelProviderPresets: ModelProviderPreset[]
 	activeModelProviderPresetId?: string
@@ -26,8 +33,6 @@ interface ActionDecoratorProps {
 	onReasoningEffortSelect: (effort: OpenaiReasoningEffort) => Promise<void>
 	reasoningEffortError?: string
 	isUpdatingReasoningEffort: boolean
-	onSelectFilesAndImages: () => void
-	shouldDisableFilesAndImages: boolean
 	sendingDisabled?: boolean
 	taskStatus?: TaskStatus
 	togglePlanActKeys?: string
@@ -43,67 +48,46 @@ export const createActionDecorator = (props: ActionDecoratorProps): InputDecorat
 	renderAction: (context: ModularInputContext) => (
 		<div className="flex justify-between items-center w-full backdrop-blur-sm rounded-md">
 			<div className="flex min-w-0 flex-1 items-center gap-1">
-				<Tooltip>
-					<TooltipContent>Add Context</TooltipContent>
-					<TooltipTrigger>
-						<motion.div whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.9 }}>
-							<VSCodeButton
-								appearance="icon"
-								aria-label="Add Context"
-								className="p-0 m-0 flex items-center"
-								data-testid="context-button"
-								onClick={() => {
-									context.textAreaRef.current?.focus()
-									const currentValue = context.inputValue
-									const newValue =
-										currentValue.endsWith(" ") || !currentValue ? currentValue + "@" : currentValue + " @"
-									context.setInputValue(newValue)
-									// Trigger mention trait if needed
-								}}>
-								<div className="flex items-center gap-[3px] text-[10px] whitespace-nowrap min-w-0 w-full">
-									<AtSignIcon size={12} />
-								</div>
-							</VSCodeButton>
-						</motion.div>
-					</TooltipTrigger>
-				</Tooltip>
-
-				<Tooltip>
-					<TooltipContent>Add Files & Images</TooltipContent>
-					<TooltipTrigger>
-						<motion.div whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.9 }}>
-							<VSCodeButton
-								appearance="icon"
-								aria-label="Add Files & Images"
-								className="p-0 m-0 flex items-center"
-								data-testid="files-button"
-								disabled={props.shouldDisableFilesAndImages}
-								onClick={props.onSelectFilesAndImages}>
-								<div className="flex items-center gap-[3px] text-[10px] whitespace-nowrap min-w-0 w-full">
-									<PlusIcon size={13} />
-								</div>
-							</VSCodeButton>
-						</motion.div>
-					</TooltipTrigger>
-				</Tooltip>
-
 				<DiracRulesToggleModal />
 
 				<div className="relative flex min-w-0 flex-1 items-center gap-1 ml-2 mr-2">
 					<div className="flex min-w-0 max-w-full items-center gap-1">
-						<a
+						<button
 							className={cn(
-								"flex h-5 min-w-0 max-w-full items-center px-0 text-xs outline-none select-none",
+								"flex h-5 min-w-0 max-w-full select-none items-center border-0 bg-transparent px-0 text-xs outline-none",
 								"text-(--vscode-descriptionForeground) hover:text-(--vscode-foreground) hover:underline focus:text-(--vscode-foreground) focus:underline active:text-(--vscode-foreground) active:underline",
 							)}
 							onClick={props.onModelButtonClick}
-							role="button"
-							tabIndex={0}
-							title="Open API Settings">
+							title="Open API Settings"
+							type="button">
 							<span className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-xs">
 								{props.modelDisplayName}
 							</span>
-						</a>
+						</button>
+						{props.fastModeSupported && (
+							<Tooltip>
+								<TooltipContent>
+									{props.fastModeError || (props.fastModeEnabled ? "Disable Fast Mode" : "Enable Fast Mode")}
+								</TooltipContent>
+								<TooltipTrigger asChild>
+									<button
+										aria-label={props.fastModeEnabled ? "Disable Fast Mode" : "Enable Fast Mode"}
+										aria-pressed={props.fastModeEnabled}
+										className={cn(
+											"flex size-5 shrink-0 items-center justify-center rounded-sm bg-transparent p-0 transition-colors hover:bg-(--vscode-toolbar-hoverBackground) disabled:cursor-wait disabled:opacity-60",
+											props.fastModeEnabled
+												? "text-(--vscode-foreground)"
+												: "text-(--vscode-descriptionForeground) opacity-50 hover:opacity-100",
+										)}
+										data-testid="fast-mode-toggle"
+										disabled={props.isUpdatingFastMode}
+										onClick={() => void props.onFastModeToggle()}
+										type="button">
+										<FastForwardIcon size={13} strokeWidth={2.5} />
+									</button>
+								</TooltipTrigger>
+							</Tooltip>
+						)}
 						<Popover>
 							<PopoverTrigger asChild>
 								<button
@@ -219,56 +203,78 @@ export const createActionDecorator = (props: ActionDecoratorProps): InputDecorat
 				</div>
 			</div>
 
-			<Tooltip>
-				<TooltipContent className="text-xs px-2 flex flex-col gap-1" side="top">
-					{`In ${props.mode === "act" ? "Act" : "Plan"} mode, Dirac will ${
-						props.mode === "act" ? "complete the task immediately" : "gather information to architect a plan"
-					}`}
-					{props.togglePlanActKeys && (
-						<p className="text-description/80 text-xs mb-0">
-							Toggle w/ <kbd className="text-muted-foreground mx-1">{props.togglePlanActKeys}</kbd>
-						</p>
-					)}
-				</TooltipContent>
-				<TooltipTrigger>
-					<div className={modeSwitchClasses} data-testid="mode-switch" onClick={() => props.onModeToggle(context)}>
-						<motion.div
-							animate={{
-								x: props.mode === "act" ? "100%" : "0%",
-								backgroundColor:
-									props.mode === "plan"
-										? "var(--vscode-activityWarningBadge-background)"
-										: "var(--vscode-focusBorder)",
-							}}
-							className="absolute h-full w-1/2 opacity-90"
-							initial={false}
-							transition={{ bounce: 0, duration: 0.15, type: "spring" }}
-						/>
-						{["Plan", "Act"].map((m) => {
-							const isSelected = props.mode === m.toLowerCase()
-							return (
-								<div
-									aria-checked={isSelected}
-									className={cn(
-										"flex-1 z-10 text-center transition-colors duration-150 flex items-center justify-center gap-1.5 px-3",
-										isSelected
-											? "text-white font-bold"
-											: "text-(--vscode-input-placeholderForeground) hover:text-(--vscode-input-foreground)",
-									)}
-									key={m}
-									role="switch">
-									{m === "Plan" ? (
-										<span className="codicon codicon-lightbulb text-[10px]" />
-									) : (
-										<span className="codicon codicon-zap text-[10px]" />
-									)}
-									{m}
-								</div>
-							)
-						})}
-					</div>
-				</TooltipTrigger>
-			</Tooltip>
+			{props.modeSwitchingDisabled && props.mode === "act" ? (
+				<Tooltip>
+					<TooltipContent className="px-2 text-xs" side="top">
+						{props.modeSwitchingExplanation}
+					</TooltipContent>
+					<TooltipTrigger asChild>
+						<button
+							aria-disabled="true"
+							aria-label={`Act mode locked. ${props.modeSwitchingExplanation ?? "Mode switching is unavailable."}`}
+							className="flex h-6 shrink-0 cursor-default items-center gap-1.5 rounded-md border border-input-border bg-transparent px-2 font-mono text-xs text-(--vscode-descriptionForeground)"
+							data-testid="mode-switch"
+							title={props.modeSwitchingExplanation}
+							type="button">
+							<LockKeyholeIcon aria-hidden="true" size={11} />
+							Act
+						</button>
+					</TooltipTrigger>
+				</Tooltip>
+			) : (
+				<Tooltip>
+					<TooltipContent className="flex flex-col gap-1 px-2 text-xs" side="top">
+						{`In ${props.mode === "act" ? "Act" : "Plan"} mode, Dirac will ${props.mode === "act" ? "complete the task immediately" : "gather information to architect a plan"}`}
+						{props.togglePlanActKeys && (
+							<p className="mb-0 text-xs text-description/80">
+								Toggle w/ <kbd className="mx-1 text-muted-foreground">{props.togglePlanActKeys}</kbd>
+							</p>
+						)}
+					</TooltipContent>
+					<TooltipTrigger asChild>
+						<button
+							aria-label={`Switch to ${props.mode === "act" ? "Plan" : "Act"} mode`}
+							className={modeSwitchClasses}
+							data-testid="mode-switch"
+							onClick={() => props.onModeToggle(context)}
+							type="button">
+							<motion.div
+								animate={{
+									x: props.mode === "act" ? "100%" : "0%",
+									backgroundColor:
+										props.mode === "plan"
+											? "var(--vscode-activityWarningBadge-background)"
+											: "var(--vscode-focusBorder)",
+								}}
+								className="absolute h-full w-1/2 opacity-90"
+								initial={false}
+								transition={{ bounce: 0, duration: 0.15, type: "spring" }}
+							/>
+							{["Plan", "Act"].map((m) => {
+								const isSelected = props.mode === m.toLowerCase()
+								return (
+									<div
+										aria-hidden="true"
+										className={cn(
+											"z-10 flex flex-1 items-center justify-center gap-1.5 px-3 text-center transition-colors duration-150",
+											isSelected
+												? "text-white font-bold"
+												: "text-(--vscode-input-placeholderForeground) hover:text-(--vscode-input-foreground)",
+										)}
+										key={m}>
+										{m === "Plan" ? (
+											<span className="codicon codicon-lightbulb text-[10px]" />
+										) : (
+											<span className="codicon codicon-zap text-[10px]" />
+										)}
+										{m}
+									</div>
+								)
+							})}
+						</button>
+					</TooltipTrigger>
+				</Tooltip>
+			)}
 		</div>
 	),
 })

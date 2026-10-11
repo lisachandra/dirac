@@ -36,7 +36,12 @@ export const ModularCardBody: React.FC<ModularCardBodyProps> = ({ card, isActive
 			className="overflow-x-auto overflow-y-auto p-2.5 text-sm leading-relaxed"
 			ref={scrollRef}
 			style={{ maxHeight: presentation.maxHeight ? `${presentation.maxHeight}px` : "320px" }}>
-			<CardContent body={presentation.body} renderType={renderType} />
+			<CardContent
+				body={presentation.body}
+				messageId={card.id}
+				renderType={renderType}
+				streaming={card.status === "running" && presentation.body === card.body}
+			/>
 		</div>
 	)
 

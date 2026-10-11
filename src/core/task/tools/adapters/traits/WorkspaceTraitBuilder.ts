@@ -1,7 +1,9 @@
 import { resolveWorkspacePath } from "@core/workspace"
 import { extractFileContent } from "@integrations/misc/extract-file-content"
 import { processFilesIntoText } from "@integrations/misc/extract-text"
+import { countTextFileLines, readTextFileWindow } from "@integrations/misc/read-text-file-window"
 import { listFiles } from "@services/glob/list-files"
+import { fingerprintWorkspaceRoots } from "@services/workspace/WorkspaceFingerprint"
 import * as fs from "fs/promises"
 import { HostProvider } from "@/hosts/host-provider"
 import type { IWorkspaceTrait } from "../../interfaces/IToolEnvironment"
@@ -15,8 +17,10 @@ export function buildWorkspaceTrait(config: TaskConfig): IWorkspaceTrait {
 			return typeof result === "string" ? { absolutePath: result, displayPath: relPath } : result
 		},
 		readFile: async (path) => await fs.readFile(path, "utf8"),
+		readTextFileWindow: async (path, options) => await readTextFileWindow(path, options),
+		countTextFileLines: async (path, signal) => await countTextFileLines(path, signal),
 		readRichFile: async (path) => {
-			const supportsImages = config.api.getModel().info.supportsImages ?? false
+			const supportsImages = config.model.info.supportsImages ?? false
 			return await extractFileContent(path, supportsImages)
 		},
 		formatAttachedFiles: processFilesIntoText,
@@ -29,9 +33,16 @@ export function buildWorkspaceTrait(config: TaskConfig): IWorkspaceTrait {
 			}
 		},
 		listFiles: async (path, recursive, limit) => await listFiles(path, recursive, limit),
-		writeFile: async (path, content) => await fs.writeFile(path, content, "utf8"),
+		fingerprintWorkspace: async () => {
+			const workspaceRoots = config.workspaceManager?.getRoots().map((root) => root.path) ?? [config.cwd]
+			return await fingerprintWorkspaceRoots(workspaceRoots)
+		},
+		writeFile: async (path, content) =>
+			await config.callbacks.withMutationAuthorization(config.toolUse?.name, () => fs.writeFile(path, content, "utf8")),
 		saveOpenDocumentIfDirty: async (options) => {
-			await HostProvider.workspace.saveOpenDocumentIfDirty(options)
+			await config.callbacks.withMutationAuthorization(config.toolUse?.name, async () => {
+				await HostProvider.workspace.saveOpenDocumentIfDirty(options)
+			})
 		},
 	}
 }

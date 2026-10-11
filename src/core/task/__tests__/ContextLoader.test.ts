@@ -80,6 +80,13 @@ describe("ContextLoader (characterization)", () => {
 				getGlobalSettingsKey: sandbox.stub().returns({}),
 				getWorkspaceStateKey: sandbox.stub().returns({}),
 			} as any,
+			getRequestRuntime: () => ({
+				workingConfiguration: {
+					settings: { globalSkillsToggles: {}, globalWorkflowToggles: {}, yoloModeToggled: false },
+					workspaceConfiguration: { localSkillsToggles: {}, workflowToggles: {} },
+					executionOptions: { multiRootEnabled: false },
+				},
+			} as any),
 			cwd: tempDir,
 			urlContentFetcher: {} as any,
 			fileContextTracker: {} as any,
@@ -168,8 +175,8 @@ describe("ContextLoader (characterization)", () => {
 				false,
 				false,
 			)
-			;(result[0][0] as any).text.should.equal(attachmentText)
-			;(result[0][1] as any).text.should.equal(hookText)
+				; (result[0][0] as any).text.should.equal(attachmentText)
+				; (result[0][1] as any).text.should.equal(hookText)
 			slashCommandCalls.should.equal(0)
 			result[2].should.be.false()
 			result[4].should.be.false()
@@ -263,7 +270,7 @@ describe("ContextLoader (characterization)", () => {
 				getGlobalSettingsKey: sandbox.stub().returns({ "/off": false }),
 				getWorkspaceStateKey: sandbox.stub().returns({}),
 			}
-			const deps = makeDependencies({ stateManager: sm })
+			const deps = makeDependencies({ stateManager: sm, getRequestRuntime: () => ({ workingConfiguration: { settings: { globalSkillsToggles: { "/off": false }, globalWorkflowToggles: {}, yoloModeToggled: false }, workspaceConfiguration: { localSkillsToggles: {}, workflowToggles: {} } } } as any) })
 			const loader = new ContextLoader(deps)
 			const result = await loader.loadContext([{ type: "text", isUserInput: true, text: "<task>x</task>" }], false, false)
 			result[3].should.have.length(1)
@@ -281,7 +288,7 @@ describe("ContextLoader (characterization)", () => {
 				getGlobalSettingsKey: sandbox.stub().returns({}),
 				getWorkspaceStateKey: sandbox.stub().returns({ "/off": false }),
 			}
-			const deps = makeDependencies({ stateManager: sm })
+			const deps = makeDependencies({ stateManager: sm, getRequestRuntime: () => ({ workingConfiguration: { settings: { globalSkillsToggles: {}, globalWorkflowToggles: {}, yoloModeToggled: false }, workspaceConfiguration: { localSkillsToggles: { "/off": false }, workflowToggles: {} } } } as any) })
 			const loader = new ContextLoader(deps)
 			const result = await loader.loadContext([{ type: "text", isUserInput: true, text: "<task>x</task>" }], false, false)
 			result[3].should.have.length(1)

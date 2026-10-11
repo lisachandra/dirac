@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "version": "0.5.1",
+  "kind": "patch",
+  "announce": true,
+  "sourceTag": "v0.5.0",
+  "analyzedCommit": "d3ee492a7fc84328ee70c81126affc9d47d285d2",
+  "headline": "add explicit tool selection for cli",
+  "highlights": [
+    {
+      "id": "feat-d442ec18",
+      "title": "add explicit tool selection for cli",
+      "category": "feat",
+      "evidence": [
+        "d442ec182427542d1ccad15893fbd094080d2d6c"
+      ]
+    },
+    {
+      "id": "fix-d3ee492a",
+      "title": "wait for terminal task state before follow-ups",
+      "category": "fix",
+      "evidence": [
+        "d3ee492a7fc84328ee70c81126affc9d47d285d2"
+      ]
+    }
+  ]
+}

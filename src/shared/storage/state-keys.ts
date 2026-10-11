@@ -4,16 +4,16 @@ import {
 	LiteLLMModelInfo,
 	DEFAULT_API_PROVIDER,
 	ModelInfo,
-	OpenAiCompatibleModelInfo,
 	ModelProviderSelection,
+	OpenAiCompatibleModelInfo,
 	OpenAiCompatibleProfile,
 } from "@shared/api"
 import { BrowserSettings, DEFAULT_BROWSER_SETTINGS } from "@shared/BrowserSettings"
 import { DiracRulesToggles } from "@shared/dirac-rules"
 import { UIActionState } from "@shared/ExtensionMessage"
-import { HistoryItem } from "@shared/HistoryItem"
+import { RunHistoryItem } from "@shared/HistoryItem"
 import { WorkspaceRoot } from "@shared/multi-root/types"
-import { Mode } from "@shared/storage/types"
+import { InferenceSpeed, Mode, normalizeInferenceSpeed } from "@shared/storage/types"
 import { TelemetrySetting } from "@shared/TelemetrySetting"
 import { normalizeUserApprovedCommands, type UserApprovedCommand } from "@shared/UserApprovedCommand"
 import { LanguageModelChatSelector } from "vscode"
@@ -52,13 +52,15 @@ export interface UtilityModelUseCases {
 	condense: boolean
 	newTask: boolean
 	generateCommitMessage: boolean
+	permissionHandling: boolean
 }
 
 const GLOBAL_STATE_FIELDS = {
 	diracVersion: { default: undefined as string | undefined },
+	pendingReleaseNotesFromVersion: { default: undefined as string | undefined },
 	"dirac.generatedMachineId": { default: undefined as string | undefined }, // Note, distinctId reads/writes this directly from/to StorageContext before StateManager is initialized.
 	lastShownAnnouncementId: { default: undefined as string | undefined },
-	taskHistory: { default: [] as HistoryItem[], isAsync: true },
+	taskHistory: { default: [] as RunHistoryItem[], isAsync: true },
 	favoritedModelIds: { default: [] as string[] },
 	terminalReuseEnabled: { default: true as boolean },
 	vscodeTerminalExecutionMode: {
@@ -131,6 +133,10 @@ const API_HANDLER_SETTINGS_FIELDS = {
 	planModeThinkingBudgetTokens: { default: undefined as number | undefined },
 	geminiPlanModeThinkingLevel: { default: undefined as string | undefined },
 	planModeReasoningEffort: { default: undefined as string | undefined },
+	planModeInferenceSpeed: {
+		default: "default" as InferenceSpeed,
+		transform: normalizeInferenceSpeed,
+	},
 	planModeVerbosity: { default: undefined as string | undefined },
 	planModeVsCodeLmModelSelector: { default: undefined as LanguageModelChatSelector | undefined },
 	planModeAwsBedrockCustomSelected: { default: undefined as boolean | undefined },
@@ -169,6 +175,10 @@ const API_HANDLER_SETTINGS_FIELDS = {
 	actModeThinkingBudgetTokens: { default: undefined as number | undefined },
 	geminiActModeThinkingLevel: { default: undefined as string | undefined },
 	actModeReasoningEffort: { default: undefined as string | undefined },
+	actModeInferenceSpeed: {
+		default: "default" as InferenceSpeed,
+		transform: normalizeInferenceSpeed,
+	},
 	actModeVerbosity: { default: undefined as string | undefined },
 	actModeVsCodeLmModelSelector: { default: undefined as LanguageModelChatSelector | undefined },
 	actModeAwsBedrockCustomSelected: { default: undefined as boolean | undefined },
@@ -220,6 +230,8 @@ const USER_SETTINGS_FIELDS = {
 	utilityModelUseCondense: { default: true as boolean },
 	utilityModelUseNewTask: { default: true as boolean },
 	utilityModelUseGenerateCommitMessage: { default: true as boolean },
+	utilityModelUsePermissionHandling: { default: false as boolean },
+	utilityModelPermissionPolicy: { default: "" as string },
 	utilityModelSelection: { default: undefined as ModelProviderSelection | undefined },
 	autoApprovalSettings: {
 		default: DEFAULT_AUTO_APPROVAL_SETTINGS as AutoApprovalSettings,
@@ -268,6 +280,7 @@ const USER_SETTINGS_FIELDS = {
 	backgroundEditEnabled: { default: false as boolean },
 	optOutOfRemoteConfig: { default: false as boolean },
 	doubleCheckCompletionEnabled: { default: false as boolean },
+	lowVerbosityEnabled: { default: true as boolean },
 	cliTerminalColorMode: { default: undefined as "dark" | "light" | undefined },
 
 	// OpenTelemetry configuration

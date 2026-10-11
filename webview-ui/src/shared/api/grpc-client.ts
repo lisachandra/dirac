@@ -136,6 +136,27 @@ export class FileServiceClient extends ProtoBusClient {
 		return this.makeUnaryRequest("deleteSkillFile", request, proto.dirac.DeleteSkillRequest.toJSON, proto.dirac.SkillsToggles.fromJSON)
 	}
 }
+export class GoalServiceClient extends ProtoBusClient {
+	static override serviceName: string = "dirac.GoalService"
+	static async selectGoal(request: proto.dirac.GoalControlRequest): Promise<proto.dirac.Empty> {
+		return this.makeUnaryRequest("selectGoal", request, proto.dirac.GoalControlRequest.toJSON, proto.dirac.Empty.fromJSON)
+	}
+	static async resumeGoal(request: proto.dirac.GoalControlRequest): Promise<proto.dirac.Empty> {
+		return this.makeUnaryRequest("resumeGoal", request, proto.dirac.GoalControlRequest.toJSON, proto.dirac.Empty.fromJSON)
+	}
+	static async pauseGoal(request: proto.dirac.GoalControlRequest): Promise<proto.dirac.Empty> {
+		return this.makeUnaryRequest("pauseGoal", request, proto.dirac.GoalControlRequest.toJSON, proto.dirac.Empty.fromJSON)
+	}
+	static async stopGoal(request: proto.dirac.GoalControlRequest): Promise<proto.dirac.Empty> {
+		return this.makeUnaryRequest("stopGoal", request, proto.dirac.GoalControlRequest.toJSON, proto.dirac.Empty.fromJSON)
+	}
+	static async steerGoal(request: proto.dirac.GoalSteerRequest): Promise<proto.dirac.Empty> {
+		return this.makeUnaryRequest("steerGoal", request, proto.dirac.GoalSteerRequest.toJSON, proto.dirac.Empty.fromJSON)
+	}
+	static async sendGoalMessage(request: proto.dirac.GoalMessageRequest): Promise<proto.dirac.Empty> {
+		return this.makeUnaryRequest("sendGoalMessage", request, proto.dirac.GoalMessageRequest.toJSON, proto.dirac.Empty.fromJSON)
+	}
+}
 export class ModelsServiceClient extends ProtoBusClient {
 	static override serviceName: string = "dirac.ModelsService"
 	static async getLmStudioModels(request: proto.dirac.StringRequest): Promise<proto.dirac.StringArray> {
@@ -177,8 +198,8 @@ export class ModelsServiceClient extends ProtoBusClient {
 	static async updateApiConfigurationPartial(request: proto.dirac.UpdateApiConfigurationPartialRequest): Promise<proto.dirac.Empty> {
 		return this.makeUnaryRequest("updateApiConfigurationPartial", request, proto.dirac.UpdateApiConfigurationPartialRequest.toJSON, proto.dirac.Empty.fromJSON)
 	}
-	static async authenticateOpenAiCodex(request: proto.dirac.EmptyRequest): Promise<proto.dirac.Empty> {
-		return this.makeUnaryRequest("authenticateOpenAiCodex", request, proto.dirac.EmptyRequest.toJSON, proto.dirac.Empty.fromJSON)
+	static authenticateOpenAiCodex(request: proto.dirac.OpenAiCodexAuthRequest, callbacks: Callbacks<proto.dirac.OpenAiCodexAuthEvent>): ()=>void {
+		return this.makeStreamingRequest("authenticateOpenAiCodex", request, proto.dirac.OpenAiCodexAuthRequest.toJSON, proto.dirac.OpenAiCodexAuthEvent.fromJSON, callbacks)
 	}
 	static async signOutOpenAiCodex(request: proto.dirac.EmptyRequest): Promise<proto.dirac.Empty> {
 		return this.makeUnaryRequest("signOutOpenAiCodex", request, proto.dirac.EmptyRequest.toJSON, proto.dirac.Empty.fromJSON)

@@ -2,7 +2,10 @@ import { strict as assert } from "node:assert"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
+import * as iconv from "iconv-lite"
+import { readTextFileWindow } from "@integrations/misc/read-text-file-window"
 import { DiracDefaultTool } from "@shared/tools"
+import { MAX_ANCHORED_FILE_LINES } from "@shared/anchor-limits"
 import { DiracAskResponse } from "@shared/WebviewMessage"
 import { AnchorStateManager } from "@utils/AnchorStateManager"
 import * as pathUtils from "@utils/path"
@@ -43,12 +46,14 @@ function createConfig(supportsImages = false) {
 	const taskState = new TaskState()
 
 	const callbacks = {
+		assertMutationAuthorized: sinon.stub(),
 		say: sinon.stub().resolves(undefined),
 		ask: sinon.stub().resolves({ response: DiracAskResponse.APPROVE }),
 		saveCheckpoint: sinon.stub().resolves(),
 		sayAndCreateMissingParamError: sinon.stub().resolves("missing"),
 		removeLastPartialMessageIfExistsWithType: sinon.stub().resolves(),
 		shouldAutoApproveToolWithPath: sinon.stub().resolves(true),
+		resolveToolPathPermission: sinon.stub().resolves("auto_approve"),
 		postStateToWebview: sinon.stub().resolves(),
 		cancelTask: sinon.stub().resolves(),
 		switchToActMode: sinon.stub().resolves(false),
@@ -79,9 +84,8 @@ function createConfig(supportsImages = false) {
 		messageState: {
 			getApiConversationHistory: sinon.stub().returns([]),
 		},
-		api: {
-			getModel: () => ({ id: "test-model", info: { supportsImages } }),
-		},
+		model: { id: "test-model", info: { supportsImages } },
+		supportsNativeWebSearch: false,
 		autoApprovalSettings: {
 			enableNotifications: false,
 			actions: { executeCommands: false },
@@ -92,18 +96,6 @@ function createConfig(supportsImages = false) {
 		browserSettings: {},
 		focusChainSettings: {},
 		services: {
-			stateManager: {
-				getGlobalStateKey: () => undefined,
-				getGlobalSettingsKey: (key: string) => {
-					if (key === "mode") return "act"
-					if (key === "hooksEnabled") return false
-					return undefined
-				},
-				getApiConfiguration: () => ({
-					planModeApiProvider: "openai",
-					actModeApiProvider: "openai",
-				}),
-			},
 			fileContextTracker: {
 				trackFileContext: sinon.stub().resolves(),
 			},
@@ -476,7 +468,7 @@ describe("ReadFileToolHandler.execute – include_anchors visibility and cache",
 		assert.ok(!repeatedPartial.includes("no changes have been made"))
 	})
 
-	it("caches an explicit range that covers the whole file", async () => {
+	it("does not cache an explicit range even when it covers the whole file", async () => {
 		const { config, validator } = createConfig()
 		const handler = new ReadFileToolHandler(validator)
 		const realFile = "explicit-complete-range.txt"
@@ -484,6 +476,10 @@ describe("ReadFileToolHandler.execute – include_anchors visibility and cache",
 
 		const ranged = (await handler.execute(config, makeBlock(realFile, { start_line: 1, end_line: 99 }))) as string
 		assert.ok(ranged.includes("one\ntwo"))
+
+		const firstFull = (await handler.execute(config, makeBlock(realFile))) as string
+		assert.ok(firstFull.includes("one\ntwo"))
+		assert.ok(!firstFull.includes("no changes have been made"))
 
 		const repeatedFull = (await handler.execute(config, makeBlock(realFile))) as string
 		assert.ok(repeatedFull.includes("no changes have been made"))
@@ -527,6 +523,146 @@ describe("ReadFileToolHandler.execute – include_anchors visibility and cache",
 		assert.ok(!/§first$/m.test(result))
 		assert.ok(!/§third$/m.test(result))
 	})
+
+	it("decodes streamed non-UTF-8 text", async () => {
+		const { config, validator } = createConfig()
+		const handler = new ReadFileToolHandler(validator)
+		const cases = [
+			{ file: "windows-1252.txt", encoding: "windows-1252", text: "Price €100 — “yes” ".repeat(50) },
+			{ file: "utf-16.txt", encoding: "utf16", text: "first UTF-16 line\nsecond UTF-16 line" },
+		]
+
+		for (const testCase of cases) {
+			await fs.writeFile(path.join(tmpDir, testCase.file), iconv.encode(testCase.text, testCase.encoding))
+			const result = (await handler.execute(config, makeBlock(testCase.file))) as string
+			assert.ok(result.includes(testCase.text))
+		}
+	})
+
+	it("keeps decoding when non-ASCII UTF-8 appears after an ASCII-only stream chunk", async () => {
+		const { config, validator } = createConfig()
+		const handler = new ReadFileToolHandler(validator)
+		const realFile = "late-utf8.txt"
+		await fs.writeFile(path.join(tmpDir, realFile), `${"a".repeat(70 * 1024)}\nlate café`)
+
+		const result = (await handler.execute(
+			config,
+			makeBlock(realFile, { start_line: 2, end_line: 2 }),
+		)) as string
+
+		assert.ok(result.includes("late café"))
+	})
+
+	it("discards a complete snapshot above the retained-byte cap", async () => {
+		const realFile = path.join(tmpDir, "retained-byte-cap.txt")
+		await fs.writeFile(realFile, "x".repeat(100))
+
+		const result = await readTextFileWindow(realFile, {
+			startLine: 1,
+			maxSelectedBytes: 1024,
+			maxRetainedLines: 10,
+			maxRetainedBytes: 32,
+		})
+
+		assert.equal(result.completeText, undefined)
+		assert.deepEqual(result.selectedLines, ["x".repeat(100)])
+	})
+
+	it("rejects binary data routed through the raw text reader", async () => {
+		const { config, validator } = createConfig()
+		const handler = new ReadFileToolHandler(validator)
+		const realFile = "binary-data.bin"
+		await fs.writeFile(
+			path.join(tmpDir, realFile),
+			Buffer.from(Array.from({ length: 4096 }, (_, index) => index % 256)),
+		)
+
+		const result = (await handler.execute(config, makeBlock(realFile))) as string
+
+		assert.ok(result.includes("Cannot read binary content as text"))
+	})
+
+	it("uses one streaming pass for anchored ranges below the line limit", async () => {
+		const { config } = createConfig()
+		const realFile = "single-pass.txt"
+		await fs.writeFile(path.join(tmpDir, realFile), "first\nsecond\nthird")
+		const env = new SurfaceAdapter(config)
+		const readWindow = sinon.spy(env.workspace, "readTextFileWindow")
+
+		await new ReadFileTool().processCall(
+			{ paths: [realFile], start_line: 2, end_line: 2, include_anchors: true },
+			env,
+		)
+
+		sinon.assert.calledOnce(readWindow)
+	})
+
+	it("invalidates a cached extracted read when content grows above the line limit", async () => {
+		const { config } = createConfig()
+		const realFile = "oversized.ipynb"
+		const absolutePath = path.join(tmpDir, realFile)
+		await fs.writeFile(absolutePath, "{}")
+		const env = new SurfaceAdapter(config)
+		const extractedRead = sinon.stub(env.workspace, "readRichFile")
+		extractedRead.onFirstCall().resolves({ text: "small extracted content" })
+		extractedRead.onSecondCall().resolves({
+			text: Array.from({ length: MAX_ANCHORED_FILE_LINES + 1 }, () => "").join("\n"),
+		})
+		const tool = new ReadFileTool()
+
+		await tool.processCall({ paths: [realFile] }, env)
+		assert.equal(Object.keys((await config.context.task.get("fileHashes")) ?? {}).length, 1)
+
+		await tool.processCall({ paths: [realFile], start_line: 1, end_line: 2 }, env)
+		assert.deepEqual((await config.context.task.get("fileHashes")) ?? {}, {})
+	})
+
+	it("streams late ranges from oversized files without anchors or read caching", async () => {
+		const { config, validator } = createConfig()
+		const handler = new ReadFileToolHandler(validator)
+		const realFile = "oversized.log"
+		const lines = Array.from(
+			{ length: MAX_ANCHORED_FILE_LINES + 1 },
+			(_, index) => `record ${index + 1}: ${"x".repeat(410)}`,
+		)
+		const absolutePath = path.join(tmpDir, realFile)
+		await fs.writeFile(absolutePath, "small\nfile")
+		await handler.execute(config, makeBlock(realFile))
+		await handler.execute(config, makeBlock(realFile, { start_line: 1, end_line: 2, include_anchors: true }))
+		assert.equal(AnchorStateManager.isTracking(absolutePath, config.ulid), true)
+		assert.equal(Object.keys((await config.context.task.get("fileHashes")) ?? {}).length, 2)
+
+		await fs.writeFile(absolutePath, lines.join("\n"))
+
+		const oversizedSelection = (await handler.execute(config, makeBlock(realFile, {
+			start_line: 1,
+			end_line: 200,
+			include_anchors: true,
+		}))) as string
+		assert.ok(oversizedSelection.includes("exceeds the 51200-byte read limit"))
+		assert.equal(AnchorStateManager.isTracking(absolutePath, config.ulid), false)
+		assert.deepEqual((await config.context.task.get("fileHashes")) ?? {}, {})
+
+		const params = {
+			start_line: MAX_ANCHORED_FILE_LINES,
+			end_line: MAX_ANCHORED_FILE_LINES + 1,
+			include_anchors: true,
+		}
+		const first = (await handler.execute(config, makeBlock(realFile, params))) as string
+		const repeated = (await handler.execute(config, makeBlock(realFile, params))) as string
+
+		assert.ok(first.includes(`record ${MAX_ANCHORED_FILE_LINES}:`))
+		assert.ok(first.includes(`record ${MAX_ANCHORED_FILE_LINES + 1}:`))
+		assert.ok(first.includes(`[Total lines: ${MAX_ANCHORED_FILE_LINES + 1}]`))
+		assert.ok(first.includes("Hash anchoring unavailable"))
+		assert.ok(first.includes("use execute_command"))
+		assert.ok(!/^[A-Z][a-zA-Z]*§record/m.test(first))
+		assert.ok(!first.includes("File Hash"))
+		assert.ok(!repeated.includes("no changes have been made"))
+		assert.equal(AnchorStateManager.isTracking(absolutePath, config.ulid), false)
+		assert.deepEqual((await config.context.task.get("fileHashes")) ?? {}, {})
+	})
+
 
 	it("returns images without applying ranges, text limits, or text hashing", async () => {
 		const { config, validator } = createConfig(true)

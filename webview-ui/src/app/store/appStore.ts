@@ -1,5 +1,7 @@
 import { Environment } from "@shared/config-types"
 import type { ExtensionState } from "@shared/ExtensionMessage"
+import type { PresentationBatch } from "@shared/PresentationOperation"
+import type { ReleaseNotesView } from "@shared/release-notes"
 import { EmptyRequest } from "@shared/proto/dirac/common"
 import { create } from "zustand"
 import { useTaskStore } from "@/entities/task/store/taskStore"
@@ -10,6 +12,7 @@ import { StateServiceClient, UiServiceClient } from "@/shared/api/grpc-client"
 interface AppState {
 	version: string
 	shouldShowAnnouncement: boolean
+	releaseNotes?: ReleaseNotesView
 	setShouldShowAnnouncement: (show: boolean) => void
 	onboardingModels?: any
 	environment: Environment
@@ -63,6 +66,7 @@ export const useAppStore = create<AppState>((set) => ({
 	showAccount: false,
 	version: "0.0.0",
 	shouldShowAnnouncement: false,
+	releaseNotes: undefined,
 	onboardingModels: undefined,
 	showWorktrees: false,
 	showAnnouncement: false,
@@ -138,6 +142,28 @@ export const useAppStore = create<AppState>((set) => ({
 
 	hydrate: () => {
 		const { setDidHydrateState } = useAppStore.getState()
+		const applyState = (parsedState: Partial<ExtensionState>) => {
+			useChatStore.getState().applyExtensionState(parsedState)
+			set({
+				...(parsedState.version !== undefined ? { version: parsedState.version } : {}),
+				...(parsedState.shouldShowAnnouncement !== undefined
+					? { shouldShowAnnouncement: parsedState.shouldShowAnnouncement }
+					: {}),
+				...(parsedState.releaseNotes !== undefined ? { releaseNotes: parsedState.releaseNotes } : {}),
+				...(parsedState.onboardingModels !== undefined ? { onboardingModels: parsedState.onboardingModels } : {}),
+				...(parsedState.welcomeViewCompleted !== undefined
+					? { showWelcome: !parsedState.welcomeViewCompleted }
+					: {}),
+			})
+			useSettingsStore.getState().setSettings(parsedState as any)
+			if (parsedState.taskHistory) useTaskStore.getState().setTaskHistory(parsedState.taskHistory)
+			if ("currentTaskItem" in parsedState) useTaskStore.getState().setCurrentTaskItem(parsedState.currentTaskItem)
+		}
+		const recoverPresentation = async () => {
+			const latest = await StateServiceClient.getLatestState({} as EmptyRequest)
+			if (!latest.stateJson) throw new Error("Presentation recovery returned no state")
+			applyState(JSON.parse(latest.stateJson) as ExtensionState)
+		}
 
 		// 1. Initialize webview
 		UiServiceClient.initializeWebview({} as EmptyRequest).catch((error) => {
@@ -148,28 +174,15 @@ export const useAppStore = create<AppState>((set) => ({
 		const cleanupState = StateServiceClient.subscribeToState({} as EmptyRequest, {
 			onResponse: (state) => {
 				if (!state.stateJson) return
-				const parsedState = JSON.parse(state.stateJson) as ExtensionState
-				useChatStore.getState().applyExtensionState(parsedState)
-
-				set({
-					version: parsedState.version,
-					shouldShowAnnouncement: parsedState.shouldShowAnnouncement,
-					onboardingModels: parsedState.onboardingModels,
-					showWelcome: !parsedState.welcomeViewCompleted,
-				})
-
-				// Update other stores
-				useSettingsStore.getState().setSettings({
-					...parsedState,
-				} as any)
-				if (parsedState.taskHistory) {
-					useTaskStore.getState().setTaskHistory(parsedState.taskHistory)
+				applyState(JSON.parse(state.stateJson) as Partial<ExtensionState>)
+				if (state.presentationJson) {
+					const result = useChatStore
+						.getState()
+						.applyPresentationBatch(JSON.parse(state.presentationJson) as PresentationBatch)
+					if (result === "gap") {
+						void recoverPresentation().catch((error) => console.error("Failed to recover presentation state:", error))
+					}
 				}
-				useTaskStore.getState().setCurrentTaskItem(parsedState.currentTaskItem)
-				// totalTasksSize is not in ExtensionState, but it might be in the future or handled elsewhere
-				// if (parsedState.totalTasksSize !== undefined) {
-				// 	useTaskStore.getState().setTotalTasksSize(parsedState.totalTasksSize)
-				// }
 
 				setDidHydrateState(true)
 			},

@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "version": "0.5.5",
+  "kind": "patch",
+  "announce": true,
+  "sourceTag": "v0.5.4",
+  "analyzedCommit": "7fee38b69e8c7dec8b9790de3f43e540e956729d",
+  "headline": "Updates and improvements",
+  "highlights": [
+    {
+      "id": "feat-eb91c937",
+      "title": "add gemini-3.8-flash and trust maxTokens",
+      "category": "feat",
+      "evidence": [
+        "eb91c937847efcef03a258399bf8f4f6baa9d1f7"
+      ]
+    },
+    {
+      "id": "fix-ff09e05a",
+      "title": "run builds only during npm package preparation",
+      "category": "fix",
+      "evidence": [
+        "ff09e05aaa918aac49ebcdb7c8dfcd26079889a0"
+      ]
+    }
+  ]
+}

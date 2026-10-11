@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "version": "0.5.4",
+  "kind": "patch",
+  "announce": true,
+  "sourceTag": "v0.5.3",
+  "analyzedCommit": "08399b322e994eb13ea6646403fe011d3e48ae38",
+  "headline": "Updates and improvements",
+  "highlights": [
+    {
+      "id": "feat-8248d538",
+      "title": "allow edits with negotiated file capabilities",
+      "category": "feat",
+      "evidence": [
+        "8248d538d1f7b352459882b7be619c3b95a26c63"
+      ]
+    },
+    {
+      "id": "fix-96c59867",
+      "title": "clamp search_files context_lines to valid range (FB-24)",
+      "category": "fix",
+      "evidence": [
+        "96c598672bbc66c1ffbf9f6a2848dd576b16eae5"
+      ]
+    },
+    {
+      "id": "fix-19c54d7e",
+      "title": "open urls via host opener with scheme validation (FB-33, FB-34)",
+      "category": "fix",
+      "evidence": [
+        "19c54d7eb24afc55bb4cc28a84cdd876d563be2a"
+      ]
+    }
+  ]
+}

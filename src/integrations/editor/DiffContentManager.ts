@@ -114,6 +114,7 @@ export class DiffContentManager {
 	}
 
 	normalizeEol(text: string): string {
+		if (text === "") return ""
 		const newContentEOL = text.includes("\r\n") ? "\r\n" : "\n"
 		return text.replace(/\r\n|\n/g, newContentEOL).trimEnd() + newContentEOL
 	}

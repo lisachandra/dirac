@@ -57,7 +57,10 @@ describe("SourceAstTraitBuilder", () => {
 			serviceOverrides: { diracIgnoreController: { validateAccess } as any },
 		})
 		sinon.stub(workspace, "resolveWorkspacePath").returns({ absolutePath, displayPath: "src/a.ts" } as any)
-		const reconcile = sinon.stub(AnchorStateManager, "reconcile").returns(["anchor"])
+		const reconcile = sinon.stub(AnchorStateManager, "reconcileWithChanges").returns({
+			anchors: ["anchor"],
+			changed: false,
+		})
 		const fingerprint = sinon.stub(AnchorStateManager, "getDocumentFingerprint").returns("fingerprint")
 		let capturedDependencies: any
 		sinon.stub(SourceAstService.prototype, "outline").callsFake(async function (this: SourceAstService) {

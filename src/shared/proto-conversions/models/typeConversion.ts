@@ -6,6 +6,16 @@ import {
 	OpenAiCompatibleModelInfo as ProtoOpenAiCompatibleModelInfo,
 	ThinkingConfig,
 } from "@shared/proto/dirac/models"
+import { isOpenaiReasoningEffort, type OpenaiReasoningEffort } from "@shared/storage/types"
+
+function parseReasoningEffortOptions(values: readonly string[]): OpenaiReasoningEffort[] | undefined {
+	const options = values.filter(isOpenaiReasoningEffort)
+	return options.length > 0 ? options : undefined
+}
+
+function parseReasoningEffort(value: string | undefined): OpenaiReasoningEffort | undefined {
+	return isOpenaiReasoningEffort(value) ? value : undefined
+}
 
 /**
  * Convert protobuf ThinkingConfig to application ThinkingConfig
@@ -51,6 +61,8 @@ export function fromProtobufModelInfo(protoInfo: OpenRouterModelInfo): ModelInfo
 		supportsPromptCache: protoInfo.supportsPromptCache,
 		supportsReasoning: protoInfo.supportsReasoning,
 		supportsReasoningEffort: protoInfo.supportsReasoningEffort,
+		reasoningEffortOptions: parseReasoningEffortOptions(protoInfo.reasoningEffortOptions),
+		defaultReasoningEffort: parseReasoningEffort(protoInfo.defaultReasoningEffort),
 		inputPrice: protoInfo.inputPrice,
 		outputPrice: protoInfo.outputPrice,
 		cacheWritesPrice: protoInfo.cacheWritesPrice,
@@ -75,6 +87,8 @@ export function toProtobufModelInfo(modelInfo: ModelInfo): OpenRouterModelInfo {
 		supportsPromptCache: modelInfo.supportsPromptCache,
 		supportsReasoning: modelInfo.supportsReasoning,
 		supportsReasoningEffort: modelInfo.supportsReasoningEffort,
+		reasoningEffortOptions: modelInfo.reasoningEffortOptions || [],
+		defaultReasoningEffort: modelInfo.defaultReasoningEffort,
 		inputPrice: modelInfo.inputPrice,
 		outputPrice: modelInfo.outputPrice,
 		cacheWritesPrice: modelInfo.cacheWritesPrice,
@@ -160,7 +174,7 @@ export function fromProtobufOcaModelInfo(protoInfo: ProtoOcaModelInfo): OcaModel
 		surveyContent: protoInfo.surveyContent,
 		apiFormat: protoInfo.apiFormat,
 		supportsReasoning: protoInfo.supportsReasoning,
-		reasoningEffortOptions: protoInfo.reasoningEffortOptions,
+		reasoningEffortOptions: parseReasoningEffortOptions(protoInfo.reasoningEffortOptions) || [],
 		supportsStrictTools: protoInfo.supportsStrictTools,
 	}
 }

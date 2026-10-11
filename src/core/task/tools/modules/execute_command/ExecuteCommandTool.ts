@@ -16,6 +16,31 @@ import { shortenCommandForDisplay } from "./path-display"
 const MAX_PATH_LENGTH = 255
 const MAX_COMMAND_OUTPUT_SIZE = 10 * 1024
 
+interface CommandApprovalRequirement {
+	required: boolean
+	utilityEligible: boolean
+}
+
+export interface NormalizedCommand {
+	command: string
+	displayName: string
+	language?: string
+}
+
+interface WorkspaceHintMatch {
+	workspaceHint: string
+	command: string
+}
+
+function parseWorkspaceHint(cmd: string): WorkspaceHintMatch | null {
+	const match = cmd.match(/^@(\w+):(.+)$/)
+	if (!match) return null
+	return {
+		workspaceHint: match[1],
+		command: match[2].trim(),
+	}
+}
+
 export const execute_command_spec: DiracToolSpec = {
 	id: DiracDefaultTool.BASH,
 	name: "execute_command",
@@ -53,7 +78,7 @@ export class ExecuteCommandTool implements IDiracTool {
 		private autoApprover: any,
 		private workspaceManager: any,
 		private isMultiRootEnabled: boolean,
-	) {}
+	) { }
 
 	public spec(): DiracToolSpec {
 		return execute_command_spec
@@ -71,10 +96,16 @@ export class ExecuteCommandTool implements IDiracTool {
 
 		this.validateCommands(commands)
 
-		const approvalRequired = this.checkSecurity(commands)
+		const utilityPermissionHandlingEnabled = env.config.permissionDecisionBinding !== undefined
+		const approval = this.getCommandApprovalRequirement(commands, utilityPermissionHandlingEnabled)
 
-		if (approvalRequired) {
-			const { approved, message } = await this.requestApproval(commands, env)
+		if (approval.required) {
+			const { approved, message } = await this.requestApproval(
+				commands,
+				env,
+				approval.utilityEligible,
+				utilityPermissionHandlingEnabled,
+			)
 			if (!approved) {
 				return message ? formatResponse.toolDeniedWithFeedback(message) : formatResponse.toolDenied()
 			}
@@ -92,7 +123,7 @@ export class ExecuteCommandTool implements IDiracTool {
 		return results.join("\n\n")
 	}
 
-	private validateCommands(commands: { command: string; displayName: string; language?: string }[]): void {
+	private validateCommands(commands: NormalizedCommand[]): void {
 		for (const cmd of commands) {
 			const parts = cmd.command.split(/\s+/)
 			for (const part of parts) {
@@ -111,53 +142,80 @@ export class ExecuteCommandTool implements IDiracTool {
 		}
 	}
 
-	private checkSecurity(commands: { command: string; displayName: string; language?: string }[]): boolean {
-		// YOLO / auto-approve-all: skip all security checks entirely
-		if (this.autoApprover.isUnrestrictedAutoApprove()) {
-			return false
+	private getCommandApprovalRequirement(
+		commands: NormalizedCommand[],
+		utilityPermissionHandlingEnabled: boolean,
+	): CommandApprovalRequirement {
+		if (!utilityPermissionHandlingEnabled) {
+			if (this.autoApprover.isUnrestrictedAutoApprove()) {
+				return { required: false, utilityEligible: false }
+			}
+			for (const command of commands) {
+				const actualCommand = this.stripWorkspaceHint(command.command)
+				const permission = this.commandPermissionController.validateCommand(actualCommand)
+				if (!permission.allowed || !this.autoApprover.isCommandAutoApproved(actualCommand)) {
+					return { required: true, utilityEligible: false }
+				}
+			}
+			return { required: false, utilityEligible: false }
 		}
 
-		for (const cmd of commands) {
-			const actualCommand = this.stripWorkspaceHint(cmd.command)
-			const permissionResult = this.commandPermissionController.validateCommand(actualCommand)
-			if (!permissionResult.allowed || !this.autoApprover.isCommandAutoApproved(actualCommand)) {
-				return true
+		const permissionResults = commands.map((command) => {
+			const actualCommand = this.stripWorkspaceHint(command.command)
+			return {
+				actualCommand,
+				permission: this.commandPermissionController.validateTool("execute_command", actualCommand),
 			}
+		})
+		if (permissionResults.some(({ permission }) => !permission.allowed)) {
+			return { required: true, utilityEligible: false }
 		}
-		return false
+		if (this.autoApprover.isUnrestrictedAutoApprove()) {
+			return { required: false, utilityEligible: false }
+		}
+
+		const requiresApproval = permissionResults.some(({ actualCommand, permission }) => {
+			if (this.autoApprover.isCommandAutoApproved(actualCommand)) return false
+			return !permission.matchedPattern
+		})
+		return { required: requiresApproval, utilityEligible: requiresApproval }
 	}
 
 	private async requestApproval(
-		commands: { command: string; displayName: string; language?: string }[],
+		commands: NormalizedCommand[],
 		env: IToolEnvironment,
+		utilityEligible: boolean,
+		utilityPermissionHandlingEnabled: boolean,
 	): Promise<{ approved: boolean; message?: string }> {
 		const label = this.permissionCardLabel(commands, env.config.cwd)
-		const card = !env.config.isSubagentExecution
-			? await env.ui.createCard({
+		const card =
+			!env.config.isSubagentExecution || utilityPermissionHandlingEnabled
+				? await env.ui.createCard({
 					header: commands.length === 1 ? `Execute: ${label}` : `Execute ${label}?`,
 					status: CardStatus.WAITING_FOR_INPUT,
 					icon: DiracIcon.COMMAND,
 					requireApproval: true,
+					permissionRequestKind:
+						utilityPermissionHandlingEnabled
+							? (!utilityEligible ? "manual_tool" : "tool")
+							: undefined,
 					renderType: "markdown",
-					maxHeight: 10000, // setting it to a high number to prevent scroll in a scroll
-
+					maxHeight: 10000,
 					rawInput: {
 						commands: commands.map(({ command, displayName, language }) => ({ command, displayName, language })),
 					},
 					body: commands
-						.map((c) => {
-							const lang = c.language || "bash"
-							const header = c.displayName !== c.command ? `**${c.displayName}**\n` : ""
-							return `${header}\`\`\`${lang}\n${shortenCommandForDisplay(c.command, env.config.cwd)}\n\`\`\``
+						.map((command) => {
+							const language = command.language || "bash"
+							const header = command.displayName !== command.command ? `**${command.displayName}**\n` : ""
+							return `${header}\`\`\`${language}\n${shortenCommandForDisplay(command.command, env.config.cwd)}\n\`\`\``
 						})
 						.join("\n"),
 					collapsed: false,
 				})
-			: undefined
+				: undefined
 
-		if (!card) {
-			return { approved: false }
-		}
+		if (!card) return { approved: false }
 
 		let interaction: Awaited<ReturnType<ICardHandle["waitForInteraction"]>>
 		try {
@@ -186,7 +244,7 @@ export class ExecuteCommandTool implements IDiracTool {
 		return { approved: true }
 	}
 
-	private permissionCardLabel(commands: { command: string; displayName: string; language?: string }[], cwd?: string): string {
+	private permissionCardLabel(commands: NormalizedCommand[], cwd?: string): string {
 		return commands.length === 1 ? shortenCommandForDisplay(commands[0].displayName, cwd) : `${commands.length} commands`
 	}
 
@@ -206,7 +264,7 @@ export class ExecuteCommandTool implements IDiracTool {
 	}
 
 	private async executeCommands(
-		commands: { command: string; displayName: string; language?: string }[],
+		commands: NormalizedCommand[],
 		env: IToolEnvironment,
 	): Promise<{ results: string[]; usedWorkspaceHint: boolean; resolvedToNonPrimary: boolean }> {
 		const results: string[] = []
@@ -230,20 +288,20 @@ export class ExecuteCommandTool implements IDiracTool {
 	}
 
 	private async executeSingleCommand(
-		cmd: { command: string; displayName: string; language?: string },
+		cmd: NormalizedCommand,
 		index: number,
 		total: number,
 		env: IToolEnvironment,
 	): Promise<{ result: string; usedWorkspaceHint: boolean; resolvedToNonPrimary: boolean }> {
-		const header = `Executing command ${index} of ${total}: ${shortenCommandForDisplay(cmd.displayName, env.config.cwd)}`
+		const header = `Executing ${index} of ${total}: ${shortenCommandForDisplay(cmd.displayName, env.config.cwd)}`
 
 		const activeCard = !env.config.isSubagentExecution
 			? await env.ui.createCard({
-					header: header.replace("Executing command", "Executing"),
-					icon: DiracIcon.COMMAND,
-					collapsed: true,
-					rawInput: { command: cmd.command, displayName: cmd.displayName, language: cmd.language ?? "bash" },
-				})
+				header,
+				icon: DiracIcon.COMMAND,
+				collapsed: true,
+				rawInput: { command: cmd.command, displayName: cmd.displayName, language: cmd.language ?? "bash" },
+			})
 			: null
 
 		let usedWorkspaceHint = false
@@ -254,17 +312,16 @@ export class ExecuteCommandTool implements IDiracTool {
 			let executionDir
 
 			if (this.isMultiRootEnabled && this.workspaceManager) {
-				const commandMatch = cmd.command.match(/^@(\w+):(.+)$/)
-				if (commandMatch) {
+				const parsedHint = parseWorkspaceHint(cmd.command)
+				if (parsedHint) {
 					usedWorkspaceHint = true
-					const workspaceHint = commandMatch[1]
-					commandToExecute = commandMatch[2].trim()
+					commandToExecute = parsedHint.command
 					const adapter = new WorkspacePathAdapter({
 						cwd: env.config.cwd || process.cwd(),
 						isMultiRootEnabled: true,
 						workspaceManager: this.workspaceManager,
 					})
-					executionDir = adapter.resolvePath(".", workspaceHint)
+					executionDir = adapter.resolvePath(".", parsedHint.workspaceHint)
 					if (executionDir !== env.config.cwd) {
 						resolvedToNonPrimary = true
 					}
@@ -316,8 +373,8 @@ export class ExecuteCommandTool implements IDiracTool {
 		}
 	}
 
-	private normalizeCommands(args: any): { command: string; displayName: string; language?: string }[] {
-		const commands: { command: string; displayName: string; language?: string }[] = []
+	private normalizeCommands(args: any): NormalizedCommand[] {
+		const commands: NormalizedCommand[] = []
 		if (Array.isArray(args.commands)) {
 			args.commands.forEach((cmd: any) => {
 				if (typeof cmd === "string" && cmd.trim() !== "") {
@@ -341,8 +398,7 @@ export class ExecuteCommandTool implements IDiracTool {
 	}
 
 	private stripWorkspaceHint(cmd: string): string {
-		const commandMatch = cmd.match(/^@(\w+):(.+)$/)
-		return commandMatch ? commandMatch[2].trim() : cmd
+		return parseWorkspaceHint(cmd)?.command ?? cmd
 	}
 
 	private wrapScript(script: string, language: string): string {

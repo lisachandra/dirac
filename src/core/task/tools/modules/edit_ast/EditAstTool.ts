@@ -105,6 +105,7 @@ export class EditAstTool implements IDiracTool<EditAstArgs, string> {
 				return approvalResult.feedback || formatResponse.toolDenied()
 			}
 
+			env.config.callbacks.assertMutationAuthorized(DiracDefaultTool.EDIT_AST)
 			applied = await this.applier.apply(env, plan, approvalResult.userEdits)
 		} catch (error) {
 			if (applied && plan) {

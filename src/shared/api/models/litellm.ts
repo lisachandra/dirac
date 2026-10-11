@@ -13,10 +13,7 @@ export const liteLlmModelInfoSaneDefaults: LiteLLMModelInfo = {
 	contextWindow: 128_000,
 	supportsImages: true,
 	supportsPromptCache: true,
-	inputPrice: 0,
 	supportsTools: true,
-	outputPrice: 0,
-	cacheWritesPrice: 0,
-	cacheReadsPrice: 0,
+	// No inputPrice/outputPrice — unknown LiteLLM models have unknown pricing, not $0
 	temperature: 0,
 }

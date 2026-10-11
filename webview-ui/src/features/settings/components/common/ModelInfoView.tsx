@@ -1,4 +1,4 @@
-import { geminiModels, ModelInfo } from "@shared/api"
+import { geminiModels, type ModelInfo, type ModelPricing, type PricingSchedulePeriod, type UtcWeekday } from "@shared/api"
 import { type ReactNode, useState } from "react"
 import styled from "styled-components"
 import { ModelDescriptionMarkdown } from "../ModelDescriptionMarkdown"
@@ -82,21 +82,72 @@ const AdvancedValue = styled.span`
  * Format price for compact display (e.g., "$5/M" for $5 per million tokens)
  * Price is already in per-million format from OpenRouter
  */
-const formatCompactPrice = (price: number | undefined): string => {
-	if (price === undefined) {
-		return "N/A"
-	}
-	if (price === 0) {
-		return "Free"
-	}
-	if (price < 0.01) {
-		return `$${price.toFixed(4)}/M`
-	}
-	if (price < 1) {
-		return `$${price.toFixed(2)}/M`
-	}
-	return `$${price % 1 === 0 ? price : price.toFixed(2)}/M`
+const formatCompactAmount = (price: number): string => {
+	if (price === 0) return "$0"
+	if (price < 0.01) return `$${price.toFixed(4)}`
+	if (price < 0.1) return `$${price.toFixed(3)}`
+	if (price < 1) return `$${price.toFixed(2)}`
+	return `$${price % 1 === 0 ? price : price.toFixed(2)}`
 }
+
+const formatCompactPrice = (price: number | undefined): string => {
+	if (price === undefined) return "N/A"
+	if (price === 0) return "Free"
+	return `${formatCompactAmount(price)}/M`
+}
+
+type ModelPriceType = keyof ModelPricing
+
+const getModelPrices = (modelInfo: ModelInfo, priceType: ModelPriceType): number[] => {
+	const prices = [modelInfo[priceType]]
+	for (const period of modelInfo.pricingSchedule?.periods ?? []) prices.push(period.prices[priceType])
+	return prices.filter((price): price is number => price !== undefined)
+}
+
+const formatModelPriceRange = (modelInfo: ModelInfo, priceType: ModelPriceType): string => {
+	const prices = getModelPrices(modelInfo, priceType)
+	if (prices.length === 0) return "N/A"
+	const minimum = Math.min(...prices)
+	const maximum = Math.max(...prices)
+	if (minimum === maximum) return formatCompactPrice(minimum)
+	return `${formatCompactAmount(minimum)}–${formatCompactAmount(maximum)}/M`
+}
+
+const formatModelPriceDetails = (modelInfo: ModelInfo, priceType: ModelPriceType): string => {
+	const basePrice = modelInfo[priceType]
+	const schedule = modelInfo.pricingSchedule
+	if (basePrice === undefined || !schedule) return formatCompactPrice(basePrice)
+
+	const labeledPrices = new Map<string, number>([[schedule.defaultLabel, basePrice]])
+	for (const period of schedule.periods) {
+		const price = period.prices[priceType]
+		if (price !== undefined) labeledPrices.set(period.label, price)
+	}
+	return [...labeledPrices].map(([label, price]) => `${label} ${formatCompactPrice(price)}`).join(" · ")
+}
+
+const WEEKDAY_LABELS: Record<UtcWeekday, string> = {
+	sunday: "Sun",
+	monday: "Mon",
+	tuesday: "Tue",
+	wednesday: "Wed",
+	thursday: "Thu",
+	friday: "Fri",
+	saturday: "Sat",
+}
+
+const formatWeekdays = (weekdays: readonly UtcWeekday[]): string => {
+	if (weekdays.join(",") === "monday,tuesday,wednesday,thursday,friday") return "Mon–Fri"
+	return weekdays.map((weekday) => WEEKDAY_LABELS[weekday]).join(", ")
+}
+
+const formatUtcMinute = (minute: number): string =>
+	`${Math.floor(minute / 60)
+		.toString()
+		.padStart(2, "0")}:${(minute % 60).toString().padStart(2, "0")}`
+
+const formatPricingPeriod = (period: PricingSchedulePeriod): string =>
+	`${formatWeekdays(period.weekdays)}, ${formatUtcMinute(period.startMinuteUtc)}–${formatUtcMinute(period.endMinuteUtc)} UTC`
 
 /**
  * Format context window for compact display (e.g., "200K")
@@ -162,12 +213,7 @@ interface ModelInfoViewProps {
 
 // ========== Component ==========
 
-export const ModelInfoView = ({
-	selectedModelId,
-	modelInfo,
-	isPopup,
-	advancedContent,
-}: ModelInfoViewProps) => {
+export const ModelInfoView = ({ selectedModelId, modelInfo, isPopup, advancedContent }: ModelInfoViewProps) => {
 	const [advancedExpanded, setAdvancedExpanded] = useState(false)
 
 	const isGemini = Object.keys(geminiModels).includes(selectedModelId)
@@ -180,7 +226,9 @@ export const ModelInfoView = ({
 	const hasCaching = !isGemini && supportsPromptCache(modelInfo)
 
 	// Check if we have cache pricing to show in Advanced section
-	const hasCachePricing = modelInfo.supportsPromptCache && (modelInfo.cacheWritesPrice || modelInfo.cacheReadsPrice)
+	const hasCachePricing =
+		modelInfo.supportsPromptCache && (modelInfo.cacheWritesPrice !== undefined || modelInfo.cacheReadsPrice !== undefined)
+	const hasScheduledCacheMissPricing = modelInfo.pricingSchedule && modelInfo.cacheWritesPrice !== undefined
 
 	return (
 		<div style={{ marginTop: 4 }}>
@@ -197,11 +245,18 @@ export const ModelInfoView = ({
 						<InfoValue>{formatCompactContext(modelInfo.contextWindow)}</InfoValue>
 					</InfoItem>
 				)}
-				{modelInfo.inputPrice !== undefined && (
+				{hasScheduledCacheMissPricing ? (
 					<InfoItem>
-						<InfoLabel>Input: </InfoLabel>
-						<InfoValue>{formatCompactPrice(modelInfo.inputPrice)}</InfoValue>
+						<InfoLabel>Cache miss: </InfoLabel>
+						<InfoValue>{formatModelPriceRange(modelInfo, "cacheWritesPrice")}</InfoValue>
 					</InfoItem>
+				) : (
+					modelInfo.inputPrice !== undefined && (
+						<InfoItem>
+							<InfoLabel>Input: </InfoLabel>
+							<InfoValue>{formatModelPriceRange(modelInfo, "inputPrice")}</InfoValue>
+						</InfoItem>
+					)
 				)}
 				{modelInfo.outputPrice !== undefined && (
 					<InfoItem>
@@ -209,7 +264,7 @@ export const ModelInfoView = ({
 						<InfoValue>
 							{hasThinkingConfig && modelInfo.thinkingConfig?.outputPrice !== undefined
 								? formatCompactPrice(modelInfo.thinkingConfig.outputPrice)
-								: formatCompactPrice(modelInfo.outputPrice)}
+								: formatModelPriceRange(modelInfo, "outputPrice")}
 						</InfoValue>
 					</InfoItem>
 				)}
@@ -243,16 +298,31 @@ export const ModelInfoView = ({
 						<>
 							{modelInfo.cacheReadsPrice !== undefined && (
 								<AdvancedRow>
-									<AdvancedLabel>Cache Reads</AdvancedLabel>
-									<AdvancedValue>{formatCompactPrice(modelInfo.cacheReadsPrice)}</AdvancedValue>
+									<AdvancedLabel>{modelInfo.pricingSchedule ? "Cache Hits" : "Cache Reads"}</AdvancedLabel>
+									<AdvancedValue>{formatModelPriceDetails(modelInfo, "cacheReadsPrice")}</AdvancedValue>
 								</AdvancedRow>
 							)}
 							{modelInfo.cacheWritesPrice !== undefined && (
 								<AdvancedRow>
-									<AdvancedLabel>Cache Writes</AdvancedLabel>
-									<AdvancedValue>{formatCompactPrice(modelInfo.cacheWritesPrice)}</AdvancedValue>
+									<AdvancedLabel>{modelInfo.pricingSchedule ? "Cache Misses" : "Cache Writes"}</AdvancedLabel>
+									<AdvancedValue>{formatModelPriceDetails(modelInfo, "cacheWritesPrice")}</AdvancedValue>
 								</AdvancedRow>
 							)}
+						</>
+					)}
+
+					{modelInfo.pricingSchedule && (
+						<>
+							{modelInfo.pricingSchedule.periods.map((period, index) => (
+								<AdvancedRow key={`${period.label}-${period.startMinuteUtc}-${index}`}>
+									<AdvancedLabel>{period.label}</AdvancedLabel>
+									<AdvancedValue>{formatPricingPeriod(period)}</AdvancedValue>
+								</AdvancedRow>
+							))}
+							<AdvancedRow>
+								<AdvancedLabel>{modelInfo.pricingSchedule.defaultLabel}</AdvancedLabel>
+								<AdvancedValue>All other times</AdvancedValue>
+							</AdvancedRow>
 						</>
 					)}
 

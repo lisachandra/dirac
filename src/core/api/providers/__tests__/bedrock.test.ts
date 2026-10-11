@@ -8,7 +8,9 @@
 import "should"
 import type { ModelInfo } from "@shared/api"
 import sinon from "sinon"
+import type { DiracStorageMessage } from "@/shared/messages/content"
 import { AwsBedrockHandler } from "../bedrock"
+import { formatMessagesForConverseAPI } from "../bedrock-converse-utils"
 
 // --- Helpers ---
 const ZERO_PRICE_MODEL: ModelInfo = { inputPrice: 0, outputPrice: 0, cacheWritesPrice: 0, cacheReadsPrice: 0 } as any
@@ -41,7 +43,7 @@ function makeHandler(chunks: any[]): AwsBedrockHandler {
 }
 
 // Invoke the private executeConverseStream generator directly.
-function runStream(handler: AwsBedrockHandler, chunks: any[]): Promise<any[]> {
+function runStream(handler: AwsBedrockHandler): Promise<any[]> {
 	return collect((handler as any).executeConverseStream({}, ZERO_PRICE_MODEL))
 }
 
@@ -126,9 +128,7 @@ describe("AwsBedrockHandler cancellation", () => {
 			apiModelId: "anthropic.claude-sonnet-4-6",
 			onRetryAttempt: () => notifyRetryStarted(),
 		})
-		const getBedrockClient = sinon
-			.stub(handler as any, "getBedrockClient")
-			.resolves({ send, destroy: sinon.stub() })
+		const getBedrockClient = sinon.stub(handler as any, "getBedrockClient").resolves({ send, destroy: sinon.stub() })
 
 		const pendingChunk = handler.createMessage("system", [{ role: "user", content: "hello" }]).next()
 		const rejectedChunk = pendingChunk.should.be.rejected()
@@ -159,7 +159,7 @@ describe("AwsBedrockHandler.executeConverseStream", () => {
 					},
 				},
 			]
-			const out = await runStream(makeHandler(chunks), chunks)
+			const out = await runStream(makeHandler(chunks))
 			out.should.deepEqual([{ type: "reasoning", reasoning: "thinking here", signature: "sig-1" }])
 		})
 
@@ -175,7 +175,7 @@ describe("AwsBedrockHandler.executeConverseStream", () => {
 					},
 				},
 			]
-			const out = await runStream(makeHandler(chunks), chunks)
+			const out = await runStream(makeHandler(chunks))
 			out.should.deepEqual([{ type: "reasoning", reasoning: "no sig" }])
 		})
 
@@ -191,7 +191,7 @@ describe("AwsBedrockHandler.executeConverseStream", () => {
 					},
 				},
 			]
-			const out = await runStream(makeHandler(chunks), chunks)
+			const out = await runStream(makeHandler(chunks))
 			out.should.have.length(0)
 		})
 
@@ -207,7 +207,7 @@ describe("AwsBedrockHandler.executeConverseStream", () => {
 					},
 				},
 			]
-			const out = await runStream(makeHandler(chunks), chunks)
+			const out = await runStream(makeHandler(chunks))
 			out.should.have.length(0)
 		})
 	})
@@ -219,7 +219,7 @@ describe("AwsBedrockHandler.executeConverseStream", () => {
 					metadata: { usage: { inputTokens: 10, outputTokens: 5, cacheReadInputTokens: 3, cacheWriteInputTokens: 2 } },
 				},
 			]
-			const out = await runStream(makeHandler(chunks), chunks)
+			const out = await runStream(makeHandler(chunks))
 			out.should.deepEqual([
 				{
 					type: "usage",
@@ -234,7 +234,7 @@ describe("AwsBedrockHandler.executeConverseStream", () => {
 
 		it("defaults missing token fields to 0", async () => {
 			const chunks = [{ metadata: { usage: {} } }]
-			const out = await runStream(makeHandler(chunks), chunks)
+			const out = await runStream(makeHandler(chunks))
 			out.should.deepEqual([
 				{
 					type: "usage",
@@ -254,7 +254,7 @@ describe("AwsBedrockHandler.executeConverseStream", () => {
 				{ contentBlockStart: { contentBlockIndex: 0, start: { toolUse: { toolUseId: "tu-1", name: "get_weather" } } } },
 				{ contentBlockDelta: { contentBlockIndex: 0, delta: { toolUse: { input: '{"city":"SF"}' } } } },
 			]
-			const out = await runStream(makeHandler(chunks), chunks)
+			const out = await runStream(makeHandler(chunks))
 			out.should.deepEqual([
 				{
 					type: "tool_calls",
@@ -265,7 +265,7 @@ describe("AwsBedrockHandler.executeConverseStream", () => {
 
 		it("does not yield tool_call when no matching active tool call exists", async () => {
 			const chunks = [{ contentBlockDelta: { contentBlockIndex: 0, delta: { toolUse: { input: "x" } } } }]
-			const out = await runStream(makeHandler(chunks), chunks)
+			const out = await runStream(makeHandler(chunks))
 			out.should.have.length(0)
 		})
 
@@ -274,23 +274,54 @@ describe("AwsBedrockHandler.executeConverseStream", () => {
 				{ contentBlockStart: { contentBlockIndex: 0, start: { toolUse: { toolUseId: "tu-2", name: "foo" } } } },
 				{ contentBlockDelta: { contentBlockIndex: 0, delta: { toolUse: { input: 123 as any } } } },
 			]
-			const out = await runStream(makeHandler(chunks), chunks)
+			const out = await runStream(makeHandler(chunks))
 			out.should.have.length(0)
 		})
 	})
 
 	describe("thinking blocks", () => {
+		// type may live under start, contentBlock, or the top-level block — check all three independently.
+		it("detects thinking type under contentBlock when start.type is non-matching", async () => {
+			const chunks = [
+				{
+					contentBlockStart: {
+						contentBlockIndex: 0,
+						start: { type: "something_else" },
+						contentBlock: { type: "thinking", thinking: "from-contentBlock" },
+					},
+				},
+			]
+			const out = await runStream(makeHandler(chunks))
+			out.should.deepEqual([{ type: "reasoning", reasoning: "from-contentBlock" }])
+		})
+
+		it("detects thinking type at top-level when start/contentBlock types are non-matching", async () => {
+			const chunks = [
+				{
+					contentBlockStart: {
+						contentBlockIndex: 0,
+						start: { type: "something_else" },
+						contentBlock: { type: "also_else" },
+						type: "thinking",
+						thinking: "from-top-level",
+					},
+				},
+			]
+			const out = await runStream(makeHandler(chunks))
+			out.should.deepEqual([{ type: "reasoning", reasoning: "from-top-level" }])
+		})
+
 		it("yields reasoning with signature on thinking contentBlockStart", async () => {
 			const chunks = [
 				{ contentBlockStart: { contentBlockIndex: 0, start: { type: "thinking", thinking: "init", signature: "s" } } },
 			]
-			const out = await runStream(makeHandler(chunks), chunks)
+			const out = await runStream(makeHandler(chunks))
 			out.should.deepEqual([{ type: "reasoning", reasoning: "init", signature: "s" }])
 		})
 
 		it("yields nothing on thinking start with no content or signature", async () => {
 			const chunks = [{ contentBlockStart: { contentBlockIndex: 0, start: { type: "thinking" } } }]
-			const out = await runStream(makeHandler(chunks), chunks)
+			const out = await runStream(makeHandler(chunks))
 			out.should.have.length(0)
 		})
 
@@ -299,7 +330,7 @@ describe("AwsBedrockHandler.executeConverseStream", () => {
 				{ contentBlockStart: { contentBlockIndex: 0, start: { type: "thinking" } } },
 				{ contentBlockDelta: { contentBlockIndex: 0, delta: { type: "thinking_delta", thinking: "more thought" } } },
 			]
-			const out = await runStream(makeHandler(chunks), chunks)
+			const out = await runStream(makeHandler(chunks))
 			out.should.deepEqual([{ type: "reasoning", reasoning: "more thought" }])
 		})
 
@@ -308,7 +339,7 @@ describe("AwsBedrockHandler.executeConverseStream", () => {
 				{ contentBlockStart: { contentBlockIndex: 0, start: { type: "thinking" } } },
 				{ contentBlockDelta: { contentBlockIndex: 0, delta: { thinking: "raw thinking" } } },
 			]
-			const out = await runStream(makeHandler(chunks), chunks)
+			const out = await runStream(makeHandler(chunks))
 			out.should.deepEqual([{ type: "reasoning", reasoning: "raw thinking" }])
 		})
 
@@ -317,7 +348,7 @@ describe("AwsBedrockHandler.executeConverseStream", () => {
 				{ contentBlockStart: { contentBlockIndex: 0, start: { type: "thinking" } } },
 				{ contentBlockDelta: { contentBlockIndex: 0, delta: { text: "looks like text" } } },
 			]
-			const out = await runStream(makeHandler(chunks), chunks)
+			const out = await runStream(makeHandler(chunks))
 			out.should.deepEqual([{ type: "reasoning", reasoning: "looks like text" }])
 		})
 	})
@@ -327,13 +358,13 @@ describe("AwsBedrockHandler.executeConverseStream", () => {
 			const chunks = [
 				{ contentBlockStart: { contentBlockIndex: 0, start: { type: "redacted_thinking" }, data: "encrypted" } },
 			]
-			const out = await runStream(makeHandler(chunks), chunks)
+			const out = await runStream(makeHandler(chunks))
 			out.should.deepEqual([{ type: "reasoning", reasoning: "[Redacted thinking block]", redacted_data: "encrypted" }])
 		})
 
 		it("yields redacted reasoning without data when absent", async () => {
 			const chunks = [{ contentBlockStart: { contentBlockIndex: 0, start: { type: "redacted_thinking" } } }]
-			const out = await runStream(makeHandler(chunks), chunks)
+			const out = await runStream(makeHandler(chunks))
 			out.should.deepEqual([{ type: "reasoning", reasoning: "[Redacted thinking block]" }])
 		})
 	})
@@ -343,13 +374,13 @@ describe("AwsBedrockHandler.executeConverseStream", () => {
 			const chunks = [
 				{ contentBlockDelta: { contentBlockIndex: 0, delta: { type: "signature_delta", signature: "sig-x" } } },
 			]
-			const out = await runStream(makeHandler(chunks), chunks)
+			const out = await runStream(makeHandler(chunks))
 			out.should.deepEqual([{ type: "reasoning", reasoning: "", signature: "sig-x" }])
 		})
 
 		it("does not yield signature_delta without signature", async () => {
 			const chunks = [{ contentBlockDelta: { contentBlockIndex: 0, delta: { type: "signature_delta" } } }]
-			const out = await runStream(makeHandler(chunks), chunks)
+			const out = await runStream(makeHandler(chunks))
 			out.should.have.length(0)
 		})
 	})
@@ -359,13 +390,13 @@ describe("AwsBedrockHandler.executeConverseStream", () => {
 			const chunks = [
 				{ contentBlockDelta: { contentBlockIndex: 0, delta: { reasoningContent: { text: "nova reasoning" } } } },
 			]
-			const out = await runStream(makeHandler(chunks), chunks)
+			const out = await runStream(makeHandler(chunks))
 			out.should.deepEqual([{ type: "reasoning", reasoning: "nova reasoning" }])
 		})
 
 		it("does not yield when reasoningContent.text is empty", async () => {
 			const chunks = [{ contentBlockDelta: { contentBlockIndex: 0, delta: { reasoningContent: { text: "" } } } }]
-			const out = await runStream(makeHandler(chunks), chunks)
+			const out = await runStream(makeHandler(chunks))
 			out.should.have.length(0)
 		})
 	})
@@ -373,7 +404,7 @@ describe("AwsBedrockHandler.executeConverseStream", () => {
 	describe("text content", () => {
 		it("yields text when no block type is set", async () => {
 			const chunks = [{ contentBlockDelta: { contentBlockIndex: 0, delta: { text: "hello" } } }]
-			const out = await runStream(makeHandler(chunks), chunks)
+			const out = await runStream(makeHandler(chunks))
 			out.should.deepEqual([{ type: "text", text: "hello" }])
 		})
 
@@ -382,7 +413,7 @@ describe("AwsBedrockHandler.executeConverseStream", () => {
 				{ contentBlockDelta: { contentBlockIndex: 0, delta: { text: "a" } } },
 				{ contentBlockDelta: { contentBlockIndex: 0, delta: { text: "b" } } },
 			]
-			const out = await runStream(makeHandler(chunks), chunks)
+			const out = await runStream(makeHandler(chunks))
 			out.should.deepEqual([
 				{ type: "text", text: "a" },
 				{ type: "text", text: "b" },
@@ -399,7 +430,7 @@ describe("AwsBedrockHandler.executeConverseStream", () => {
 				// New block at same index after stop — should be treated as text
 				{ contentBlockDelta: { contentBlockIndex: 0, delta: { text: "plain text" } } },
 			]
-			const out = await runStream(makeHandler(chunks), chunks)
+			const out = await runStream(makeHandler(chunks))
 			out.should.deepEqual([
 				{ type: "reasoning", reasoning: "reasoning text" },
 				{ type: "text", text: "plain text" },
@@ -413,7 +444,7 @@ describe("AwsBedrockHandler.executeConverseStream", () => {
 				// Tool input after stop — no active tool call, should not yield
 				{ contentBlockDelta: { contentBlockIndex: 0, delta: { toolUse: { input: "{}" } } } },
 			]
-			const out = await runStream(makeHandler(chunks), chunks)
+			const out = await runStream(makeHandler(chunks))
 			out.should.have.length(0)
 		})
 	})
@@ -421,36 +452,36 @@ describe("AwsBedrockHandler.executeConverseStream", () => {
 	describe("error chunks", () => {
 		it("yields text for internalServerException", async () => {
 			const chunks = [{ internalServerException: { message: "boom" } }]
-			const out = await runStream(makeHandler(chunks), chunks)
+			const out = await runStream(makeHandler(chunks))
 			out.should.deepEqual([{ type: "text", text: "[ERROR] Internal server error: boom" }])
 		})
 
 		it("yields text for modelStreamErrorException", async () => {
 			const chunks = [{ modelStreamErrorException: { message: "model failed" } }]
-			const out = await runStream(makeHandler(chunks), chunks)
+			const out = await runStream(makeHandler(chunks))
 			out.should.deepEqual([{ type: "text", text: "[ERROR] Model stream error: model failed" }])
 		})
 
 		it("yields text for throttlingException", async () => {
 			const chunks = [{ throttlingException: { message: "slow down" } }]
-			const out = await runStream(makeHandler(chunks), chunks)
+			const out = await runStream(makeHandler(chunks))
 			out.should.deepEqual([{ type: "text", text: "[ERROR] Throttling error: slow down" }])
 		})
 
 		it("yields text for validationException (non-context error)", async () => {
 			const chunks = [{ validationException: { message: "bad request" } }]
-			const out = await runStream(makeHandler(chunks), chunks)
+			const out = await runStream(makeHandler(chunks))
 			out.should.deepEqual([{ type: "text", text: "[ERROR] Validation error: bad request" }])
 		})
 
 		it("throws for context-window validationException", async () => {
 			const chunks = [{ validationException: { message: "input is too long, context exceeds maximum" } }]
-			await runStream(makeHandler(chunks), chunks).should.be.rejectedWith(/input is too long/)
+			await runStream(makeHandler(chunks)).should.be.rejectedWith(/input is too long/)
 		})
 
 		it("yields text for serviceUnavailableException", async () => {
 			const chunks = [{ serviceUnavailableException: { message: "down" } }]
-			const out = await runStream(makeHandler(chunks), chunks)
+			const out = await runStream(makeHandler(chunks))
 			out.should.deepEqual([{ type: "text", text: "[ERROR] Service unavailable: down" }])
 		})
 	})
@@ -476,13 +507,13 @@ describe("AwsBedrockHandler.executeConverseStream", () => {
 		})
 
 		it("yields nothing for empty stream", async () => {
-			const out = await runStream(makeHandler([]), [])
+			const out = await runStream(makeHandler([]))
 			out.should.have.length(0)
 		})
 
 		it("yields nothing for unrecognized chunk shapes", async () => {
 			const chunks = [{ unknownField: "x" }, { another: 1 }]
-			const out = await runStream(makeHandler(chunks), chunks)
+			const out = await runStream(makeHandler(chunks))
 			out.should.have.length(0)
 		})
 
@@ -493,11 +524,49 @@ describe("AwsBedrockHandler.executeConverseStream", () => {
 				{ contentBlockDelta: { contentBlockIndex: 0, delta: { thinking: "step" } } },
 				{ contentBlockDelta: { contentBlockIndex: 1, delta: { text: "answer" } } },
 			]
-			const out = await runStream(makeHandler(chunks), chunks)
+			const out = await runStream(makeHandler(chunks))
 			out.should.have.length(3)
 			out[0].type.should.equal("usage")
 			out[1].should.deepEqual({ type: "reasoning", reasoning: "step" })
 			out[2].should.deepEqual({ type: "text", text: "answer" })
 		})
+	})
+})
+
+describe("formatMessagesForConverseAPI content shaping", () => {
+	// Master contract: empty string is preserved as a text block, not collapsed to [].
+	it("preserves empty string content as a text block", () => {
+		const result = formatMessagesForConverseAPI([{ role: "user", content: "" } as DiracStorageMessage])
+		result.should.have.length(1)
+		;(result[0].content ?? []).should.deepEqual([{ text: "" }])
+	})
+
+	it("preserves empty tool_result content as a text block", () => {
+		const result = formatMessagesForConverseAPI([
+			{ role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "" }] } as DiracStorageMessage,
+		])
+		const block = result[0]?.content?.[0] as { toolResult?: { content?: unknown[] } } | undefined
+		;(block?.toolResult?.content ?? []).should.deepEqual([{ text: "" }])
+	})
+
+	it("maps tool_result nested content without top-level toolUse/toolResult blocks", () => {
+		const result = formatMessagesForConverseAPI([
+			{
+				role: "user",
+				content: [
+					{
+						type: "tool_result",
+						tool_use_id: "t1",
+						content: [
+							{ type: "text", text: "ok" },
+							{ type: "tool_use", id: "nested", name: "x", input: {} },
+							{ type: "thinking", thinking: "secret" },
+						],
+					},
+				],
+			} as DiracStorageMessage,
+		])
+		const block = result[0]?.content?.[0] as { toolResult?: { content?: unknown[] } } | undefined
+		;(block?.toolResult?.content ?? []).should.deepEqual([{ text: "ok" }])
 	})
 })

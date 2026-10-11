@@ -1,5 +1,5 @@
 import React from "react"
-import { Card, CardStatus } from "@shared/ExtensionMessage"
+import { Card, CardStatus, isFinalStatus } from "@shared/ExtensionMessage"
 import { DiracAskResponse } from "@shared/WebviewMessage"
 import { Button } from "@/shared/ui/button"
 import { cn } from "@/lib/utils"
@@ -15,7 +15,7 @@ export const CardActions: React.FC<CardActionsProps> = ({ card, isActive, onActi
 	const { requireApproval, actions, status } = card
 	const hasActions = (actions && actions.length > 0) || requireApproval
 
-	const showActions = isActive || status === CardStatus.WAITING_FOR_INPUT
+	const showActions = !isFinalStatus(status) && (isActive || status === CardStatus.WAITING_FOR_INPUT)
 
 	if (!showActions || !hasActions) {
 		return null

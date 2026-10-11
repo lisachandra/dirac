@@ -1,90 +1,77 @@
 import { isValidAutoCondenseContextLimit } from "@shared/context-management"
-import { ToolRegistry } from "@core/task/tools/registry/ToolRegistry"
 import { UpdateSettingsRequest } from "@shared/proto/dirac/state"
 import { convertProtoToModelProviderSelection } from "@shared/proto-conversions/models/api-configuration-conversion"
-import { telemetryService } from "../../../services/telemetry"
+import type { Settings } from "@shared/storage/state-keys"
 import { normalizeUserApprovedCommands } from "@shared/UserApprovedCommand"
 import { Controller } from ".."
 
-/** Apply simple boolean/number/string settings that map directly to global state */
-export function applySimpleSettings(controller: Controller, request: UpdateSettingsRequest): void {
-	const sm = controller.stateManager
+/**
+ * Build the complete explicitly addressed Settings patch for a webview update.
+ * Constructor-only execution options remain persistence-only because they are
+ * not represented by TaskWorkingConfiguration.settings.
+ */
+export function buildWebviewSettingsPatch(request: UpdateSettingsRequest): Partial<Settings> {
+	const settings: Partial<Settings> = {}
 	if (request.planActSeparateModelsSetting !== undefined)
-		sm.setGlobalState("planActSeparateModelsSetting", request.planActSeparateModelsSetting)
-	if (request.enableCheckpointsSetting !== undefined)
-		sm.setGlobalState("enableCheckpointsSetting", request.enableCheckpointsSetting)
-	if (request.utilityModelEnabled !== undefined) sm.setGlobalState("utilityModelEnabled", request.utilityModelEnabled)
+		settings.planActSeparateModelsSetting = request.planActSeparateModelsSetting
+	if (request.enableCheckpointsSetting !== undefined) settings.enableCheckpointsSetting = request.enableCheckpointsSetting
+	if (request.utilityModelEnabled !== undefined) settings.utilityModelEnabled = request.utilityModelEnabled
 	if (request.utilityModelSelection !== undefined)
-		sm.setGlobalState("utilityModelSelection", convertProtoToModelProviderSelection(request.utilityModelSelection))
-	if (request.utilityModelUseCondense !== undefined)
-		sm.setGlobalState("utilityModelUseCondense", request.utilityModelUseCondense)
-	if (request.utilityModelUseNewTask !== undefined) sm.setGlobalState("utilityModelUseNewTask", request.utilityModelUseNewTask)
+		settings.utilityModelSelection = convertProtoToModelProviderSelection(request.utilityModelSelection)
+	if (request.utilityModelUseCondense !== undefined) settings.utilityModelUseCondense = request.utilityModelUseCondense
+	if (request.utilityModelUseNewTask !== undefined) settings.utilityModelUseNewTask = request.utilityModelUseNewTask
 	if (request.utilityModelUseGenerateCommitMessage !== undefined)
-		sm.setGlobalState("utilityModelUseGenerateCommitMessage", request.utilityModelUseGenerateCommitMessage)
-	if (request.preferredLanguage !== undefined) sm.setGlobalState("preferredLanguage", request.preferredLanguage)
-	if (request.shellIntegrationTimeout !== undefined)
-		sm.setGlobalState("shellIntegrationTimeout", Number(request.shellIntegrationTimeout))
-	if (request.terminalReuseEnabled !== undefined) sm.setGlobalState("terminalReuseEnabled", request.terminalReuseEnabled)
-	if (request.terminalOutputLineLimit !== undefined)
-		sm.setGlobalState("terminalOutputLineLimit", Number(request.terminalOutputLineLimit))
-	if (request.maxConsecutiveMistakes !== undefined)
-		sm.setGlobalState("maxConsecutiveMistakes", Number(request.maxConsecutiveMistakes))
-	if (request.strictPlanModeEnabled !== undefined) sm.setGlobalState("strictPlanModeEnabled", request.strictPlanModeEnabled)
+		settings.utilityModelUseGenerateCommitMessage = request.utilityModelUseGenerateCommitMessage
+	if (request.utilityModelUsePermissionHandling !== undefined)
+		settings.utilityModelUsePermissionHandling = request.utilityModelUsePermissionHandling
+	if (request.utilityModelPermissionPolicy !== undefined)
+		settings.utilityModelPermissionPolicy = request.utilityModelPermissionPolicy
+	if (request.preferredLanguage !== undefined) settings.preferredLanguage = request.preferredLanguage
+	if (request.shellIntegrationTimeout !== undefined) settings.shellIntegrationTimeout = Number(request.shellIntegrationTimeout)
+	if (request.terminalOutputLineLimit !== undefined) settings.terminalOutputLineLimit = Number(request.terminalOutputLineLimit)
+	if (request.maxConsecutiveMistakes !== undefined) settings.maxConsecutiveMistakes = Number(request.maxConsecutiveMistakes)
+	if (request.strictPlanModeEnabled !== undefined) settings.strictPlanModeEnabled = request.strictPlanModeEnabled
 	if (request.autoCondenseContextLimits !== undefined) {
-		const limits = Object.fromEntries(
+		settings.autoCondenseContextLimits = Object.fromEntries(
 			Object.entries(request.autoCondenseContextLimits.limits).filter(([, value]) =>
 				isValidAutoCondenseContextLimit(value),
 			),
 		)
-		sm.setGlobalState("autoCondenseContextLimits", limits)
 	}
-	if (request.worktreesEnabled !== undefined) sm.setGlobalState("worktreesEnabled", request.worktreesEnabled)
+	if (request.worktreesEnabled !== undefined) settings.worktreesEnabled = request.worktreesEnabled
 	if (request.doubleCheckCompletionEnabled !== undefined)
-		sm.setGlobalState("doubleCheckCompletionEnabled", request.doubleCheckCompletionEnabled)
-	if (request.writePromptMetadataEnabled !== undefined)
-		sm.setGlobalState("writePromptMetadataEnabled", request.writePromptMetadataEnabled)
-	if (request.autoApproveAllToggled !== undefined) sm.setGlobalState("autoApproveAllToggled", request.autoApproveAllToggled)
+		settings.doubleCheckCompletionEnabled = request.doubleCheckCompletionEnabled
+	if (request.lowVerbosityEnabled !== undefined) settings.lowVerbosityEnabled = request.lowVerbosityEnabled
+	if (request.writePromptMetadataEnabled !== undefined) settings.writePromptMetadataEnabled = request.writePromptMetadataEnabled
+	if (request.autoApproveAllToggled !== undefined) settings.autoApproveAllToggled = request.autoApproveAllToggled
 	if (request.userApprovedCommands !== undefined)
-		sm.setGlobalState("userApprovedCommands", normalizeUserApprovedCommands(request.userApprovedCommands.commands))
+		settings.userApprovedCommands = normalizeUserApprovedCommands(request.userApprovedCommands.commands)
 	if (request.writePromptMetadataDirectory !== undefined)
-		sm.setGlobalState("writePromptMetadataDirectory", request.writePromptMetadataDirectory)
-	if (request.backgroundEditEnabled !== undefined) sm.setGlobalState("backgroundEditEnabled", !!request.backgroundEditEnabled)
-	if (request.multiRootEnabled !== undefined) sm.setGlobalState("multiRootEnabled", !!request.multiRootEnabled)
-	if (request.enableParallelToolCalling !== undefined)
-		sm.setGlobalState("enableParallelToolCalling", !!request.enableParallelToolCalling)
+		settings.writePromptMetadataDirectory = request.writePromptMetadataDirectory
+	if (request.backgroundEditEnabled !== undefined) settings.backgroundEditEnabled = !!request.backgroundEditEnabled
+	if (request.enableParallelToolCalling !== undefined) settings.enableParallelToolCalling = !!request.enableParallelToolCalling
+	if (request.hooksEnabled !== undefined) settings.hooksEnabled = !!request.hooksEnabled
+	if (request.customPrompt !== undefined) settings.customPrompt = request.customPrompt === "compact" ? "compact" : undefined
+	if (request.yoloModeToggled !== undefined) settings.yoloModeToggled = request.yoloModeToggled
+	if (request.diracWebToolsEnabled !== undefined) settings.diracWebToolsEnabled = request.diracWebToolsEnabled
+	if (request.subagentsEnabled !== undefined) settings.subagentsEnabled = !!request.subagentsEnabled
+	if (request.useAutoCondense !== undefined) settings.useAutoCondense = request.useAutoCondense
+	return settings
 }
 
-/** Normalize vscode terminal execution mode to 'backgroundExec' or 'vscodeTerminal' */
+/** Persist an already normalized webview Settings patch. */
+export function persistWebviewSettingsPatch(controller: Controller, settings: Partial<Settings>): void {
+	if (Object.keys(settings).length > 0) controller.stateManager.setGlobalStateBatch(settings)
+}
+
+/** Apply simple boolean/number/string settings that map directly to global state. */
+export function applySimpleSettings(controller: Controller, request: UpdateSettingsRequest): void {
+	persistWebviewSettingsPatch(controller, buildWebviewSettingsPatch(request))
+}
+
+/** Normalize vscode terminal execution mode to 'backgroundExec' or 'vscodeTerminal'. */
 export function normalizeVscodeTerminalExecutionMode(controller: Controller, request: UpdateSettingsRequest): void {
 	if (request.vscodeTerminalExecutionMode === undefined || request.vscodeTerminalExecutionMode === "") return
 	const normalized = request.vscodeTerminalExecutionMode === "backgroundExec" ? "backgroundExec" : "vscodeTerminal"
 	controller.stateManager.setGlobalState("vscodeTerminalExecutionMode", normalized)
-}
-
-/** Apply hooksEnabled setting with telemetry capture on state change */
-export function applyHooksEnabled(controller: Controller, request: UpdateSettingsRequest): void {
-	if (request.hooksEnabled === undefined) return
-	const wasEnabled = controller.stateManager.getGlobalSettingsKey("hooksEnabled") ?? true
-	const isEnabled = !!request.hooksEnabled
-	controller.stateManager.setGlobalState("hooksEnabled", isEnabled)
-	if (controller.task && wasEnabled !== isEnabled) {
-		telemetryService.captureFeatureToggle(controller.task.ulid, "hooks", isEnabled, controller.task.api.getModel().id)
-	}
-}
-
-/** Apply customPrompt — only 'compact' is a valid value, otherwise set to undefined */
-export function applyCustomPromptWebview(controller: Controller, request: UpdateSettingsRequest): void {
-	if (request.customPrompt === undefined) return
-	const value = request.customPrompt === "compact" ? "compact" : undefined
-	controller.stateManager.setGlobalState("customPrompt", value)
-}
-
-/** Parse tool toggles JSON, sync to ToolRegistry, and mark task tools dirty */
-export function applyToolToggles(controller: Controller, request: UpdateSettingsRequest): void {
-	if (request.toolToggles === undefined) return
-	const toggles = JSON.parse(request.toolToggles) as Record<string, boolean>
-	const registry = ToolRegistry.getInstance()
-	registry.loadToggles(toggles)
-	controller.stateManager.setGlobalState("toolToggles", registry.getToggles())
-	controller.task?.markToolsDirty("tool_toggles_changed")
 }

@@ -1,8 +1,9 @@
-import { ANTHROPIC_FAST_MODE_SUFFIX, anthropicModels } from "@shared/api"
+import { anthropicModels, modelSupportsInferenceSpeed } from "@shared/api"
 import type { Mode } from "@shared/ExtensionMessage"
-import { normalizeApiConfiguration } from "@/features/settings/components/utils/providerUtils"
+import { getModeSpecificFields, normalizeApiConfiguration } from "@/features/settings/components/utils/providerUtils"
 import { useSettingsStore } from "@/features/settings/store/settingsStore"
 import { ApiKeyField } from "../common/ApiKeyField"
+import InferenceSpeedSelector from "../InferenceSpeedSelector"
 import { BaseUrlField } from "../common/BaseUrlField"
 import { ModelInfoView } from "../common/ModelInfoView"
 import { ModelSelector } from "../common/ModelSelector"
@@ -10,20 +11,10 @@ import { RemotelyConfiguredInputWrapper } from "../common/RemotelyConfiguredInpu
 import ThinkingBudgetSlider from "../ThinkingBudgetSlider"
 import { useApiConfigurationHandlers } from "../utils/useApiConfigurationHandlers"
 
-// Anthropic models that support thinking/reasoning mode
-export const SUPPORTED_ANTHROPIC_THINKING_MODELS = [
-	"claude-opus-4-6",
-	`claude-opus-4-6${ANTHROPIC_FAST_MODE_SUFFIX}`,
-	"claude-sonnet-5",
-	"claude-sonnet-4-6",
-	"claude-3-7-sonnet-20250219",
-	"claude-sonnet-4-20250514",
-	"claude-opus-4-5-20251101",
-	"claude-opus-4-20250514",
-	"claude-opus-4-1-20250805",
-	"claude-sonnet-4-5-20250929",
-	"claude-haiku-4-5-20251001",
-]
+// Retained for compatibility with imports in existing UI tests.
+export const SUPPORTED_ANTHROPIC_THINKING_MODELS = Object.entries(anthropicModels)
+	.filter(([, info]) => info.supportsReasoning)
+	.map(([modelId]) => modelId)
 
 /**
  * Props for the AnthropicProvider component
@@ -39,10 +30,25 @@ interface AnthropicProviderProps {
  */
 export const AnthropicProvider = ({ showModelOptions, isPopup, currentMode }: AnthropicProviderProps) => {
 	const { apiConfiguration, remoteConfigSettings } = useSettingsStore()
-	const { handleFieldChange, handleModeFieldChange } = useApiConfigurationHandlers()
+	const { handleFieldChange, handleModeFieldChange, handleModeFieldsChange } = useApiConfigurationHandlers()
 
 	// Get the normalized configuration
 	const { selectedModelId, selectedModelInfo } = normalizeApiConfiguration(apiConfiguration, currentMode)
+	const configuredInferenceSpeed = getModeSpecificFields(apiConfiguration, currentMode).inferenceSpeed
+	const isBaseUrlManaged = remoteConfigSettings?.anthropicBaseUrl !== undefined
+	const setSelectedModel = (modelId: string) => {
+		if (modelSupportsInferenceSpeed("anthropic", modelId) || configuredInferenceSpeed !== "fast") {
+			return handleModeFieldChange({ plan: "planModeApiModelId", act: "actModeApiModelId" }, modelId, currentMode)
+		}
+		return handleModeFieldsChange(
+			{
+				apiModelId: { plan: "planModeApiModelId", act: "actModeApiModelId" },
+				inferenceSpeed: { plan: "planModeInferenceSpeed", act: "actModeInferenceSpeed" },
+			},
+			{ apiModelId: modelId, inferenceSpeed: "default" },
+			currentMode,
+		)
+	}
 
 	return (
 		<div>
@@ -53,14 +59,14 @@ export const AnthropicProvider = ({ showModelOptions, isPopup, currentMode }: An
 				signupUrl="https://console.anthropic.com/settings/keys"
 			/>
 
-			<RemotelyConfiguredInputWrapper hidden={remoteConfigSettings?.anthropicBaseUrl === undefined}>
+			<RemotelyConfiguredInputWrapper hidden={!isBaseUrlManaged}>
 				<BaseUrlField
-					disabled={!!remoteConfigSettings?.anthropicBaseUrl}
+					disabled={isBaseUrlManaged}
 					initialValue={apiConfiguration?.anthropicBaseUrl}
 					label="Use custom base URL"
 					onChange={(value: string) => handleFieldChange("anthropicBaseUrl", value)}
 					placeholder="Default: https://api.anthropic.com"
-					showLockIcon={!!remoteConfigSettings?.anthropicBaseUrl}
+					showLockIcon={isBaseUrlManaged}
 				/>
 			</RemotelyConfiguredInputWrapper>
 
@@ -69,19 +75,19 @@ export const AnthropicProvider = ({ showModelOptions, isPopup, currentMode }: An
 					<ModelSelector
 						label="Model"
 						models={anthropicModels}
-						onChange={(e: any) =>
-							handleModeFieldChange<"planModeApiModelId", "actModeApiModelId">(
-								{ plan: "planModeApiModelId", act: "actModeApiModelId" },
-								e.target.value,
-								currentMode,
-							)
-						}
+						onChange={(event: any) => setSelectedModel(event.target.value)}
 						selectedModelId={selectedModelId}
 					/>
 
 					{SUPPORTED_ANTHROPIC_THINKING_MODELS.includes(selectedModelId) && (
 						<ThinkingBudgetSlider currentMode={currentMode} maxBudget={selectedModelInfo.thinkingConfig?.maxBudget} />
 					)}
+
+					<InferenceSpeedSelector
+						currentMode={currentMode}
+						description="Fast increases Anthropic output speed at 2x token pricing and requires account access."
+						supportsFastMode={selectedModelInfo.supportsFastMode === true}
+					/>
 
 					<ModelInfoView isPopup={isPopup} modelInfo={selectedModelInfo as any} selectedModelId={selectedModelId} />
 				</>

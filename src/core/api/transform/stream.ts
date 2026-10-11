@@ -26,6 +26,7 @@ export interface ApiStreamUsageChunk {
 	reasoningTokens?: number
 	thoughtsTokenCount?: number // openrouter
 	totalCost?: number // openrouter
+	inferenceSpeed?: import("@shared/storage/types").InferenceSpeed
 	/**
 	 * The reason the generation stopped (e.g., "length", "stop", "MAX_TOKENS")
 	 */

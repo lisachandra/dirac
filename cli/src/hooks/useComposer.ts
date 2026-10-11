@@ -23,13 +23,15 @@ import { parseImagesFromInput } from "../utils/parser"
 import { extractSlashQuery, filterCommands, mergeCliSlashCommands } from "../utils/slash-commands"
 import { getInputStorageKey } from "../utils/chat"
 import { CliPanelType } from "../types"
+import type { GoalStatus } from "@shared/goal"
+import type { GoalLifecycleAction } from "../utils/goals"
 
 export type ActivePanel =
 	| {
-		type: CliPanelType.SETTINGS
-		initialMode?: "model-picker" | "featured-models" | "provider-picker"
-		initialModelKey?: "actModelId" | "planModelId"
-	}
+			type: CliPanelType.SETTINGS
+			initialMode?: "model-picker" | "featured-models" | "provider-picker"
+			initialModelKey?: "actModelId" | "planModelId"
+	  }
 	| { type: CliPanelType.HISTORY }
 	| { type: CliPanelType.HELP }
 	| { type: CliPanelType.SKILLS }
@@ -66,6 +68,7 @@ export interface ComposerActions {
 	) => void
 	toggleMode: () => void
 	toggleAutoApproveAll: () => void
+	enableFastMode: () => void
 	toggleQuietMode: () => void
 }
 
@@ -87,6 +90,10 @@ interface UseComposerProps {
 	scrollableCardMaxOffset: number
 	cardScrollOffset: number
 	setCardScrollOffset: (offset: number) => void
+	goalStatus?: GoalStatus
+	handleGoalControl: (action: GoalLifecycleAction) => void
+	toggleGoalDetails: () => void
+	disarmGoalStopConfirmation: () => void
 }
 
 export function useComposer({
@@ -108,6 +115,10 @@ export function useComposer({
 	scrollableCardMaxOffset,
 	cardScrollOffset,
 	setCardScrollOffset,
+	goalStatus,
+	handleGoalControl,
+	toggleGoalDetails,
+	disarmGoalStopConfirmation,
 }: UseComposerProps) {
 	const {
 		text: textInput,
@@ -281,8 +292,8 @@ export function useComposer({
 			.filter((item) =>
 				Boolean(
 					(item.cwdOnTaskInitialization && arePathsEqual(item.cwdOnTaskInitialization, workspacePath)) ||
-					(item.workspaceRootPath && arePathsEqual(item.workspaceRootPath, workspacePath)) ||
-					(item.shadowGitConfigWorkTree && arePathsEqual(item.shadowGitConfigWorkTree, workspacePath)),
+						(item.workspaceRootPath && arePathsEqual(item.workspaceRootPath, workspacePath)) ||
+						(item.shadowGitConfigWorkTree && arePathsEqual(item.shadowGitConfigWorkTree, workspacePath)),
 				),
 			)
 			.reverse()
@@ -311,10 +322,7 @@ export function useComposer({
 			r.hasCheckedRipgrep = true
 			if (checkAndWarnRipgrepMissing()) {
 				setShowRipgrepWarning(true)
-				ripgrepWarningTimeoutRef.current = setTimeout(
-					() => setShowRipgrepWarning(false),
-					RIPGREP_WARNING_DURATION_MS,
-				)
+				ripgrepWarningTimeoutRef.current = setTimeout(() => setShowRipgrepWarning(false), RIPGREP_WARNING_DURATION_MS)
 			}
 		}
 		const { query } = mentionInfo
@@ -380,6 +388,7 @@ export function useComposer({
 		insertTextAtCursor,
 		toggleMode: () => actionsRef.current.toggleMode(),
 		toggleAutoApproveAll: () => actionsRef.current.toggleAutoApproveAll(),
+		enableFastMode: () => actionsRef.current.enableFastMode(),
 		toggleQuietMode: () => actionsRef.current.toggleQuietMode(),
 		handleSubmit: (text, images) => actionsRef.current.handleSubmit(text, images),
 		handleExit: () => actionsRef.current.handleExit(),
@@ -403,8 +412,7 @@ export function useComposer({
 		uiActionState,
 		yolo,
 		pendingAsk,
-		handleButtonAction: (action, isPrimary, value) =>
-			actionsRef.current.handleButtonAction(action, isPrimary, value),
+		handleButtonAction: (action, isPrimary, value) => actionsRef.current.handleButtonAction(action, isPrimary, value),
 		isYoloSuppressed,
 		lastPasteTimeRef,
 		activePasteNumRef,
@@ -420,7 +428,10 @@ export function useComposer({
 		scrollableCardMaxOffset,
 		cardScrollOffset,
 		setCardScrollOffset,
-
+		goalStatus,
+		handleGoalControl,
+		toggleGoalDetails,
+		disarmGoalStopConfirmation,
 	})
 
 	const resetInput = useCallback(() => {

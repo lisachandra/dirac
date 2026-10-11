@@ -1,59 +1,80 @@
-import { PanelTab } from "../Panel"
+import { SETTINGS_DESTINATIONS } from "@shared/settings-presentation"
 import { SettingsTab } from "./types"
 
-export const TABS: PanelTab[] = [
-	{ key: SettingsTab.API, label: "API" },
-	{ key: SettingsTab.AUTO_APPROVE, label: "Auto-approve" },
-	{ key: SettingsTab.USER_APPROVED_COMMANDS, label: "Approved commands" },
-	{ key: SettingsTab.FEATURES, label: "Features" },
-	{ key: SettingsTab.TOOLS, label: "Tools" },
-	{ key: SettingsTab.OTHER, label: "Other" },
-]
+export interface CliSettingsDestination {
+	key: SettingsTab
+	label: string
+	description: string
+	question: string
+}
 
-// Settings configuration for simple boolean toggles
+export const CLI_SETTINGS_DESTINATIONS: CliSettingsDestination[] = [
+	SettingsTab.MODELS_API,
+	SettingsTab.UTILITY_MODEL,
+	SettingsTab.APPROVALS,
+	SettingsTab.RESPONSES_CONTEXT,
+	SettingsTab.RUNNING_TASKS,
+	SettingsTab.TOOLS,
+	SettingsTab.TERMINAL,
+	SettingsTab.GENERAL,
+].map((key) => ({
+	key,
+	label: SETTINGS_DESTINATIONS[key].label,
+	description: SETTINGS_DESTINATIONS[key].shortHelp,
+	question: SETTINGS_DESTINATIONS[key].question,
+}))
+
+// Presentation metadata for boolean settings. The state keys and runtime behavior remain unchanged.
 export const FEATURE_SETTINGS = {
+	lowVerbosity: {
+		stateKey: "lowVerbosityEnabled",
+		default: true,
+		label: "Low-verbosity responses",
+		description: "Keep responses concise while preserving decisions, caveats, and verification.",
+	},
 	yolo: {
 		stateKey: "yoloModeToggled",
 		default: false,
-		label: "Yolo Mode",
-		description:
-			"Execute tasks without user's confirmation. Auto-switches from Plan to Act mode and disables the ask question tool. Use with extreme caution.",
+		label: "YOLO Mode",
+		description: "Run with maximum autonomy and bypass confirmation prompts.",
 	},
 	subagents: {
 		stateKey: "subagentsEnabled",
 		default: false,
 		label: "Subagents",
-		description: "Let Dirac run focused subagents in parallel to explore the codebase for you",
+		description: "Run focused subagents in parallel for independent exploration or analysis. This may increase token usage.",
 	},
 	autoCondense: {
 		stateKey: "useAutoCondense",
 		default: false,
-		label: "Auto-condense",
-		description: "Automatically summarize long conversations",
+		label: "Auto-condense conversations",
+		description: "Summarize older conversation history as the context window fills.",
 	},
 	webTools: {
 		stateKey: "diracWebToolsEnabled",
 		default: true,
-		label: "Web tools",
-		description: "Enable web search and fetch tools",
+		label: "Web search & fetch",
+		description:
+			"Allow Dirac to search the web and retrieve page content. This is distinct from interactive browser control.",
 	},
 	strictPlanMode: {
 		stateKey: "strictPlanModeEnabled",
 		default: true,
-		label: "Strict plan mode",
-		description: "Require explicit mode switching",
+		label: "Strict Plan Mode",
+		description: "Block file-changing tools in Plan Mode until you explicitly switch to Act.",
 	},
 	parallelToolCalling: {
 		stateKey: "enableParallelToolCalling",
 		default: false,
 		label: "Parallel tool calling",
-		description: "Allow multiple tools in a single response",
+		description: "Run independent tool calls concurrently. Execution order is not guaranteed and resource use may increase.",
 	},
 	doubleCheckCompletion: {
 		stateKey: "doubleCheckCompletionEnabled",
 		default: false,
 		label: "Double-check completion",
-		description: "Reject first completion attempt and require re-verification",
+		description:
+			"Require an additional verification pass before accepting completion. This adds latency and may use more tokens.",
 	},
 } as const
 

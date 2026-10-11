@@ -2,6 +2,8 @@ import "should"
 import { expect } from "chai"
 import {
 	buildResponseCreateParams,
+	getOpenAIServiceTier,
+	normalizeOpenAIServiceTier,
 	parseSseResponse,
 	processResponsesEvents,
 	shouldRetryWithFullContext,
@@ -26,6 +28,23 @@ describe("yieldUsage", () => {
 		chunks[0].outputTokens.should.equal(30)
 		chunks[0].reasoningTokens.should.equal(20)
 		expect(chunks[0].totalCost).to.be.approximately(0.00016, 1e-12)
+	})
+})
+
+
+describe("OpenAI service tiers", () => {
+	it("maps configured speeds to native and Codex request tiers", () => {
+		expect(getOpenAIServiceTier("default")).to.equal(undefined)
+		expect(getOpenAIServiceTier("standard")).to.equal("default")
+		expect(getOpenAIServiceTier("fast")).to.equal("fast")
+		expect(getOpenAIServiceTier("fast", "priority")).to.equal("priority")
+	})
+
+	it("normalizes delivered service tiers", () => {
+		expect(normalizeOpenAIServiceTier("fast")).to.equal("fast")
+		expect(normalizeOpenAIServiceTier("priority")).to.equal("fast")
+		expect(normalizeOpenAIServiceTier("default")).to.equal("standard")
+		expect(normalizeOpenAIServiceTier("flex")).to.equal(undefined)
 	})
 })
 
@@ -136,6 +155,16 @@ describe("buildResponseCreateParams", () => {
 	it("stores a continued response when explicitly requested", () => {
 		const params = buildResponseCreateParams({ ...baseArgs, previousResponseId: "resp_123", store: true }) as any
 		params.store.should.equal(true)
+	})
+
+	it("includes the requested service tier", () => {
+		const params = buildResponseCreateParams({ ...baseArgs, serviceTier: "fast" }) as any
+		params.service_tier.should.equal("fast")
+	})
+
+	it("omits service_tier for provider default", () => {
+		const params = buildResponseCreateParams(baseArgs) as any
+		expect(params.service_tier).to.equal(undefined)
 	})
 })
 describe("processResponsesEvents", () => {

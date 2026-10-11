@@ -39,7 +39,7 @@ export class AstEditApplier {
 			const approvedContent = userEdits?.[file.displayPath] ?? userEdits?.[file.absolutePath] ?? file.content
 			let currentContent: string
 			try {
-				currentContent = await env.workspace.readFile(file.absolutePath)
+				currentContent = await env.editor.readText(file.absolutePath)
 			} catch (error) {
 				files.push({
 					file,
@@ -54,7 +54,8 @@ export class AstEditApplier {
 				files.push({
 					file,
 					status: "save_failed",
-					saveError: "The file changed after the AST plan was created. Re-inspect and retry instead of overwriting newer changes.",
+					saveError:
+						"The file changed after the AST plan was created. Re-inspect and retry instead of overwriting newer changes.",
 					diagnosticsStatus: "not_run",
 					errorCount: 0,
 				})
@@ -63,7 +64,7 @@ export class AstEditApplier {
 
 			let saveResult: SaveResult
 			try {
-				saveResult = await env.editor.applyAndSaveSilently(file.absolutePath, approvedContent)
+				saveResult = await env.editor.applyAndSaveSilently(file.absolutePath, approvedContent, "modify")
 			} catch (error) {
 				files.push({
 					file,
@@ -75,7 +76,7 @@ export class AstEditApplier {
 				continue
 			}
 
-			const finalContent = saveResult.content || approvedContent
+			const finalContent = saveResult.content ?? approvedContent
 			try {
 				await env.diagnostics.prepare([file.absolutePath])
 				const diagnostics = await env.diagnostics.getRaw([file.absolutePath])

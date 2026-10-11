@@ -14,8 +14,11 @@ import type { Controller } from "../index"
 export async function onDidShowAnnouncement(controller: Controller, _request: EmptyRequest): Promise<Boolean> {
 	try {
 		const latestAnnouncementId = getLatestAnnouncementId()
-		// Update the lastShownAnnouncementId to the current latestAnnouncementId
-		controller.stateManager.setGlobalState("lastShownAnnouncementId", latestAnnouncementId)
+		controller.stateManager.setGlobalStateBatch({
+			lastShownAnnouncementId: latestAnnouncementId,
+			pendingReleaseNotesFromVersion: undefined,
+		})
+		await controller.stateManager.flushPendingState()
 		return Boolean.create({ value: false })
 	} catch (error) {
 		Logger.error("Failed to acknowledge announcement:", error)

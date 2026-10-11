@@ -5,28 +5,28 @@ import { formatResponse } from "@core/formatResponse"
 import { DiracDefaultTool } from "@/shared/tools"
 import { stripHashesFromDiff } from "@utils/line-hashing"
 import type { IToolEnvironment } from "../../interfaces/IToolEnvironment"
+import type { ToolPermissionDisposition } from "../../autoApprove"
 import { PreparedFileBatch } from "./types"
 
-// Manages the user approval flow: auto-approval checks, manual review, and interaction loop.
 export class EditFileApprovalFlow {
 	async handle(
 		env: IToolEnvironment,
 		preparedBatches: PreparedFileBatch[],
 		cards: Record<string, any>,
 	): Promise<{ approved: boolean; userEdits?: Record<string, string>; feedback?: string }> {
-		if (await this.shouldAutoApprove(env, preparedBatches)) return { approved: true }
+		const utilityPermissionHandlingEnabled = env.config.permissionDecisionBinding !== undefined
+		const permissionDisposition = await this.resolvePermissionDisposition(env, preparedBatches)
+		if (permissionDisposition === "auto_approve") return { approved: true }
 
-		// Manual approval path — show review first
-		await this.showReview(env, preparedBatches)
-		await env.editor.scrollToFirstDiff()
+		let reviewShown = false
 
 		while (true) {
-			const totalRequestedEdits = preparedBatches.reduce((acc, b) => acc + b.prepared!.resolvedEdits.length, 0)
+			const totalRequestedEdits = preparedBatches.reduce((acc, batch) => acc + batch.prepared!.resolvedEdits.length, 0)
 			const fileSummary =
 				preparedBatches.length === 1 ? `file ${preparedBatches[0].displayPath}` : `${preparedBatches.length} files`
 			const aggregatedDiffs = preparedBatches
-				.map((b) => stripHashesFromDiff(b.prepared!.diff))
-				.filter((d) => d.trim().length > 0)
+				.map((batch) => stripHashesFromDiff(batch.prepared!.diff))
+				.filter((diff) => diff.trim().length > 0)
 				.join("\n\n")
 
 			const card = await env.ui.createCard({
@@ -35,6 +35,8 @@ export class EditFileApprovalFlow {
 				toolName: DiracDefaultTool.EDIT_FILE,
 				status: CardStatus.WAITING_FOR_INPUT,
 				requireApproval: true,
+				permissionRequestKind:
+					utilityPermissionHandlingEnabled && permissionDisposition === "manual_only" ? "manual_tool" : "tool",
 				collapsed: false,
 				renderType: "diff",
 				body: aggregatedDiffs,
@@ -46,22 +48,27 @@ export class EditFileApprovalFlow {
 					.map((b) => ({ path: b.displayPath, oldText: b.prepared!.content, newText: b.prepared!.finalContent })),
 			})
 
+			// Card creation resolves utility approval before any manual review opens.
+			if (!reviewShown && card.requiresUserInteraction !== false) {
+				await this.showReview(env, preparedBatches)
+				await env.editor.scrollToFirstDiff()
+				reviewShown = true
+			}
+
 			const result = await card.waitForInteraction()
 
-			// VIEW/EDIT — re-show review and loop
 			if (result.action === DiracAskResponse.EDIT || result.action === DiracAskResponse.VIEW) {
 				await card.finalize(CardStatus.CANCELLED)
 				await this.showReview(env, preparedBatches)
 				await env.editor.scrollToFirstDiff()
+				reviewShown = true
 				continue
 			}
-			// UNDO — revert user edits and loop
 			if (result.action === DiracAskResponse.UNDO) {
 				await card.finalize(CardStatus.CANCELLED)
 				await env.editor.undoUserEdits()
 				continue
 			}
-			// MESSAGE — user sent feedback instead of approving
 			if (result.action === DiracAskResponse.MESSAGE) {
 				if (result.text) await env.ui.upsertText(result.text, false, "user")
 				await card.update({ body: `↩ Skipped by user` })
@@ -70,11 +77,11 @@ export class EditFileApprovalFlow {
 				await env.editor.hideReview()
 				return { approved: false, feedback: formatResponse.toolDeniedWithFeedback(result.text || result.value || "") }
 			}
-			// Non-approve — user denied
 			if (result.action !== DiracAskResponse.APPROVE) {
-				await card.update({ body: `- [ ] User denied permission` })
+				const denialBody = `- [ ] User denied permission`
+				await card.update({ body: denialBody })
 				await card.finalize(CardStatus.CANCELLED)
-				await this.finalizeBatchCards(cards, CardStatus.CANCELLED, `- [ ] User denied permission`)
+				await this.finalizeBatchCards(cards, CardStatus.CANCELLED, denialBody)
 				await env.editor.hideReview()
 				return { approved: false }
 			}
@@ -84,34 +91,50 @@ export class EditFileApprovalFlow {
 		}
 	}
 
-	private async shouldAutoApprove(env: IToolEnvironment, batches: PreparedFileBatch[]): Promise<boolean> {
-		if (env.config.isSubagentExecution) return true
-		if (env.config.autoApprover.isUnrestrictedAutoApprove()) return true
+	private async resolvePermissionDisposition(
+		env: IToolEnvironment,
+		batches: PreparedFileBatch[],
+	): Promise<ToolPermissionDisposition> {
+		if (env.config.permissionDecisionBinding === undefined) {
+			if (env.config.isSubagentExecution) return "auto_approve"
+			if (env.config.autoApprover.isUnrestrictedAutoApprove()) return "auto_approve"
+			for (const batch of batches) {
+				const autoApproved = await env.config.callbacks.shouldAutoApproveToolWithPath(
+					DiracDefaultTool.EDIT_FILE,
+					batch.displayPath,
+				)
+				if (!autoApproved) return "manual_only"
+			}
+			return "auto_approve"
+		}
+
+		let disposition: ToolPermissionDisposition = "auto_approve"
 		for (const batch of batches) {
-			const allowed = await env.config.callbacks.shouldAutoApproveToolWithPath(
+			const pathDisposition = await env.config.callbacks.resolveToolPathPermission(
 				DiracDefaultTool.EDIT_FILE,
 				batch.displayPath,
 			)
-			if (!allowed) return false
+			if (pathDisposition === "manual_only") return "manual_only"
+			if (pathDisposition === "utility_eligible") disposition = "utility_eligible"
 		}
-		return true
+		return disposition
 	}
 
 	private async showReview(env: IToolEnvironment, batches: PreparedFileBatch[]): Promise<void> {
 		await env.editor.showReview(
-			batches.map((b) => ({
-				absolutePath: b.absolutePath,
-				displayPath: b.displayPath,
-				content: b.prepared!.finalContent,
-				originalContent: b.prepared!.content,
+			batches.map((batch) => ({
+				absolutePath: batch.absolutePath,
+				displayPath: batch.displayPath,
+				content: batch.prepared!.finalContent,
+				originalContent: batch.prepared!.content,
 			})),
 		)
 	}
 
 	private async finalizeBatchCards(cards: Record<string, any>, status: CardStatus, body: string): Promise<void> {
-		for (const absPath of Object.keys(cards)) {
-			await cards[absPath].update({ body })
-			await cards[absPath].finalize(status)
+		for (const absolutePath of Object.keys(cards)) {
+			await cards[absolutePath].update({ body })
+			await cards[absolutePath].finalize(status)
 		}
 	}
 }

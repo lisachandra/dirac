@@ -1,11 +1,12 @@
-import type { ISystemTrait, SystemCommandResult } from "../../interfaces/IToolEnvironment"
-import type { TaskConfig } from "../../types/TaskConfig"
+import { showSystemNotification } from "@integrations/notifications"
 import { regexSearchFiles } from "@services/ripgrep"
 import { openUrlInBrowser } from "@utils/github-url-utils"
-import { ExtensionRegistryInfo } from "@/registry"
-import { HostProvider } from "@/hosts/host-provider"
 import * as os from "os"
-import { showSystemNotification } from "@integrations/notifications"
+import { HostProvider } from "@/hosts/host-provider"
+import { ExtensionRegistryInfo } from "@/registry"
+import { DiracDefaultTool } from "@/shared/tools"
+import type { ISystemTrait, SystemCommandResult } from "../../interfaces/IToolEnvironment"
+import type { TaskConfig } from "../../types/TaskConfig"
 
 // Builds the system trait — command execution, file search, system info, URL opening.
 export function buildSystemTrait(
@@ -13,18 +14,15 @@ export function buildSystemTrait(
 	executeCommandFn: (command: string, options?: { timeout?: number }) => Promise<SystemCommandResult>,
 ): ISystemTrait {
 	return {
-		executeCommand: executeCommandFn,
-		searchFiles: async (directoryPath, regex, options) => {
-			await options?.debugLog?.({
-				info: "SurfaceAdapter.searchFiles called",
-				cwd: config.cwd,
-				directoryPath,
-				regex,
-				filePattern: options?.filePattern,
-				taskId: config.ulid,
-				contextLines: options?.contextLines,
-				excludeFilePatterns: options?.excludeFilePatterns,
+		executeCommand: async (command, options) => {
+			if (config.mode !== "act") return executeCommandFn(command, options)
+			return config.callbacks.withMutationAuthorization(DiracDefaultTool.BASH, async () => {
+				const result = await executeCommandFn(command, options)
+				if (result.backgroundCompletion) config.callbacks.retainMutationUntil(result.backgroundCompletion)
+				return result
 			})
+		},
+		searchFiles: async (directoryPath, regex, options) => {
 			if (options?.includeAnchors) await config.context.ensureAnchorState()
 			return await regexSearchFiles(
 				config.cwd,
@@ -35,9 +33,9 @@ export function buildSystemTrait(
 				config.ulid,
 				options?.contextLines,
 				options?.excludeFilePatterns,
-				options?.debugLog,
 				options?.includeAnchors,
-				() => config.context.markAnchorStateDirty(),
+				(absolutePath) => config.context.markAnchorStateDirty(absolutePath),
+				options?.signal,
 				options?.noIgnore,
 				options?.allowedNodeModuleScopes,
 			)
@@ -47,14 +45,13 @@ export function buildSystemTrait(
 			const diracVersion = ExtensionRegistryInfo.version
 			const host = await HostProvider.env.getHostVersion({})
 			const systemInfo = `${host.platform}: ${host.version}, Node.js: ${process.version}, Architecture: ${os.arch()}`
-			const apiConfig = config.services.stateManager.getApiConfiguration()
-			const provider = config.mode === "plan" ? apiConfig.planModeApiProvider : apiConfig.actModeApiProvider
+			const provider = config.providerId
 			return {
 				operatingSystem,
 				diracVersion,
 				hostInfo: `${host.platform} ${host.version}`,
 				systemInfo,
-				providerAndModel: `${provider} / ${config.api.getModel().id}`,
+				providerAndModel: `${provider} / ${config.model.id}`,
 			}
 		},
 		openUrl: async (url) => await openUrlInBrowser(url),

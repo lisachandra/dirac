@@ -7,7 +7,6 @@ export const ActionButtonsDecorator: ChatViewDecorator = {
 		<ActionButtons
 			chatState={context.chatState}
 			messageHandlers={context.messageHandlers}
-			messages={context.messages}
 			scrollBehavior={{
 				scrollToBottomSmooth: context.scrollBehavior.scrollToBottomSmooth,
 				scrollToTop: context.scrollBehavior.scrollToTop,

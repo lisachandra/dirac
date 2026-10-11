@@ -286,8 +286,15 @@ const cliConfig: esbuild.BuildOptions = {
 	outfile: path.join(__dirname, "dist", "cli.mjs"),
 	banner: {
 		js: `#!/usr/bin/env node
-// Suppress all Node.js warnings (deprecation, experimental, etc.)
-process.emitWarning = () => {};
+// Node emits this before SymbolIndexDatabase opens its first database. Suppress
+// only that warning; unrelated runtime warnings remain visible.
+const _emitWarning = process.emitWarning.bind(process);
+process.emitWarning = (warning, ...args) => {
+	const message = typeof warning === 'string' ? warning : warning.message;
+	const warningType = typeof args[0] === 'string' ? args[0] : args[0]?.type;
+	if (warningType === 'ExperimentalWarning' && message.startsWith('SQLite is an experimental feature')) return;
+	_emitWarning(warning, ...args);
+};
 import { createRequire as _createRequire } from 'module';
 import { fileURLToPath as _fileURLToPath } from 'url';
 import { dirname as _dirname } from 'path';

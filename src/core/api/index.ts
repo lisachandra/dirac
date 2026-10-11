@@ -1,15 +1,25 @@
-import { ApiConfiguration, getModelInfo, ModelInfo, openAiModelInfoSaneDefaults, QwenApiRegions } from "@shared/api"
-import type { ModelProviderSelection } from "@shared/api"
-import { modelProviderSelectionUpdates } from "./modelProviderSelection"
-import { Mode } from "@shared/storage/types"
+import {
+    ApiConfiguration,
+    type ApiProvider,
+    getModelInfo,
+    ModelInfo,
+    type ModelProviderSelection,
+    modelSupportsInferenceSpeed,
+    openAiModelInfoSaneDefaults,
+    providerSupportsInferenceSpeed,
+    QwenApiRegions,
+} from "@shared/api"
+import { DEFAULT_INFERENCE_SPEED, type InferenceSpeed, isInferenceSpeed, type Mode } from "@shared/storage/types"
 import { DiracStorageMessage } from "@/shared/messages/content"
-import type {
-	ApiConversationCompactionRequest,
-	ApiConversationCompactionResult,
-	ApiConversationRequestOptions,
-} from "./conversation"
 import { Logger } from "@/shared/services/Logger"
 import { DiracTool } from "@/shared/tools"
+import { ApiConfigurationError, ApiConfigurationErrorCode } from "./ApiConfigurationError"
+import type {
+    ApiConversationCompactionRequest,
+    ApiConversationCompactionResult,
+    ApiConversationRequestOptions,
+} from "./conversation"
+import { modelProviderSelectionUpdates } from "./modelProviderSelection"
 import { AIhubmixHandler } from "./providers/aihubmix"
 import { AnthropicHandler } from "./providers/anthropic"
 import { BasetenHandler } from "./providers/baseten"
@@ -50,7 +60,6 @@ import { XAIHandler } from "./providers/xai"
 import { ZAiHandler } from "./providers/zai"
 import { ApiStream, ApiStreamUsageChunk } from "./transform/stream"
 
-import { ApiConfigurationError, ApiConfigurationErrorCode } from "./ApiConfigurationError"
 export { ApiConfigurationError, ApiConfigurationErrorCode } from "./ApiConfigurationError"
 export type {
 	ApiConversationCheckpoint,
@@ -65,6 +74,7 @@ export type CommonApiHandlerOptions = {
 	onRetryAttempt?: ApiConfiguration["onRetryAttempt"]
 	disableRetries?: boolean
 	enableParallelToolCalling?: boolean
+	inferenceSpeed?: InferenceSpeed
 }
 export interface ApiHandler {
 	createMessage(
@@ -75,6 +85,8 @@ export interface ApiHandler {
 	): ApiStream
 	compactConversation?(request: ApiConversationCompactionRequest): Promise<ApiConversationCompactionResult>
 	supportsNativeWebSearch?(): boolean
+	/** Whether Dirac may estimate cost when the provider omits it. Defaults to true. */
+	shouldEstimateCost?(): boolean
 	getModel(): ApiHandlerModel
 	getApiStreamUsage?(): Promise<ApiStreamUsageChunk | undefined>
 	abort?(): void
@@ -104,6 +116,7 @@ export function resolveModeConfig(options: Omit<ApiConfiguration, "apiProvider">
 		apiModelId: isPlan ? options.planModeApiModelId : options.actModeApiModelId,
 		thinkingBudgetTokens: isPlan ? options.planModeThinkingBudgetTokens : options.actModeThinkingBudgetTokens,
 		reasoningEffort: isPlan ? options.planModeReasoningEffort : options.actModeReasoningEffort,
+		inferenceSpeed: isPlan ? options.planModeInferenceSpeed : options.actModeInferenceSpeed,
 		openRouterModelId: isPlan ? options.planModeOpenRouterModelId : options.actModeOpenRouterModelId,
 		openRouterModelInfo: isPlan ? options.planModeOpenRouterModelInfo : options.actModeOpenRouterModelInfo,
 		openAiModelId: isPlan ? options.planModeOpenAiModelId : options.actModeOpenAiModelId,
@@ -151,6 +164,7 @@ const PROVIDER_REGISTRY: Record<
 			apiModelId: mc.apiModelId,
 			thinkingBudgetTokens: mc.thinkingBudgetTokens,
 			reasoningEffort: mc.reasoningEffort,
+			inferenceSpeed: mc.inferenceSpeed,
 		}),
 	openrouter: (cfg, mc) =>
 		new OpenRouterHandler({
@@ -286,6 +300,7 @@ const PROVIDER_REGISTRY: Record<
 			disableRetries: cfg.disableRetries,
 			openAiNativeApiKey: cfg.openAiNativeApiKey,
 			reasoningEffort: mc.reasoningEffort,
+			inferenceSpeed: mc.inferenceSpeed,
 			apiModelId: mc.apiModelId,
 			thinkingBudgetTokens: mc.thinkingBudgetTokens,
 			enableParallelToolCalling: cfg.enableParallelToolCalling,
@@ -295,6 +310,7 @@ const PROVIDER_REGISTRY: Record<
 			onRetryAttempt: cfg.onRetryAttempt,
 			disableRetries: cfg.disableRetries,
 			reasoningEffort: mc.reasoningEffort,
+			inferenceSpeed: mc.inferenceSpeed,
 			apiModelId: mc.apiModelId,
 			enableParallelToolCalling: cfg.enableParallelToolCalling,
 		}),
@@ -304,7 +320,6 @@ const PROVIDER_REGISTRY: Record<
 			disableRetries: cfg.disableRetries,
 			deepSeekApiKey: cfg.deepSeekApiKey,
 			reasoningEffort: mc.reasoningEffort,
-			thinkingBudgetTokens: mc.thinkingBudgetTokens,
 			apiModelId: mc.apiModelId,
 		}),
 	requesty: (cfg, mc) =>
@@ -477,7 +492,7 @@ const PROVIDER_REGISTRY: Record<
 			disableRetries: cfg.disableRetries,
 			zaiApiLine: cfg.zaiApiLine,
 			zaiApiKey: cfg.zaiApiKey,
-			thinkingBudgetTokens: mc.thinkingBudgetTokens,
+			reasoningEffort: mc.reasoningEffort,
 			apiModelId: mc.apiModelId,
 		}),
 	aihubmix: (cfg, mc) =>
@@ -546,6 +561,32 @@ export function validateApiConfiguration(configuration: ApiConfiguration, mode?:
 		const provider = configuredProvider(configuration, selectedMode)
 		assertProviderSupported(provider)
 		const modeConfig = resolveModeConfig(configuration, selectedMode)
+		const configuredInferenceSpeed = modeConfig.inferenceSpeed
+		if (configuredInferenceSpeed !== undefined && !isInferenceSpeed(configuredInferenceSpeed)) {
+			throw new ApiConfigurationError(
+				ApiConfigurationErrorCode.ProviderConfigurationIncomplete,
+				`Invalid inference speed: ${String(configuredInferenceSpeed)}`,
+				"Select Default, Standard, or Fast before retrying.",
+			)
+		}
+		const inferenceSpeed = configuredInferenceSpeed ?? DEFAULT_INFERENCE_SPEED
+		if (inferenceSpeed === "standard" && !providerSupportsInferenceSpeed(provider as ApiProvider)) {
+			throw new ApiConfigurationError(
+				ApiConfigurationErrorCode.ModelUnavailable,
+				`Provider ${provider} does not support inference speed controls`,
+				"Reset inference speed to Default before retrying.",
+			)
+		}
+		if (
+			inferenceSpeed === "fast" &&
+			(!modeConfig.apiModelId || !modelSupportsInferenceSpeed(provider as ApiProvider, modeConfig.apiModelId))
+		) {
+			throw new ApiConfigurationError(
+				ApiConfigurationErrorCode.ModelUnavailable,
+				`Model ${modeConfig.apiModelId || "(unconfigured)"} does not support Fast mode`,
+				"Select a Fast-capable model or reset inference speed to Default.",
+			)
+		}
 		if (
 			provider === "openai" &&
 			modeConfig.openAiProfileName &&
@@ -606,16 +647,21 @@ export function buildApiHandler(configuration: ApiConfiguration, mode: Mode): Ap
 	const apiProvider = (mode === "plan" ? planModeApiProvider : actModeApiProvider) ?? fallbackProvider
 	const handler = createHandlerForProvider(apiProvider, options, mode)
 	const { thinkingBudgetTokens } = resolveModeConfig(options, mode)
-	if (!thinkingBudgetTokens || thinkingBudgetTokens < 0) return handler
+	if (!thinkingBudgetTokens || thinkingBudgetTokens <= 0) return handler
 
-	const maxTokens = handler.getModel().info.maxTokens
-	if (!maxTokens || maxTokens <= 0 || thinkingBudgetTokens <= maxTokens) {
+	const modelInfo = handler.getModel().info
+	const maxBudget = modelInfo.thinkingConfig?.maxBudget
+	const isAnthropicFamily = apiProvider === "anthropic" || apiProvider === "vertex" || apiProvider === "bedrock"
+	const effectiveCap =
+		maxBudget ?? (modelInfo.maxTokens ? (isAnthropicFamily ? modelInfo.maxTokens - 1 : modelInfo.maxTokens) : undefined)
+
+	if (!effectiveCap || thinkingBudgetTokens <= effectiveCap) {
 		return handler
 	}
 
 	const clippedOptions = {
 		...options,
-		[mode === "plan" ? "planModeThinkingBudgetTokens" : "actModeThinkingBudgetTokens"]: maxTokens - 1,
+		[mode === "plan" ? "planModeThinkingBudgetTokens" : "actModeThinkingBudgetTokens"]: effectiveCap,
 	}
 	return createHandlerForProvider(apiProvider, clippedOptions, mode)
 }
@@ -636,7 +682,7 @@ export function createApiConfigurationForModelProviderSelection(
 ): ApiConfiguration {
 	return {
 		...baseConfiguration,
-		...modelProviderSelectionUpdates("act", selection),
+		...modelProviderSelectionUpdates("act", selection, baseConfiguration.actModeInferenceSpeed),
 		apiProvider: selection.provider,
 		ulid: options.ulid,
 		disableRetries: true,
@@ -655,4 +701,44 @@ export function buildApiHandlerForSelection(
 	options: ApiHandlerForSelectionOptions = {},
 ): ApiHandler {
 	return buildApiHandler(createApiConfigurationForModelProviderSelection(baseConfiguration, selection, options), "act")
+}
+
+/**
+ * Resolves a provider/model candidate through the same handler construction used
+ * for inference. Static handlers return their declared default when the
+ * candidate is incompatible; dynamic handlers preserve accepted IDs.
+ */
+export function resolveModelIdForProvider(
+	baseConfiguration: ApiConfiguration,
+	provider: ApiProvider,
+	modelId: string,
+	mode: Mode = "act",
+): string {
+	const configuredProvider = mode === "plan" ? baseConfiguration.planModeApiProvider : baseConfiguration.actModeApiProvider
+	const selection: ModelProviderSelection = { provider, modelId }
+	if (provider === "bedrock" && configuredProvider === "bedrock") {
+		selection.awsBedrockCustomSelected =
+			mode === "plan"
+				? baseConfiguration.planModeAwsBedrockCustomSelected
+				: baseConfiguration.actModeAwsBedrockCustomSelected
+		selection.awsBedrockCustomModelBaseId =
+			mode === "plan"
+				? baseConfiguration.planModeAwsBedrockCustomModelBaseId
+				: baseConfiguration.actModeAwsBedrockCustomModelBaseId
+	}
+
+	const configuration = {
+		...baseConfiguration,
+		...modelProviderSelectionUpdates(
+			mode,
+			selection,
+			mode === "plan" ? baseConfiguration.planModeInferenceSpeed : baseConfiguration.actModeInferenceSpeed,
+		),
+		apiProvider: provider,
+		disableRetries: true,
+		geminiSearchEnabled: false,
+		enableParallelToolCalling: false,
+		onRetryAttempt: undefined,
+	}
+	return buildApiHandler(configuration, mode).getModel().id
 }

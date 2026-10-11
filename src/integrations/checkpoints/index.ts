@@ -25,7 +25,7 @@ interface CheckpointManagerTask {
 	readonly taskId: string
 }
 interface CheckpointManagerConfig {
-	readonly enableCheckpoints: boolean
+	enableCheckpoints: boolean
 }
 interface CheckpointManagerServices {
 	readonly fileContextTracker: FileContextTracker
@@ -124,6 +124,17 @@ export class TaskCheckpointManager implements ICheckpointManager {
 		)
 	}
 
+	setEnabled(enabled: boolean): void {
+		this.config.enableCheckpoints = enabled
+		this.storage.setEnabled(enabled)
+		this.restoreHandler.setEnabled(enabled)
+		this.diffPresenter.setEnabled(enabled)
+	}
+
+	isEnabled(): boolean {
+		return this.config.enableCheckpoints
+	}
+
 	/** Creates a checkpoint of the current workspace state */
 	async saveCheckpoint(isAttemptCompletionMessage = false, completionMessageId?: string): Promise<void> {
 		try {
@@ -133,11 +144,13 @@ export class TaskCheckpointManager implements ICheckpointManager {
 			)
 				return
 
-			// Set isCheckpointCheckedOut to false for all messages with checkpoint hashes
+			// Checkpoint creation is an explicit boundary, so clearing prior selections may scan checkpoint rows.
 			const diracMessages = this.services.messageStateHandler.getDiracMessages()
-			diracMessages.forEach((message) => {
-				if (message.lastCheckpointHash) message.isCheckpointCheckedOut = false
-			})
+			for (const message of diracMessages) {
+				if (message.lastCheckpointHash && message.isCheckpointCheckedOut) {
+					await this.services.messageStateHandler.patchMessageById(message.id, { isCheckpointCheckedOut: false })
+				}
+			}
 
 			// Initialize tracker if needed (non-attempt: only first time; attempt: one last chance)
 			if (
@@ -164,15 +177,14 @@ export class TaskCheckpointManager implements ICheckpointManager {
 
 				// Create a new checkpoint message and asynchronously add the commitHash
 				const cardHandle = await this.callbacks.taskMessenger.createCheckpoint()
-				const targetMessage = this.services.messageStateHandler.getDiracMessages().find((m) => m.id === cardHandle.id)
-				if (targetMessage) {
+				if (this.services.messageStateHandler.getMessageById(cardHandle.id)) {
 					// Optimization: Background commit
 					this.storage
 						.getTracker()
 						?.commit()
 						.then(async (commitHash) => {
 							if (commitHash) {
-								targetMessage.lastCheckpointHash = commitHash
+								await this.services.messageStateHandler.patchMessageById(cardHandle.id, { lastCheckpointHash: commitHash })
 								await this.services.messageStateHandler.saveDiracMessagesAndUpdateHistory()
 							}
 						})
@@ -198,15 +210,12 @@ export class TaskCheckpointManager implements ICheckpointManager {
 				// Commit then update the completion_result message with the checkpoint hash
 				const commitHash = await this.storage.getTracker()?.commit()
 				if (completionMessageId) {
-					const targetMessage = this.services.messageStateHandler
-						.getDiracMessages()
-						.find((m) => m.id === completionMessageId)
-					if (targetMessage) {
-						targetMessage.lastCheckpointHash = commitHash
+					if (this.services.messageStateHandler.getMessageById(completionMessageId)) {
+						await this.services.messageStateHandler.patchMessageById(completionMessageId, { lastCheckpointHash: commitHash })
 						await this.services.messageStateHandler.saveDiracMessagesAndUpdateHistory()
 					}
 				} else if (lastCompletionResultMessage) {
-					lastCompletionResultMessage.lastCheckpointHash = commitHash
+					await this.services.messageStateHandler.patchMessageById(lastCompletionResultMessage.id, { lastCheckpointHash: commitHash })
 					await this.services.messageStateHandler.saveDiracMessagesAndUpdateHistory()
 				}
 			}

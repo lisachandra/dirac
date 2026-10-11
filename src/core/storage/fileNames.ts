@@ -1,9 +1,16 @@
 // Central registry of well-known file and directory names used across disk storage.
 export const GlobalFileNames = {
 	apiConversationHistory: "api_conversation_history.json",
+	apiConversationHistoryBaseline: "api_conversation_history.baseline.jsonl",
+	apiConversationHistoryOperations: "api_conversation_history.jsonl",
 	apiConversationProviderState: "api_conversation_provider_state.json",
 	contextHistory: "context_history.json",
 	uiMessages: "ui_messages.json",
+	uiMessagesBaseline: "ui_messages.baseline.jsonl",
+	uiMessageOperations: "ui_messages.jsonl",
+	toolContext: "tool_context.json",
+	toolContextBaseline: "tool_context.baseline.jsonl",
+	toolContextOperations: "tool_context.jsonl",
 	diracRecommendedModels: "dirac_recommended_models.json",
 	openRouterModels: "openrouter_models.json",
 	vercelAiGatewayModels: "vercel_ai_gateway_models.json",

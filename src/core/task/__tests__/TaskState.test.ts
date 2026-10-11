@@ -17,6 +17,11 @@ describe("TaskState", () => {
 		assert.equal(state.apiErrorRetryAttempts, 0)
 		assert.equal(state.emptyResponseRetryAttempts, 0)
 		assert.equal(state.totalCost, 0)
+		assert.equal(state.utilityPermissionInputTokens, 0)
+		assert.equal(state.utilityPermissionOutputTokens, 0)
+		assert.equal(state.utilityPermissionCacheWriteTokens, 0)
+		assert.equal(state.utilityPermissionCacheReadTokens, 0)
+		assert.equal(state.utilityPermissionCost, 0)
 		assert.equal(state.totalInputTokens, 0)
 		assert.equal(state.totalOutputTokens, 0)
 		assert.equal(state.totalCacheWriteTokens, 0)
@@ -112,7 +117,13 @@ describe("TaskState", () => {
 
 	it("accumulates steering messages", () => {
 		const state = new TaskState()
-		state.steeringMessages.push({ id: "s1", text: "steer", createdAt: 1, transcriptMessageId: "m1", deliveryState: SteeringDeliveryState.QUEUED })
+		state.steeringMessages.push({
+			id: "s1",
+			text: "steer",
+			createdAt: 1,
+			transcriptMessageId: "m1",
+			deliveryState: SteeringDeliveryState.QUEUED,
+		})
 		assert.equal(state.steeringMessages.length, 1)
 		assert.equal(state.steeringMessages[0].text, "steer")
 	})

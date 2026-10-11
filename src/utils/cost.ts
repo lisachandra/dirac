@@ -1,4 +1,63 @@
-import { ModelInfo } from "@shared/api"
+import { hasPricing, type ModelInfo, type ModelPricing, type UtcWeekday } from "@shared/api"
+import type { InferenceSpeed } from "@shared/storage/types"
+
+const UTC_WEEKDAYS: readonly UtcWeekday[] = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"]
+
+export function getModelPricingForDate(modelInfo: ModelInfo, date: Date = new Date()): ModelPricing {
+	const schedule = modelInfo.pricingSchedule
+	const weekday = UTC_WEEKDAYS[date.getUTCDay()]
+	const minuteUtc = date.getUTCHours() * 60 + date.getUTCMinutes()
+	const period = schedule?.periods.find(
+		(candidate) =>
+			weekday !== undefined &&
+			candidate.weekdays.includes(weekday) &&
+			minuteUtc >= candidate.startMinuteUtc &&
+			minuteUtc < candidate.endMinuteUtc,
+	)
+
+	return {
+		inputPrice: period?.prices.inputPrice ?? modelInfo.inputPrice,
+		outputPrice: period?.prices.outputPrice ?? modelInfo.outputPrice,
+		cacheWritesPrice: period?.prices.cacheWritesPrice ?? modelInfo.cacheWritesPrice,
+		cacheReadsPrice: period?.prices.cacheReadsPrice ?? modelInfo.cacheReadsPrice,
+	}
+}
+export function getModelInfoForInferenceSpeed(modelInfo: ModelInfo, speed?: InferenceSpeed): ModelInfo {
+	const multiplier = speed === "fast" ? modelInfo.fastModePriceMultiplier : undefined
+	if (!multiplier || multiplier === 1) return modelInfo
+	const scale = (price: number | undefined) => (price === undefined ? undefined : price * multiplier)
+	return {
+		...modelInfo,
+		inputPrice: scale(modelInfo.inputPrice),
+		outputPrice: scale(modelInfo.outputPrice),
+		cacheWritesPrice: scale(modelInfo.cacheWritesPrice),
+		cacheReadsPrice: scale(modelInfo.cacheReadsPrice),
+		pricingSchedule: modelInfo.pricingSchedule
+			? {
+					...modelInfo.pricingSchedule,
+					periods: modelInfo.pricingSchedule.periods.map((period) => ({
+						...period,
+						prices: {
+							inputPrice: scale(period.prices.inputPrice),
+							outputPrice: scale(period.prices.outputPrice),
+							cacheWritesPrice: scale(period.prices.cacheWritesPrice),
+							cacheReadsPrice: scale(period.prices.cacheReadsPrice),
+						},
+					})),
+				}
+			: undefined,
+		tiers: modelInfo.tiers?.map((tier) => ({
+			...tier,
+			inputPrice: scale(tier.inputPrice),
+			outputPrice: scale(tier.outputPrice),
+			cacheWritesPrice: scale(tier.cacheWritesPrice),
+			cacheReadsPrice: scale(tier.cacheReadsPrice),
+		})),
+		thinkingConfig: modelInfo.thinkingConfig
+			? { ...modelInfo.thinkingConfig, outputPrice: scale(modelInfo.thinkingConfig.outputPrice) }
+			: undefined,
+	}
+}
 
 function calculateApiCostInternal(
 	modelInfo: ModelInfo,
@@ -6,17 +65,22 @@ function calculateApiCostInternal(
 	outputTokens: number,
 	cacheCreationInputTokens: number,
 	cacheReadInputTokens: number,
-	totalInputTokensForPricing?: number, // The *total* input tokens, used for tiered pricing lookup
-	thinkingBudgetTokens?: number, // Add thinking budget info
-	reasoningTokens?: number,
-): number {
+	totalInputTokensForPricing: number | undefined, // The *total* input tokens, used for tiered pricing lookup
+	thinkingBudgetTokens: number | undefined, // Add thinking budget info
+	reasoningTokens: number | undefined,
+	pricingDate: Date,
+): number | undefined {
+	// No pricing data at all → cost is unknown, not zero
+	if (!hasPricing(modelInfo)) return undefined
+
 	const usedThinkingBudget = thinkingBudgetTokens && thinkingBudgetTokens > 0
 
-	// Default prices
-	let effectiveInputPrice = modelInfo.inputPrice || 0
-	let effectiveOutputPrice = modelInfo.outputPrice || 0
-	let effectiveCacheReadsPrice = modelInfo.cacheReadsPrice || 0
-	let effectiveCacheWritesPrice = modelInfo.cacheWritesPrice || 0
+	// Default prices, with any active time-based period applied first.
+	const pricing = getModelPricingForDate(modelInfo, pricingDate)
+	let effectiveInputPrice = pricing.inputPrice ?? 0
+	let effectiveOutputPrice = pricing.outputPrice ?? 0
+	let effectiveCacheReadsPrice = pricing.cacheReadsPrice ?? 0
+	let effectiveCacheWritesPrice = pricing.cacheWritesPrice ?? 0
 
 	// Handle tiered pricing if available
 	if (modelInfo.tiers && modelInfo.tiers.length > 0 && totalInputTokensForPricing !== undefined) {
@@ -73,7 +137,8 @@ export function calculateApiCostAnthropic(
 	cacheReadInputTokens?: number,
 	thinkingBudgetTokens?: number,
 	reasoningTokens?: number,
-): number {
+	pricingDate: Date = new Date(),
+): number | undefined {
 	const cacheCreationInputTokensNum = cacheCreationInputTokens || 0
 	const cacheReadInputTokensNum = cacheReadInputTokens || 0
 	// Anthropic style: inputTokens already represents the total, so pass it directly for tiered pricing lookup if needed
@@ -88,6 +153,7 @@ export function calculateApiCostAnthropic(
 		inputTokens + cacheCreationInputTokensNum + cacheReadInputTokensNum, // used for tiered price lookup
 		thinkingBudgetTokens,
 		reasoningTokens,
+		pricingDate,
 	)
 }
 
@@ -100,7 +166,8 @@ export function calculateApiCostOpenAI(
 	cacheReadInputTokens?: number,
 	thinkingBudgetTokens?: number, // Pass thinking budget info
 	reasoningTokens?: number,
-): number {
+	pricingDate: Date = new Date(),
+): number | undefined {
 	const cacheCreationInputTokensNum = cacheCreationInputTokens || 0
 	const cacheReadInputTokensNum = cacheReadInputTokens || 0
 	// Calculate non-cached tokens for the internal function's 'inputTokens' parameter
@@ -115,6 +182,7 @@ export function calculateApiCostOpenAI(
 		inputTokens,
 		thinkingBudgetTokens,
 		reasoningTokens,
+		pricingDate,
 	)
 }
 
@@ -127,7 +195,8 @@ export function calculateApiCostQwen(
 	cacheReadInputTokens?: number,
 	thinkingBudgetTokens?: number,
 	reasoningTokens?: number,
-): number {
+	pricingDate: Date = new Date(),
+): number | undefined {
 	const cacheCreationInputTokensNum = cacheCreationInputTokens || 0
 	const cacheReadInputTokensNum = cacheReadInputTokens || 0
 	// Calculate non-cached tokens for the internal function's 'inputTokens' parameter
@@ -142,5 +211,6 @@ export function calculateApiCostQwen(
 		inputTokens,
 		thinkingBudgetTokens,
 		reasoningTokens,
+		pricingDate,
 	)
 }

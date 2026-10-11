@@ -5,7 +5,8 @@ import { CardStatus } from "@/shared/ExtensionMessage"
 import { DiracIcon } from "@/shared/icons"
 import { DiracDefaultTool, DiracToolSpec } from "@/shared/tools"
 import { IDiracTool } from "../../interfaces/IDiracTool"
-import { IToolEnvironment } from "../../interfaces/IToolEnvironment"
+import type { IToolEnvironment, SaveResult } from "../../interfaces/IToolEnvironment"
+import type { ToolPermissionDisposition } from "../../autoApprove"
 import { SurfaceType } from "../../interfaces/SurfaceType"
 import { captureAccepted, captureRejected, getModelInfo } from "../../utils/AiOutputTelemetry"
 import { applyModelContentFixes } from "../../utils/ModelContentProcessor"
@@ -49,7 +50,12 @@ export abstract class BaseWriteFileTool implements IDiracTool<WriteFileArgs> {
 			}
 
 			// 4. Handle approval and save
-			const shouldAutoApprove = await env.config.callbacks.shouldAutoApproveToolWithPath(toolId, relPath)
+			const utilityPermissionHandlingEnabled = env.config.permissionDecisionBinding !== undefined
+			const permissionDisposition = utilityPermissionHandlingEnabled
+				? await env.config.callbacks.resolveToolPathPermission(toolId, relPath)
+				: (await env.config.callbacks.shouldAutoApproveToolWithPath(toolId, relPath))
+					? "auto_approve"
+					: "manual_only"
 			const saveResult = await this.awaitApprovalThenWriteFile(
 				env,
 				absolutePath,
@@ -57,14 +63,22 @@ export abstract class BaseWriteFileTool implements IDiracTool<WriteFileArgs> {
 				content,
 				fileExists,
 				originalContent,
-				shouldAutoApprove,
+				permissionDisposition,
+				utilityPermissionHandlingEnabled,
 				card,
 			)
 
 			if (typeof saveResult === "string") return saveResult // Denied with feedback or error
 
 			// 5. Finalize results
-			return await this.finalizeResults(env, absolutePath, relPath, fileExists, saveResult, shouldAutoApprove)
+			return await this.finalizeResults(
+				env,
+				absolutePath,
+				relPath,
+				fileExists,
+				saveResult,
+				permissionDisposition === "auto_approve",
+			)
 		} catch (error) {
 			return await this.finalizeCardWithError(error, env, card)
 		}
@@ -117,7 +131,7 @@ export abstract class BaseWriteFileTool implements IDiracTool<WriteFileArgs> {
 			absolutePath,
 			displayPath,
 			fileExists: fileInfo.exists,
-			originalContent: fileInfo.exists ? await env.workspace.readFile(absolutePath) : "",
+			originalContent: fileInfo.exists ? await env.editor.readText(absolutePath) : "",
 		}
 	}
 
@@ -143,100 +157,89 @@ export abstract class BaseWriteFileTool implements IDiracTool<WriteFileArgs> {
 		content: string,
 		fileExists: boolean,
 		originalContent: string,
-		shouldAutoApprove: boolean,
+		permissionDisposition: ToolPermissionDisposition,
+		utilityPermissionHandlingEnabled: boolean,
 		card?: any,
-	): Promise<any | string> {
+	): Promise<SaveResult | string> {
 		const toolId = this.spec().id
 		const { modelId, providerId } = getModelInfo(env.config)
-		let saveResult: any
+		let reviewShown = false
+		let approvedContent = content
 
-		if (shouldAutoApprove) {
-			if (card) {
-				await card.update({
-					status: CardStatus.RUNNING,
-					body: `${fileExists ? "Updating" : "Creating"} file...`,
-				})
-			}
-
-			if (env.config.backgroundEditEnabled) {
-				saveResult = await env.editor.applyAndSaveSilently(absolutePath, content)
-			} else {
-				await env.editor.open(absolutePath)
-				await env.editor.update(content, true)
-				saveResult = await env.editor.saveChanges()
-			}
-
-			if (card) {
-				await card.update({
-					header: `Wrote ${displayPath}`,
-					body: `✓ Successfully wrote to ${displayPath}`,
-					diffs: [{ path: displayPath, oldText: originalContent, newText: saveResult.content }],
-				})
-				await card.finalize(CardStatus.SUCCESS)
-			}
-
-			captureAccepted({
-				ulid: env.config.ulid,
-				tool: toolId,
-				source: "agent",
-				beforeContent: originalContent,
-				afterContent: content,
-				providerId,
-				modelId,
-				filesCreated: fileExists ? 0 : 1,
-			})
-		} else {
+		try {
 			if (card) {
 				await card.update({ status: CardStatus.RUNNING })
 			}
 
-			const permissionMessage = `Dirac wants to ${fileExists ? "edit" : "create"} ${displayPath}`
-			const result = await env.interaction.askPermission(permissionMessage, {
-				diffs: [{ path: displayPath, oldText: originalContent, newText: content }],
-				rawInput: { path: displayPath, content },
-			})
-			const { approved, value: reason } = result
-
-			if (result.action === DiracAskResponse.MESSAGE) {
-				if (result.text) {
-					await env.ui.upsertText(result.text, false, "user")
-				}
-				await result.card.finalize(CardStatus.SKIPPED)
-				if (card) {
-					await card.update({ body: `- [ ] Skipped — user sent a message instead` })
-					await card.finalize(CardStatus.SKIPPED)
-				}
-				return formatResponse.toolDeniedWithFeedback(result.text || reason || "")
-			}
-
-			await result.card.finalize(approved ? CardStatus.SUCCESS : CardStatus.CANCELLED)
-
-			if (!approved) {
-				if (card) {
-					await card.update({
-						body: `- [ ] User denied permission${reason ? `: ${reason}` : ""}`,
-					})
-					await card.finalize(CardStatus.CANCELLED)
-				}
-
-				captureRejected({
-					ulid: env.config.ulid,
-					tool: toolId,
-					source: "agent",
-					beforeContent: originalContent,
-					afterContent: content,
-					providerId,
-					modelId,
-					filesCreated: fileExists ? 0 : 1,
+			if (permissionDisposition !== "auto_approve") {
+				const permissionCard = await env.ui.createCard({
+					header: "Permission Request",
+					body: `Dirac wants to ${fileExists ? "edit" : "create"} ${displayPath}`,
+					status: CardStatus.WAITING_FOR_INPUT,
+					requireApproval: true,
+					permissionRequestKind:
+						utilityPermissionHandlingEnabled && permissionDisposition === "manual_only" ? "manual_tool" : "tool",
+					collapsed: false,
+					renderType: "diff",
+					diffs: [{ path: displayPath, oldText: originalContent, newText: content }],
+					rawInput: { path: displayPath, content },
 				})
 
-				return reason ? formatResponse.toolDeniedWithFeedback(reason) : formatResponse.toolDenied()
+				// Resolve automatic approval before opening the manual review.
+				if (permissionCard.requiresUserInteraction !== false) {
+					reviewShown = true
+					await env.editor.showReview([{ absolutePath, displayPath, content, originalContent }])
+					await env.editor.scrollToFirstDiff()
+				}
+
+				const result = await permissionCard.waitForInteraction()
+				const approved = result.action === DiracAskResponse.APPROVE
+				const reason = result.value
+
+				if (result.action === DiracAskResponse.MESSAGE) {
+					if (result.text) await env.ui.upsertText(result.text, false, "user")
+					await permissionCard.finalize(CardStatus.SKIPPED)
+					if (card) {
+						await card.update({ body: "- [ ] Skipped — user sent a message instead" })
+						await card.finalize(CardStatus.SKIPPED)
+					}
+					return formatResponse.toolDeniedWithFeedback(result.text || reason || "")
+				}
+
+				await permissionCard.finalize(approved ? CardStatus.SUCCESS : CardStatus.CANCELLED)
+				if (!approved) {
+					if (card) {
+						await card.update({ body: `- [ ] User denied permission${reason ? `: ${reason}` : ""}` })
+						await card.finalize(CardStatus.CANCELLED)
+					}
+					captureRejected({
+						ulid: env.config.ulid,
+						tool: toolId,
+						source: "agent",
+						beforeContent: originalContent,
+						afterContent: content,
+						providerId,
+						modelId,
+						filesCreated: fileExists ? 0 : 1,
+					})
+					return reason ? formatResponse.toolDeniedWithFeedback(reason) : formatResponse.toolDenied()
+				}
+				approvedContent = result.userEdits?.[displayPath] ?? result.userEdits?.[absolutePath] ?? content
+			} else if (card) {
+				await card.update({ body: `${fileExists ? "Updating" : "Creating"} file...` })
 			}
 
-			await env.editor.open(absolutePath)
-			await env.editor.update(content, true)
-			await env.editor.scrollToFirstDiff()
-			saveResult = await env.editor.saveChanges()
+			env.config.callbacks.assertMutationAuthorized(toolId)
+			let saveResult: SaveResult
+			if (reviewShown || env.config.backgroundEditEnabled) {
+				saveResult = await env.editor.applyAndSaveSilently(absolutePath, approvedContent, fileExists ? "modify" : "create")
+			} else {
+				await env.editor.open(absolutePath, { editType: fileExists ? "modify" : "create" })
+				await env.editor.update(approvedContent, true)
+				if (permissionDisposition !== "auto_approve") await env.editor.scrollToFirstDiff()
+				saveResult = await env.editor.saveChanges()
+			}
+			if (approvedContent !== content) saveResult = { ...saveResult, userEdits: true }
 
 			if (card) {
 				await card.update({
@@ -246,7 +249,6 @@ export abstract class BaseWriteFileTool implements IDiracTool<WriteFileArgs> {
 				})
 				await card.finalize(CardStatus.SUCCESS)
 			}
-
 			captureAccepted({
 				ulid: env.config.ulid,
 				tool: toolId,
@@ -257,9 +259,10 @@ export abstract class BaseWriteFileTool implements IDiracTool<WriteFileArgs> {
 				modelId,
 				filesCreated: fileExists ? 0 : 1,
 			})
+			return saveResult
+		} finally {
+			if (reviewShown) await env.editor.hideReview()
 		}
-
-		return saveResult
 	}
 
 	private async finalizeResults(
@@ -267,14 +270,15 @@ export abstract class BaseWriteFileTool implements IDiracTool<WriteFileArgs> {
 		absolutePath: string,
 		relPath: string,
 		fileExists: boolean,
-		saveResult: any,
+		saveResult: SaveResult,
 		shouldAutoApprove: boolean,
 	) {
 		const toolId = this.spec().id
 		await env.editor.reset()
 		await env.diagnostics.prepare([absolutePath])
 		const diagnostics = await env.diagnostics.getRaw([absolutePath])
-		const newProblemsMessage = diagnostics.length > 0 ? `Found ${diagnostics.length} problems in ${relPath}` : undefined
+		const problemCount = diagnostics.reduce((count, file) => count + file.diagnostics.length, 0)
+		const newProblemsMessage = problemCount > 0 ? `Diagnostics: ${problemCount} problem(s) in ${relPath}.` : undefined
 
 		env.telemetry.captureCustomMetadata({
 			toolId,
@@ -289,14 +293,14 @@ export abstract class BaseWriteFileTool implements IDiracTool<WriteFileArgs> {
 			return formatResponse.fileEditWithUserChanges(
 				relPath,
 				"User made manual changes in the editor.",
-				saveResult.autoFormatting ? "Auto-formatting applied." : undefined,
+				saveResult.autoFormatting ? "Applied by the editor." : undefined,
 				newProblemsMessage,
 			)
 		}
 
 		return formatResponse.fileEditWithoutUserChanges(
 			relPath,
-			saveResult.autoFormatting ? "Auto-formatting applied." : undefined,
+			saveResult.autoFormatting ? "Applied by the editor." : undefined,
 			newProblemsMessage,
 		)
 	}
@@ -334,7 +338,6 @@ export const write_to_file_spec: DiracToolSpec = {
 		},
 	],
 }
-
 
 export class WriteToFileTool extends BaseWriteFileTool {
 	spec(): DiracToolSpec {

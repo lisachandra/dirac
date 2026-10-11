@@ -1,5 +1,5 @@
 import type { Controller } from "@/core/controller"
-import type { OpenaiReasoningEffort } from "@/shared/storage/types"
+import type { InferenceSpeed, OpenaiReasoningEffort } from "@/shared/storage/types"
 
 export enum CliPanelType {
 	SETTINGS = "settings",
@@ -26,6 +26,7 @@ export interface TaskOptions {
 	config?: string
 	thinking?: boolean | string | number
 	reasoningEffort?: OpenaiReasoningEffort
+	speed?: InferenceSpeed
 	maxConsecutiveMistakes?: string | number
 	apiErrorMaxRetries?: string | number
 	yolo?: boolean
@@ -39,7 +40,10 @@ export interface TaskOptions {
 	hooksDir?: string
 	subagents?: boolean
 	headers?: string
-	noIndex?: boolean
+	enableTool?: string[]
+	disableTool?: string[]
+	onlyTools?: string[]
+	index?: boolean
 
 	noEmoji?: boolean
 	format?: "json" | "ansi" | "plain"
@@ -59,5 +63,5 @@ export interface InitOptions {
 	hooksDir?: string
 	verbose?: boolean
 	enableAuth?: boolean
-	noIndex?: boolean
+	index?: boolean
 }

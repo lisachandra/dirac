@@ -1,12 +1,12 @@
-import type { DiracMessage } from "@shared/ExtensionMessage"
 import { DiracAskResponse } from "@shared/WebviewMessage"
 import { memo } from "react"
 import { cn } from "@/lib/utils"
+import { useChatStore } from "@/features/chat/store/chatStore"
 import type { MessageHandlers } from "../types/chatTypes"
 import ChatRow from "./ChatRow"
 
 interface MessageRendererProps {
-	message: DiracMessage
+	messageId: string
 	isLastMessage: boolean
 	expandedRows: Record<string, boolean>
 	onToggleExpand: (id: string) => void
@@ -19,7 +19,7 @@ interface MessageRendererProps {
 /** Renders one virtualized protocol message. */
 export const MessageRenderer = memo(
 	({
-		message,
+		messageId,
 		isLastMessage,
 		expandedRows,
 		onToggleExpand,
@@ -28,6 +28,11 @@ export const MessageRenderer = memo(
 		activeCardId,
 		activeVoiceStreamId,
 	}: MessageRendererProps) => {
+		const message = useChatStore((state) => {
+			const index = state.messageIndexById.get(messageId)
+			return index === undefined ? undefined : state.diracMessages[index]
+		})
+		if (!message) return null
 		return (
 			<div
 				className={cn({

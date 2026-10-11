@@ -34,10 +34,7 @@ function detectColorFgBg(value: string | undefined): TerminalColorMode | null {
  * Resolve terminal colors without sending terminal queries. COLORFGBG is used
  * when the terminal provides it; otherwise the established dark palette wins.
  */
-export function resolveTerminalColorMode(
-	env: NodeJS.ProcessEnv = process.env,
-	savedPreference?: string,
-): TerminalColorMode {
+export function resolveTerminalColorMode(env: NodeJS.ProcessEnv = process.env, savedPreference?: string): TerminalColorMode {
 	const environmentPreference = env.DIRAC_COLOR_MODE?.trim().toLowerCase()
 	if (environmentPreference === TerminalColorPreference.LIGHT) return TerminalColorMode.LIGHT
 	if (environmentPreference === TerminalColorPreference.DARK) return TerminalColorMode.DARK
@@ -191,6 +188,16 @@ function createTheme(mode: TerminalColorMode) {
 			skipped: selectedTheme.muted,
 			abandoned: selectedTheme.muted,
 			default: selectedTheme.muted,
+		},
+		symbols: {
+			active: "●",
+			inactive: "○",
+			success: "✓",
+			failure: "×",
+			warning: "!",
+			collapsed: "▸",
+			expanded: "▾",
+			separator: "·",
 		},
 		dimText: selectedTheme.muted,
 		costWarning: 1,
@@ -353,10 +360,7 @@ export const ansi = createAnsi(terminalColorMode)
 export const styles = createStyles(theme)
 
 /** Configure the process-wide CLI palette after persisted settings are loaded. */
-export function configureTerminalTheme(
-	savedPreference?: string,
-	env: NodeJS.ProcessEnv = process.env,
-): TerminalColorMode {
+export function configureTerminalTheme(savedPreference?: string, env: NodeJS.ProcessEnv = process.env): TerminalColorMode {
 	terminalColorMode = resolveTerminalColorMode(env, savedPreference)
 	const nextTheme = createTheme(terminalColorMode)
 	const existingStatus = theme.status

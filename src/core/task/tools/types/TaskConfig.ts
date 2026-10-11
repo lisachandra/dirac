@@ -1,36 +1,41 @@
-import type { ApiHandler } from "@core/api"
+import type { ApiConversationRequestOptions, ApiHandlerModel } from "@core/api"
+import type { ApiStream } from "@core/api/transform/stream"
 import type { FileContextTracker } from "@core/context/context-tracking/FileContextTracker"
 import type { DiracIgnoreController } from "@core/ignore/DiracIgnoreController"
-import type { IDiracContext } from "../interfaces/IDiracContext"
 import type { CommandPermissionController } from "@core/permissions"
+import type { PermissionDecisionServiceBinding } from "@core/permissions/UtilityPermissionDecisionService"
+import type { BuildUtilityModelRunnerOptions, UtilityModelRunner } from "@core/utility-model/UtilityModelRunner"
 import type { DiffViewProvider } from "@integrations/editor/DiffViewProvider"
 import type { CommandExecutionOptions, CommandExecutionResult } from "@integrations/terminal"
 import type { BrowserSession } from "@services/browser/BrowserSession"
 import type { UrlContentFetcher } from "@services/browser/UrlContentFetcher"
 import type { AutoApprovalSettings } from "@shared/AutoApprovalSettings"
+import type { ModelProviderSelection } from "@shared/api"
 import type { BrowserSettings } from "@shared/BrowserSettings"
 import type { DiracMessage } from "@shared/ExtensionMessage"
-
-import type { DiracContent } from "@shared/messages/content"
+import type { DiracContent, DiracStorageMessage } from "@shared/messages/content"
 import type { Mode } from "@shared/storage/types"
-import type { DiracDefaultTool, DiracToolSpec } from "@shared/tools"
+import type { SubagentIdentity } from "@shared/subagents"
+import type { DiracDefaultTool, DiracTool, DiracToolSpec } from "@shared/tools"
 import { WorkspaceRootManager } from "@/core/workspace"
 import type { ContextManager } from "../../../context/context-management/ContextManager"
-import type { StateManager } from "../../../storage/StateManager"
 import type { MessageStateHandler } from "../../message-state"
+import { TaskMessenger } from "../../TaskMessenger"
 import type { TaskState } from "../../TaskState"
+import type { DeepReadonly } from "../../runtime/TaskWorkingConfiguration"
 import type { AutoApprove } from "../../tools/autoApprove"
 import type { HookExecution } from "../../types/HookExecution"
-import type { ToolExecutorCoordinator } from "../ToolExecutorCoordinator"
+import type { IDiracContext } from "../interfaces/IDiracContext"
 import type { ToolRequestSnapshot } from "../runtime/ToolSnapshot"
+import type { ToolExecutorCoordinator } from "../ToolExecutorCoordinator"
 import { TASK_CALLBACKS_KEYS, TASK_CONFIG_KEYS, TASK_SERVICES_KEYS } from "../utils/ToolConstants"
-import { TaskMessenger } from "../../TaskMessenger"
-import type { SubagentIdentity } from "@shared/subagents"
+import type { TaskExecutionProfile } from "../../TaskExecutionProfile"
 
 /**
  * Strongly-typed configuration object passed to tool handlers
  */
 export interface TaskConfig {
+	executionProfile: TaskExecutionProfile
 	// Core identifiers
 	taskId: string
 	ulid: string
@@ -38,6 +43,7 @@ export interface TaskConfig {
 	mode: Mode
 	strictPlanModeEnabled: boolean
 	yoloModeToggled: boolean
+	lowVerbosityEnabled: boolean
 	doubleCheckCompletionEnabled: boolean
 	vscodeTerminalExecutionMode: "vscodeTerminal" | "backgroundExec"
 	enableParallelToolCalling: boolean
@@ -45,6 +51,20 @@ export interface TaskConfig {
 	/** Display identity for an observable subagent execution. */
 	agentIdentity?: SubagentIdentity
 	backgroundEditEnabled: boolean
+	/** Request-bound provider identity and secret-free operational settings. */
+	providerId: string
+	model: DeepReadonly<ApiHandlerModel>
+	supportsNativeWebSearch: boolean
+	customPrompt?: "compact"
+	hooksEnabled: boolean
+	subagentsEnabled: boolean
+	useAutoCondense: boolean
+	utilityModelEnabled: boolean
+	utilityModelUseCondense: boolean
+	utilityModelUseNewTask: boolean
+	utilityModelSelection?: ModelProviderSelection
+	globalSkillsToggles: Readonly<Record<string, boolean>>
+	localSkillsToggles: Readonly<Record<string, boolean>>
 
 	// Multi-workspace support
 	workspaceManager?: WorkspaceRootManager
@@ -54,14 +74,15 @@ export interface TaskConfig {
 	taskState: TaskState
 	messageState: MessageStateHandler
 
-	// API and services
-	api: ApiHandler
+	// Secret-free services
 	services: TaskServices
 
 	// Settings
 	autoApprovalSettings: AutoApprovalSettings
 	autoApprover: AutoApprove
 	browserSettings: BrowserSettings
+	/** Present only when Utility-model permission handling is fully configured. */
+	permissionDecisionBinding?: PermissionDecisionServiceBinding
 
 	// Callbacks (strongly typed)
 	callbacks: TaskCallbacks
@@ -88,15 +109,38 @@ export interface TaskServices {
 	diracIgnoreController: DiracIgnoreController
 	commandPermissionController: CommandPermissionController
 	contextManager: ContextManager
-	stateManager: StateManager
 }
+export interface SubagentRuntime {
+	readonly providerId: string
+	readonly model: DeepReadonly<ApiHandlerModel>
+	readonly supportsNativeWebSearch: boolean
+	createMessage(
+		systemPrompt: string,
+		messages: DiracStorageMessage[],
+		tools?: DiracTool[],
+		options?: ApiConversationRequestOptions,
+	): ApiStream
+	abort(): void
+}
+
+
 
 /**
  * All callback functions available to tool handlers
  */
 export interface TaskCallbacks {
+	/** Revalidates request-bound mutation consent against the Task's current mode. */
+	assertMutationAuthorized: (toolName?: DiracToolSpec["id"]) => void
+	/** Holds task mutation consent through the complete asynchronous write boundary. */
+	withMutationAuthorization: <T>(toolName: DiracToolSpec["id"] | undefined, mutation: () => Promise<T>) => Promise<T>
+	/** Hand an active mutation lease directly to a task configuration transition. */
+	transitionFromMutation: <T>(transition: () => Promise<T>) => Promise<T>
+	/** Keep a detached asynchronous mutation inside the task transition boundary. */
+	retainMutationUntil: (completion: Promise<void>) => void
+	/** Commit newly enabled shared tools to the task-owned toggles and persisted defaults. */
+	commitEnabledToolToggles: (toolIds: readonly string[], finalize?: () => Promise<void>) => Promise<void>
 	saveCheckpoint: (isAttemptCompletionMessage?: boolean, completionMessageId?: string) => Promise<void>
-	commitAttemptCompletion: () => Promise<boolean>
+	commitAttemptCompletion: (response: string) => Promise<import("../interfaces/IToolEnvironment").CompletionCommitResult>
 
 	executeCommandTool: (
 		command: string,
@@ -109,6 +153,10 @@ export interface TaskCallbacks {
 
 	shouldAutoApproveTool: (toolName: DiracDefaultTool) => boolean | [boolean, boolean]
 	shouldAutoApproveToolWithPath: (toolName: DiracToolSpec["id"], path?: string) => Promise<boolean>
+	resolveToolPathPermission: (
+		toolName: DiracToolSpec["id"],
+		path?: string,
+	) => Promise<import("../autoApprove").ToolPermissionDisposition>
 
 	// Additional callbacks for task management
 	postStateToWebview: () => Promise<void>
@@ -132,6 +180,11 @@ export interface TaskCallbacks {
 	) => Promise<{ cancel?: boolean; wasCancelled?: boolean; contextModification?: string; errorMessage?: string }>
 	resetTransientState: () => Promise<void>
 	notifyContextCompacted: () => void
+
+	/** Build a Utility runner without exposing the credential-bearing API configuration to tools. */
+	createUtilityModelRunner: (selection: ModelProviderSelection, options?: BuildUtilityModelRunnerOptions) => UtilityModelRunner
+	/** Build a subagent handler inside the trusted Task runtime. */
+	createSubagentRuntime: (options: { modelId?: string; utilityModelSelection?: ModelProviderSelection }) => SubagentRuntime
 }
 
 /**

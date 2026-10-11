@@ -1,17 +1,17 @@
 import { strict as assert } from "node:assert"
 import type { ApiStream, ApiStreamChunk } from "@core/api/transform/stream"
+import type { UtilityModelRequest } from "@core/utility-model/UtilityModelRunner"
+import * as utilityModel from "@core/utility-model/UtilityModelRunner"
 import type { ModelProviderSelection } from "@shared/api"
 import type { DiracStorageMessage } from "@shared/messages/content"
-import { describe, it, afterEach } from "mocha"
+import { afterEach, describe, it } from "mocha"
 import sinon from "sinon"
+import { createMockTaskConfig } from "../../__tests__/helpers/mockTaskConfig"
 import { SurfaceAdapter } from "../SurfaceAdapter"
 import {
 	buildConversationCondensationTrait,
 	ConversationCondensationUnavailableError,
 } from "../traits/ConversationCondensationTraitBuilder"
-import { createMockTaskConfig } from "../../__tests__/helpers/mockTaskConfig"
-import type { UtilityModelRequest } from "@core/utility-model/UtilityModelRunner"
-import * as utilityModel from "@core/utility-model/UtilityModelRunner"
 
 const selection: ModelProviderSelection = {
 	provider: "openai",
@@ -29,6 +29,8 @@ function createEnvironment(history: DiracStorageMessage[] = [{ role: "user", con
 	const { config } = createMockTaskConfig()
 	const settings: Record<string, unknown> = {
 		utilityModelEnabled: true,
+		utilityModelUseCondense: true,
+		utilityModelUseNewTask: true,
 		utilityModelSelection: selection,
 	}
 	const getApiConfiguration = sinon.stub().returns({
@@ -37,10 +39,14 @@ function createEnvironment(history: DiracStorageMessage[] = [{ role: "user", con
 		openAiApiKey: "active-key",
 	})
 
-	config.services.stateManager = {
-		getGlobalSettingsKey: (key: string) => settings[key],
-		getApiConfiguration,
-	} as any
+	Object.defineProperties(config, {
+		utilityModelEnabled: { get: () => settings.utilityModelEnabled, configurable: true },
+		utilityModelUseCondense: { get: () => settings.utilityModelUseCondense ?? true, configurable: true },
+		utilityModelUseNewTask: { get: () => settings.utilityModelUseNewTask ?? true, configurable: true },
+		utilityModelSelection: { get: () => settings.utilityModelSelection, configurable: true },
+	})
+	config.callbacks.createUtilityModelRunner = (runnerSelection, options) =>
+		utilityModel.createUtilityModelRunner(getApiConfiguration(), runnerSelection, options)
 	config.services.contextManager = {
 		getTruncatedMessages: (messages: DiracStorageMessage[]) => messages,
 	} as any
@@ -55,6 +61,7 @@ describe("ConversationCondensationTraitBuilder", () => {
 	it("is unavailable when the utility model feature is disabled", async () => {
 		const { config, settings } = createEnvironment()
 		settings.utilityModelEnabled = false
+		settings.utilityModelUseCondense = false
 		const trait = buildConversationCondensationTrait(config)
 
 		assert.equal(trait.isAvailable("conversation_continuation"), false)
@@ -88,38 +95,37 @@ describe("ConversationCondensationTraitBuilder", () => {
 		sinon.assert.notCalled(createRunner)
 	})
 
-	it("reads current settings for each call without rebuilding or replacing the active task API", async () => {
+	it("uses the request-bound settings for each call without rebuilding or replacing the active task API", async () => {
 		const { config, settings, getApiConfiguration } = createEnvironment()
-		const activeApi = config.api
 		const requests: UtilityModelRequest[] = []
 		const updatedSelection: ModelProviderSelection = { provider: "openai", modelId: "updated-utility-model" }
-		const createRunner = sinon.stub(utilityModel, "createUtilityModelRunner").callsFake((_configuration, runnerSelection, options) => {
-			return {
-				run(request: UtilityModelRequest) {
-					requests.push(request)
-					return textStream("complete condensation", () => {
-						options?.onModelResolved?.({ selection: runnerSelection, modelId: "resolved-utility-model" })
-					})
-				},
-			} as ReturnType<typeof utilityModel.createUtilityModelRunner>
-		})
+		const createRunner = sinon
+			.stub(utilityModel, "createUtilityModelRunner")
+			.callsFake((_configuration, runnerSelection, options) => {
+				return {
+					run(request: UtilityModelRequest) {
+						requests.push(request)
+						return textStream("complete condensation", () => {
+							options?.onModelResolved?.({ selection: runnerSelection, modelId: "resolved-utility-model" })
+						})
+					},
+				} as ReturnType<typeof utilityModel.createUtilityModelRunner>
+			})
 		const trait = buildConversationCondensationTrait(config)
 
 		settings.utilityModelEnabled = false
+		settings.utilityModelUseCondense = false
 		assert.equal(trait.isAvailable("conversation_continuation"), false)
 		settings.utilityModelEnabled = true
+		settings.utilityModelUseCondense = true
 		settings.utilityModelSelection = updatedSelection
 		assert.equal(trait.isAvailable("conversation_continuation"), true)
 		sinon.assert.notCalled(createRunner)
 
-		assert.deepEqual(
-			await trait.condenseConversation("conversation_continuation", { historyScope: "effective" }),
-			{
-				text: "complete condensation",
-				modelIdentity: { providerId: "openai", modelId: "resolved-utility-model" },
-			},
-		)
-		assert.equal(config.api, activeApi)
+		assert.deepEqual(await trait.condenseConversation("conversation_continuation", { historyScope: "effective" }), {
+			text: "complete condensation",
+			modelIdentity: { providerId: "openai", modelId: "resolved-utility-model" },
+		})
 		assert.equal(requests.length, 1)
 		sinon.assert.calledOnce(createRunner)
 		assert.equal(createRunner.firstCall.args[0], getApiConfiguration.returnValues[0])
@@ -198,7 +204,6 @@ describe("ConversationCondensationTraitBuilder", () => {
 		assert.ok(source.includes("authoritative intent"))
 		sinon.assert.notCalled(getTruncatedMessages)
 	})
-
 
 	it("exposes a narrow facade for parent tasks and no capability for subagents", () => {
 		const { config } = createEnvironment()

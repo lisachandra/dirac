@@ -13,7 +13,7 @@ describe("ToolHookUtils", () => {
 		it("skips hooks for response completion", async () => {
 			const executeHookStub = sinon.stub(HookExecutor, "executeHook")
 			const config: any = {
-				services: { stateManager: { getGlobalSettingsKey: () => true } },
+				hooksEnabled: true,
 			}
 			const block: ToolUse = {
 				type: "tool_use",
@@ -33,15 +33,11 @@ describe("ToolHookUtils", () => {
 
 		it("returns early without running hooks when hooks are disabled", async () => {
 			const saySpy = sinon.spy(async () => Date.now())
-			const cancelTaskSpy = sinon.spy(async () => {})
+			const cancelTaskSpy = sinon.spy(async () => { })
 
 			const config: any = {
 				taskState: new TaskState(),
-				services: {
-					stateManager: {
-						getGlobalSettingsKey: (key: string) => (key === "hooksEnabled" ? false : undefined),
-					},
-				},
+				hooksEnabled: false,
 				callbacks: {
 					say: saySpy,
 					cancelTask: cancelTaskSpy,
@@ -65,31 +61,18 @@ describe("ToolHookUtils", () => {
 		it("treats undefined hooksEnabled as enabled and runs hook flow", async () => {
 			const saySpy = sinon.spy(async () => Date.now())
 			const executeHookStub = sinon.stub(HookExecutor, "executeHook").resolves({ wasCancelled: false })
-			const getGlobalSettingsKeySpy = sinon.spy((key: string) => (key === "mode" ? "act" : undefined))
-			const getApiConfigurationSpy = sinon.spy(() => ({
-				actModeApiProvider: undefined,
-				planModeApiProvider: undefined,
-			}))
-			const getModelSpy = sinon.spy(() => ({ id: "test-model" }))
 
 			const config: any = {
 				taskState: new TaskState(),
 				taskId: "test-task-id",
-				api: {
-					getModel: getModelSpy,
-				},
-				messageState: {},
-				services: {
-					stateManager: {
-						getGlobalSettingsKey: getGlobalSettingsKeySpy,
-						getApiConfiguration: getApiConfigurationSpy,
-					},
-				},
+				hooksEnabled: undefined,
+				providerId: "unknown",
+				model: { id: "test-model", info: {} },
 				callbacks: {
 					say: saySpy,
-					cancelTask: async () => {},
-					setActiveHookExecution: async () => {},
-					clearActiveHookExecution: async () => {},
+					cancelTask: async () => { },
+					setActiveHookExecution: async () => { },
+					clearActiveHookExecution: async () => { },
 				},
 			}
 
@@ -105,10 +88,6 @@ describe("ToolHookUtils", () => {
 				shouldContinue.should.equal(true)
 				saySpy.called.should.equal(false)
 				executeHookStub.calledOnce.should.equal(true)
-				getGlobalSettingsKeySpy.calledWith("hooksEnabled").should.equal(true)
-				getGlobalSettingsKeySpy.calledWith("mode").should.equal(true)
-				getApiConfigurationSpy.called.should.equal(true)
-				getModelSpy.called.should.equal(true)
 				config.taskState.userMessageContent.should.have.length(0)
 			} finally {
 				executeHookStub.restore()

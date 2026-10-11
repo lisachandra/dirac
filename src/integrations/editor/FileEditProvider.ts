@@ -1,13 +1,14 @@
 import { getCwd } from "@utils/path"
 
 import { DiffViewProvider } from "@integrations/editor/DiffViewProvider"
+import { NodeTextFileAccess } from "@integrations/editor/NodeTextFileAccess"
+import type { TextFileAccess } from "@integrations/editor/TextFileAccess"
 import * as fs from "fs/promises"
 import { Logger } from "@/shared/services/Logger"
 
 /**
- * A file-system-based implementation of DiffViewProvider that performs direct file operations
- * without visual editor integration. This provider uses the Node.js fs package to handle
- * file edits in-memory and then writes them to disk.
+ * A headless DiffViewProvider that owns editable document content in memory and
+ * persists it through an injected TextFileAccess transport.
  *
  * Visual operations like scrolling are implemented as no-ops since there is no UI component.
  * This makes it suitable for headless or non-interactive environments.
@@ -15,8 +16,12 @@ import { Logger } from "@/shared/services/Logger"
 export class FileEditProvider extends DiffViewProvider {
 	private documentContent?: string
 
-	constructor() {
-		super()
+	constructor(
+		textFileAccess: TextFileAccess = new NodeTextFileAccess(),
+		shouldSaveOpenDocumentBeforeRead = true,
+		private readonly shouldFormatLocally = true,
+	) {
+		super(textFileAccess, shouldSaveOpenDocumentBeforeRead)
 	}
 
 	override showFile(_absolutePath: string): Promise<void> {
@@ -27,12 +32,7 @@ export class FileEditProvider extends DiffViewProvider {
 	protected async openDiffEditor(): Promise<void> {
 		// No-op: No visual editor to open in a file-system-only provider
 		// The file content is already loaded in the base class's open() method
-		this.documentContent = this.originalContent || ""
-	}
-
-	override async open(relPath: string, options?: { displayPath?: string }): Promise<void> {
-		await super.open(relPath, options)
-		this.documentContent = this.originalContent || ""
+		this.documentContent = this.originalContent ?? ""
 	}
 
 	async replaceText(
@@ -78,7 +78,7 @@ export class FileEditProvider extends DiffViewProvider {
 	}
 
 	protected async truncateDocument(lineNumber: number): Promise<void> {
-		if (!this.documentContent) {
+		if (this.documentContent === undefined) {
 			return
 		}
 
@@ -90,7 +90,7 @@ export class FileEditProvider extends DiffViewProvider {
 	}
 
 	protected async getDocumentLineCount(): Promise<number> {
-		if (!this.documentContent) {
+		if (this.documentContent === undefined) {
 			return 0
 		}
 		return this.documentContent.split("\n").length
@@ -109,20 +109,13 @@ export class FileEditProvider extends DiffViewProvider {
 	}
 
 	protected async saveDocument(): Promise<boolean> {
-		if (!this.absolutePath || !this.documentContent) {
+		if (!this.absolutePath || !this.fileOpManager || this.documentContent === undefined) {
 			return false
 		}
 
-		try {
-			// Always use UTF-8 for writing - it's the modern standard and handles all characters
-			// including emojis. The detected fileEncoding was used for reading to preserve
-			// compatibility, but writing as UTF-8 ensures no character corruption.
-			await fs.writeFile(this.absolutePath, this.documentContent, { encoding: "utf8" })
-			return true
-		} catch (error) {
-			Logger.error(`Failed to save document to ${this.absolutePath}:`, error)
-			return false
-		}
+		const result = await this.fileOpManager.writeFile(this.documentContent)
+		this.documentContent = result.content
+		return true
 	}
 
 	protected async closeAllDiffViews(): Promise<void> {
@@ -136,12 +129,13 @@ export class FileEditProvider extends DiffViewProvider {
 	override async applyAndSaveSilently(
 		absolutePath: string,
 		content: string,
+		editType: "create" | "modify" = "modify",
 	): Promise<{
 		finalContent: string | undefined
 		autoFormattingEdits: string | undefined
 		userEdits: string | undefined
 	}> {
-		await this.open(absolutePath)
+		await this.open(absolutePath, { editType })
 		const range = { startLine: 0, endLine: await this.getDocumentLineCount() }
 		await this.replaceText(content, range, undefined)
 		await this.saveDocument()
@@ -167,12 +161,19 @@ export class FileEditProvider extends DiffViewProvider {
 	> {
 		const results = new Map()
 		for (const file of files) {
-			results.set(file.path, await this.applyAndSaveSilently(file.path, file.content))
+			results.set(file.path, await this.applyAndSaveSilently(file.path, file.content, "modify"))
 		}
 		return results
 	}
 
 	override async format(path: string): Promise<string> {
+		if (!this.shouldFormatLocally) {
+			if (path !== this.absolutePath || this.documentContent === undefined) {
+				throw new Error(`No confirmed document content available for ${path}.`)
+			}
+			return this.documentContent
+		}
+
 		// Skip formatting for files outside the workspace (e.g. generated tools, .dirac data)
 		const cwd = await getCwd()
 		if (cwd && !path.startsWith(cwd)) {

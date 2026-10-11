@@ -3,6 +3,7 @@ import { expect } from "chai"
 import axios from "axios"
 import sinon from "sinon"
 import { OpenRouterHandler } from "../openrouter"
+import { expectLoggerErrors } from "@/test/loggerGuard"
 
 const modelInfo = { supportsPromptCache: false }
 
@@ -19,7 +20,7 @@ describe("OpenRouterHandler", () => {
 
 	const tools = [{ type: "function", function: { name: "read_file", description: "", parameters: { type: "object" } } }] as any
 
-	it("should handle usage-only chunks when delta is missing", async () => {
+	it("preserves provider-reported zero cost on usage-only chunks", async () => {
 		const handler = new OpenRouterHandler({
 			openRouterApiKey: "test-api-key",
 		})
@@ -33,6 +34,7 @@ describe("OpenRouterHandler", () => {
 								usage: {
 									prompt_tokens: 13,
 									completion_tokens: 5,
+									cost: 0,
 								},
 							},
 						]),
@@ -63,6 +65,163 @@ describe("OpenRouterHandler", () => {
 		])
 	})
 
+	it("does not estimate missing OpenRouter cost from model pricing", async () => {
+		const handler = new OpenRouterHandler({ openRouterApiKey: "test-api-key" })
+		const fakeClient = {
+			chat: {
+				completions: {
+					create: sinon.stub().resolves(
+						createAsyncIterable([
+							{
+								choices: [{}],
+								usage: { prompt_tokens: 1_000, completion_tokens: 500 },
+							},
+						]),
+					),
+				},
+			},
+		}
+		sinon.stub(handler as any, "ensureClient").returns(fakeClient as any)
+		sinon.stub(handler, "getModel").returns({
+			id: "xiaomi/mimo-v2.5-pro",
+			info: { ...modelInfo, inputPrice: 1, outputPrice: 2 },
+		})
+
+		const chunks: any[] = []
+		for await (const chunk of handler.createMessage("system", [{ role: "user", content: "hi" }])) {
+			chunks.push(chunk)
+		}
+
+		expect(chunks).to.deep.equal([
+			{
+				type: "usage",
+				cacheWriteTokens: 0,
+				cacheReadTokens: 0,
+				inputTokens: 1_000,
+				outputTokens: 500,
+				totalCost: undefined,
+			},
+		])
+	})
+
+	it("retrieves provider-reported cost when streamed usage omits it", async () => {
+		const handler = new OpenRouterHandler({ openRouterApiKey: "test-api-key" })
+		const fakeClient = {
+			chat: {
+				completions: {
+					create: sinon.stub().resolves(
+						createAsyncIterable([
+							{
+								id: "generation-1",
+								choices: [{}],
+								usage: { prompt_tokens: 1_000, completion_tokens: 500 },
+							},
+						]),
+					),
+				},
+			},
+		}
+		sinon.stub(handler as any, "ensureClient").returns(fakeClient as any)
+		sinon.stub(handler, "getModel").returns({ id: "xiaomi/mimo-v2.5-pro", info: modelInfo })
+		const getApiStreamUsage = sinon.stub(handler, "getApiStreamUsage").callsFake(async (_signal, streamUsage) => {
+			if (!streamUsage) throw new Error("Expected streamed usage fallback")
+			return { ...streamUsage, totalCost: 0.0123 }
+		})
+
+		const chunks: any[] = []
+		for await (const chunk of handler.createMessage("system", [{ role: "user", content: "hi" }])) {
+			chunks.push(chunk)
+		}
+
+		sinon.assert.calledOnce(getApiStreamUsage)
+		expect(chunks).to.deep.equal([
+			{
+				type: "usage",
+				inputTokens: 1_000,
+				outputTokens: 500,
+				cacheWriteTokens: 0,
+				cacheReadTokens: 0,
+				totalCost: 0.0123,
+			},
+		])
+	})
+
+	it("preserves streamed tokens when generation details only report cost", async () => {
+		const clock = sinon.useFakeTimers()
+		const handler = new OpenRouterHandler({ openRouterApiKey: "test-api-key" })
+		Object.assign(handler as any, { lastGenerationId: "generation-1" })
+		sinon.stub(handler, "getModel").returns({ id: "xiaomi/mimo-v2.5-pro", info: modelInfo })
+		sinon.stub(handler, "fetchGenerationDetails").callsFake(async function* () {
+			yield { total_cost: 0.0123 }
+		})
+		const streamedUsage = {
+			type: "usage" as const,
+			inputTokens: 1_000,
+			outputTokens: 500,
+			cacheWriteTokens: 20,
+			cacheReadTokens: 100,
+			totalCost: undefined,
+		}
+
+		const usagePromise = handler.getApiStreamUsage(undefined, streamedUsage)
+		await clock.tickAsync(500)
+
+		expect(await usagePromise).to.deep.equal({ ...streamedUsage, totalCost: 0.0123 })
+	})
+
+	it("completes after one failed generation-details cost lookup", async () => {
+		expectLoggerErrors()
+		const clock = sinon.useFakeTimers()
+		const handler = new OpenRouterHandler({ openRouterApiKey: "test-api-key" })
+		const fakeClient = {
+			chat: {
+				completions: {
+					create: sinon.stub().resolves(
+						createAsyncIterable([
+							{
+								id: "generation-1",
+								choices: [{}],
+								usage: { prompt_tokens: 1_000, completion_tokens: 500 },
+							},
+						]),
+					),
+				},
+			},
+		}
+		sinon.stub(handler as any, "ensureClient").returns(fakeClient as any)
+		sinon.stub(handler, "getModel").returns({ id: "xiaomi/mimo-v2.5-pro", info: modelInfo })
+		const generationRequest = sinon.stub(axios, "get").rejects(new Error("generation endpoint unavailable"))
+
+		const chunksPromise = (async () => {
+			const chunks: any[] = []
+			for await (const chunk of handler.createMessage("system", [{ role: "user", content: "hi" }])) {
+				chunks.push(chunk)
+			}
+			return chunks
+		})()
+		let completed = false
+		void chunksPromise.then(
+			() => (completed = true),
+			() => (completed = true),
+		)
+
+		await clock.tickAsync(500)
+
+		expect(completed).to.equal(true)
+		expect(await chunksPromise).to.deep.equal([
+			{
+				type: "usage",
+				inputTokens: 1_000,
+				outputTokens: 500,
+				cacheWriteTokens: 0,
+				cacheReadTokens: 0,
+				totalCost: undefined,
+			},
+		])
+		sinon.assert.calledOnce(generationRequest)
+		expect(generationRequest.firstCall.args[1]?.timeout).to.equal(2_000)
+	})
+
 	it("aborts an in-flight Chat Completions request", async () => {
 		let requestSignal: AbortSignal | undefined
 		const createStub = sinon.stub().callsFake((_body: unknown, options: { signal: AbortSignal }) => {
@@ -81,7 +240,7 @@ describe("OpenRouterHandler", () => {
 
 		const nextPromise = handler
 			.createMessage("system", [{ role: "user", content: "hello" }])
-			[Symbol.asyncIterator]()
+		[Symbol.asyncIterator]()
 			.next()
 		await new Promise<void>((resolve) => setImmediate(resolve))
 		if (!requestSignal) throw new Error("OpenRouter request did not start")

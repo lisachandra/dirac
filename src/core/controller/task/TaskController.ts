@@ -1,12 +1,19 @@
 import { cleanupLegacyCheckpoints } from "@integrations/checkpoints/CheckpointMigration"
 import type { HistoryItem } from "@shared/HistoryItem"
 import { type Settings } from "@shared/storage/state-keys"
+import {
+	createTaskWorkingConfiguration,
+	type TaskWorkingConfiguration,
+	type TaskWorkingConfigurationInput,
+} from "../../task/runtime/TaskWorkingConfiguration"
 import pWaitFor from "p-wait-for"
+import pTimeout from "p-timeout"
 import type { FolderLockWithRetryResult } from "@/core/locks/types"
 import { Logger } from "@/shared/services/Logger"
 import { getCwd, getDesktopDir } from "@/utils/path"
 import type { StateManager } from "../../storage/StateManager"
 import { Task } from "../../task"
+import { deserializeTaskError, type TaskRunOutcome } from "../../task/TaskRunOutcome"
 import { releaseTaskLock, tryAcquireTaskLockWithRetry } from "../../task/TaskLockUtils"
 import { detectWorkspaceRoots } from "../../workspace/detection"
 import { setupWorkspaceManager } from "../../workspace/setup"
@@ -18,6 +25,11 @@ export type TaskInitializationOptions = {
 	onContextCompacted?: () => void
 	switchToActMode?: () => Promise<boolean>
 	enqueueSteeringMessages?: (task: Task) => Promise<void>
+	toolSelectionPolicy?: import("../../task/tools/runtime/ToolSelectionPolicy").ToolSelectionPolicy
+	/** Host/session-owned runtime values; capture input only and never task-settings persistence. */
+	runtimeConfigurationOverrides?: Partial<Settings>
+	/** Exact immutable runtime used only when reconstructing an existing active Task. */
+	workingConfiguration?: TaskWorkingConfiguration
 }
 
 export interface ITaskControllerDependencies {
@@ -30,6 +42,7 @@ export interface ITaskControllerDependencies {
 	backgroundCommandTaskId?: string
 	cancelInProgress: boolean
 	postStateToWebview: () => Promise<void>
+	postPresentationToWebview?: () => Promise<void>
 	updateTaskHistory: (item: HistoryItem) => Promise<HistoryItem[]>
 	deleteTaskFromState: (id: string) => Promise<any>
 	getTaskWithId: (id: string) => Promise<{
@@ -45,6 +58,8 @@ export interface ITaskControllerDependencies {
 	toggleActModeForYoloMode: () => Promise<boolean>
 }
 
+const HISTORICAL_TASK_RESTORE_TIMEOUT_MS = 30_000
+const HISTORICAL_TASK_CLEANUP_TIMEOUT_MS = 5_000
 export class TaskController {
 	private _task?: Task
 	private _workspaceManager?: WorkspaceRootManager
@@ -104,7 +119,19 @@ export class TaskController {
 		return () => this.taskReplacementListeners.delete(listener)
 	}
 
-	private async runTaskWithReplacement(task: Task, run: Promise<void>): Promise<void> {
+	private reconstructionInitializationOptions(task: Task): TaskInitializationOptions {
+		const {
+			runtimeConfigurationOverrides: _runtimeOverrides,
+			workingConfiguration: _workingConfiguration,
+			...callbacks
+		} = this.currentInitializationOptions ?? {}
+		return {
+			...callbacks,
+			workingConfiguration: task.getWorkingConfiguration(),
+		}
+	}
+
+	private async runTaskWithReplacement(task: Task, run: Promise<TaskRunOutcome>): Promise<void> {
 		let runFailure: { error: unknown } | undefined
 		try {
 			await run
@@ -130,7 +157,7 @@ export class TaskController {
 			undefined,
 			this.currentConversationUlid,
 			undefined,
-			this.currentInitializationOptions,
+			this.reconstructionInitializationOptions(task),
 		)
 		task.taskState.pendingTaskReplacement = undefined
 		await Promise.all([...this.taskReplacementListeners].map((listener) => listener(taskId)))
@@ -140,6 +167,61 @@ export class TaskController {
 	private trackTaskRun(run: Promise<void>): void {
 		this._taskRunPromise = run
 		void run.catch((error) => Logger.error("Task run failed", error))
+	}
+
+	private async startHistoricalTaskAndWaitForRestore(task: Task): Promise<void> {
+		let didRestore = false
+		let resolveRestore!: () => void
+		let rejectRestore!: (reason?: unknown) => void
+		const restored = new Promise<void>((resolve, reject) => {
+			resolveRestore = resolve
+			rejectRestore = reject
+		})
+
+		const taskRun = task.resumeTaskFromHistory(() => {
+			didRestore = true
+			resolveRestore()
+		})
+		const run = this.runTaskWithReplacement(task, taskRun)
+		this.trackTaskRun(run)
+		void taskRun.then(
+			(outcome) => {
+				if (didRestore) return
+				if (outcome.kind === "failed") {
+					rejectRestore(deserializeTaskError(outcome.error))
+					return
+				}
+				rejectRestore(new Error(`Task ${task.taskId} ended before its history was restored`))
+			},
+			(error) => rejectRestore(error),
+		)
+
+		try {
+			await pTimeout(restored, {
+				milliseconds: HISTORICAL_TASK_RESTORE_TIMEOUT_MS,
+				message: `Task ${task.taskId} history restoration timed out after ${HISTORICAL_TASK_RESTORE_TIMEOUT_MS / 1_000} seconds`,
+			})
+			if (this._task !== task) {
+				throw new Error(`Task ${task.taskId} was replaced before its history finished restoring`)
+			}
+		} catch (error) {
+			if (this._task === task) {
+				const abort = task.abortTask()
+				void abort.catch((abortError) =>
+					Logger.error(`Failed to abort task ${task.taskId} after history restoration failed`, abortError),
+				)
+				try {
+					await pTimeout(this.clearTask(), {
+						milliseconds: HISTORICAL_TASK_CLEANUP_TIMEOUT_MS,
+						message: `Timed out while clearing task ${task.taskId} after history restoration failed`,
+					})
+				} catch (cleanupError) {
+					Logger.error(`Failed to clear task ${task.taskId} after history restoration failed`, cleanupError)
+					if (this._task === task) this._task = undefined
+				}
+			}
+			throw error
+		}
 	}
 
 	async initTask(
@@ -162,12 +244,6 @@ export class TaskController {
 		await this.clearTask()
 		this.deps.stateManager.refreshModelProviderPresetsFromDisk()
 
-		const autoApprovalSettings = this.deps.stateManager.getGlobalSettingsKey("autoApprovalSettings")
-		const shellIntegrationTimeout = this.deps.stateManager.getGlobalSettingsKey("shellIntegrationTimeout")
-		const terminalReuseEnabled = this.deps.stateManager.getGlobalStateKey("terminalReuseEnabled")
-		const vscodeTerminalExecutionMode = this.deps.stateManager.getGlobalStateKey("vscodeTerminalExecutionMode")
-		const terminalOutputLineLimit = this.deps.stateManager.getGlobalSettingsKey("terminalOutputLineLimit")
-		const defaultTerminalProfile = this.deps.stateManager.getGlobalSettingsKey("defaultTerminalProfile")
 		const isNewUser = this.deps.stateManager.getGlobalStateKey("isNewUser")
 		const taskHistory = this.deps.stateManager.getGlobalStateKey("taskHistory")
 
@@ -215,19 +291,39 @@ export class TaskController {
 				this.deps.stateManager.setTaskSettingsBatch(taskId, taskSettings)
 			}
 
+			const suppliedWorkingConfiguration = initializationOptions?.workingConfiguration
+			const workingConfiguration: TaskWorkingConfiguration = suppliedWorkingConfiguration
+				? createTaskWorkingConfiguration({
+						revision: suppliedWorkingConfiguration.revision,
+						settings: suppliedWorkingConfiguration.settings as Settings,
+						apiConfiguration: structuredClone(
+							suppliedWorkingConfiguration.apiConfiguration,
+						) as TaskWorkingConfigurationInput["apiConfiguration"],
+						workspaceConfiguration: structuredClone(
+							suppliedWorkingConfiguration.workspaceConfiguration,
+						) as TaskWorkingConfigurationInput["workspaceConfiguration"],
+						executionOptions: structuredClone(
+							suppliedWorkingConfiguration.executionOptions,
+						) as TaskWorkingConfigurationInput["executionOptions"],
+					})
+				: this.deps.stateManager.captureEffectiveTaskConfiguration(initializationOptions?.runtimeConfigurationOverrides)
+			const { settings, executionOptions } = workingConfiguration
+
 			this._task = new Task({
 				controller,
 				updateTaskHistory: (historyItem) => this.deps.updateTaskHistory(historyItem),
 				postStateToWebview: () => this.deps.postStateToWebview(),
-				reinitExistingTaskFromId: (taskId) => this.reinitExistingTaskFromId(taskId, this.currentInitializationOptions),
+				postPresentationToWebview: () => (this.deps.postPresentationToWebview ?? this.deps.postStateToWebview)(),
+				reinitExistingTaskFromId: (taskId) => this.reinitExistingTaskFromId(taskId),
 				cancelTask: () => this.cancelTask(),
-				shellIntegrationTimeout,
-				terminalReuseEnabled: terminalReuseEnabled ?? true,
-				terminalOutputLineLimit: terminalOutputLineLimit ?? 500,
-				defaultTerminalProfile: defaultTerminalProfile ?? "default",
-				vscodeTerminalExecutionMode,
+				shellIntegrationTimeout: settings.shellIntegrationTimeout,
+				terminalReuseEnabled: executionOptions.terminalReuseEnabled,
+				terminalOutputLineLimit: settings.terminalOutputLineLimit,
+				defaultTerminalProfile: settings.defaultTerminalProfile,
+				vscodeTerminalExecutionMode: executionOptions.vscodeTerminalExecutionMode,
 				cwd,
 				stateManager: this.deps.stateManager,
+				workingConfiguration,
 				workspaceManager: this._workspaceManager,
 				task,
 				images,
@@ -239,6 +335,7 @@ export class TaskController {
 				pinnedContext: initializationOptions?.pinnedContext,
 				onContextCompacted: initializationOptions?.onContextCompacted,
 				switchToActMode: initializationOptions?.switchToActMode,
+				toolSelectionPolicy: initializationOptions?.toolSelectionPolicy,
 				enqueuePreRequestSteeringMessages: async () => initializationOptions?.enqueueSteeringMessages?.(this._task!),
 			})
 		} catch (error) {
@@ -249,7 +346,7 @@ export class TaskController {
 		}
 
 		if (historyItem) {
-			this.trackTaskRun(this.runTaskWithReplacement(this._task, this._task.resumeTaskFromHistory()))
+			await this.startHistoricalTaskAndWaitForRestore(this._task)
 		} else if (task || images || files) {
 			this.trackTaskRun(this.runTaskWithReplacement(this._task, this._task.startTask(task, images, files)))
 		} else {
@@ -260,6 +357,9 @@ export class TaskController {
 	}
 
 	async reinitExistingTaskFromId(taskId: string, initializationOptions?: TaskInitializationOptions) {
+		const effectiveInitializationOptions =
+			initializationOptions ??
+			(this._task ? this.reconstructionInitializationOptions(this._task) : this.currentInitializationOptions)
 		const history = await this.deps.getTaskWithId(taskId)
 		if (history) {
 			await this.initTask(
@@ -270,7 +370,7 @@ export class TaskController {
 				undefined,
 				this.currentConversationUlid,
 				undefined,
-				initializationOptions,
+				effectiveInitializationOptions,
 			)
 		}
 	}
@@ -331,7 +431,7 @@ export class TaskController {
 					undefined,
 					this.currentConversationUlid,
 					undefined,
-					this.currentInitializationOptions,
+					this.reconstructionInitializationOptions(task),
 				)
 			} else {
 				await this.clearTask()
@@ -365,8 +465,20 @@ export class TaskController {
 		const task = this._task
 		if (task) {
 			await this.deps.clearTaskSettings()
+			let abortFailure: unknown
+			try {
+				await task.abortTask()
+			} catch (error) {
+				abortFailure = error
+			}
+			try {
+				await task.retirePersistence()
+			} catch (error) {
+				if (abortFailure) throw new AggregateError([abortFailure, error], "Task abort and persistence retirement failed")
+				throw error
+			}
+			if (abortFailure) throw abortFailure
 		}
-		await task?.abortTask()
 		if (this._task === task) {
 			this._task = undefined
 		}

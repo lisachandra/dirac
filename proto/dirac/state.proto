@@ -301,10 +301,16 @@ message Settings {
   optional bool utility_model_use_condense = 208;
   optional bool utility_model_use_new_task = 209;
   optional bool utility_model_use_generate_commit_message = 210;
+  optional bool low_verbosity_enabled = 211;
+  optional bool utility_model_use_permission_handling = 212;
+  optional string utility_model_permission_policy = 213;
+  optional string plan_mode_inference_speed = 214;
+  optional string act_mode_inference_speed = 215;
 }
 
 message State {
   string state_json = 1;
+  optional string presentation_json = 2;
 }
 
 message TerminalProfiles {
@@ -442,6 +448,9 @@ message UpdateSettingsRequest {
   optional bool utility_model_use_condense = 50;
   optional bool utility_model_use_new_task = 51;
   optional bool utility_model_use_generate_commit_message = 52;
+  optional bool low_verbosity_enabled = 53;
+  optional bool utility_model_use_permission_handling = 54;
+  optional string utility_model_permission_policy = 55;
 }
 
 message UserApprovedCommandsUpdate {

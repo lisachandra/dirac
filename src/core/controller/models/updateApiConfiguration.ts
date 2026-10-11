@@ -6,6 +6,7 @@ import { Logger } from "@/shared/services/Logger"
 import { Secrets } from "@/shared/storage/state-keys"
 import type { Controller } from "../index"
 import { applyApiConfigurationTransaction } from "./apiConfigurationTransaction"
+import { persistApiConfigurationPatch } from "./apiConfigurationPersistence"
 
 /**
  * Parses field mask paths into separate sets for options and secrets
@@ -146,10 +147,13 @@ export async function updateApiConfiguration(controller: Controller, request: Up
 			...options,
 			...secrets,
 		}
-		applyApiConfigurationTransaction(controller, candidateConfiguration, () => {
-			if (Object.keys(secrets).length > 0) controller.stateManager.setSecretsBatch(secrets)
-			if (Object.keys(options).length > 0) controller.stateManager.setGlobalStateBatch(options)
-		})
+		await applyApiConfigurationTransaction(
+			controller,
+			candidateConfiguration,
+			() => persistApiConfigurationPatch(controller.stateManager, { ...options, ...secrets }),
+			undefined,
+			{ ...options, ...secrets },
+		)
 
 		// Post updated state to webview
 		await controller.postStateToWebview()

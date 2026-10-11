@@ -1,3 +1,5 @@
+import { getTasksDirectoryPath } from "@core/storage/disk"
+import { withTaskHistoryInventoryLock } from "@core/storage/taskHistory"
 import { Empty, StringArrayRequest } from "@shared/proto/dirac/common"
 import fs from "fs/promises"
 import path from "path"
@@ -6,6 +8,7 @@ import { ShowMessageType } from "@/shared/proto/host/window"
 import { Logger } from "@/shared/services/Logger"
 import { fileExistsAtPath } from "../../../utils/fs"
 import { Controller } from ".."
+import { deleteRunStorage } from "../TaskHistoryController"
 
 /**
  * Deletes tasks with the specified IDs
@@ -35,9 +38,9 @@ export async function deleteTasksWithIds(controller: Controller, request: String
 		return Empty.create()
 	}
 
-	for (const id of request.value) {
-		await deleteTaskWithId(controller, id)
-	}
+	await withTaskHistoryInventoryLock(async () => {
+		for (const id of request.value) await deleteTaskWithId(controller, id)
+	})
 
 	return Empty.create()
 }
@@ -49,47 +52,25 @@ export async function deleteTasksWithIds(controller: Controller, request: String
  */
 async function deleteTaskWithId(controller: Controller, id: string): Promise<void> {
 	try {
+		const historyItem = controller.stateManager.getGlobalStateKey("taskHistory").find((item) => item.id === id)
+		if (!historyItem) throw new Error(`Run ${id} is not present in top-level history`)
+
 		// Clear current task if it matches the ID being deleted
-		if (id === controller.task?.taskId) {
+		if (id === controller.task?.taskId || id === controller.selectedGoalId) {
 			await controller.clearTask()
 			Logger.debug("cleared task")
 		}
 
-		// Get task file paths
-		const { taskDirPath, apiConversationHistoryFilePath, uiMessagesFilePath, contextHistoryFilePath, taskMetadataFilePath } =
-			await controller.getTaskWithId(id)
-
-		// Remove task from state
+		await deleteRunStorage(historyItem)
 		const updatedTaskHistory = await controller.deleteTaskFromState(id)
-
-		// Delete the task files
-		for (const filePath of [
-			apiConversationHistoryFilePath,
-			uiMessagesFilePath,
-			contextHistoryFilePath,
-			taskMetadataFilePath,
-		]) {
-			await fs.rm(filePath, { force: true })
-		}
-
-		// Remove empty task directory
-		try {
-			await fs.rmdir(taskDirPath) // succeeds if the dir is empty
-		} catch (error) {
-			Logger.debug("Could not remove task directory (may not be empty):", error)
-		}
+		await controller.stateManager.flushPendingState()
 
 		// If no tasks remain, clean up everything
 		if (updatedTaskHistory.length === 0) {
-			const taskDirPath = path.join(HostProvider.get().globalStorageFsPath, "tasks")
+			const taskDirPath = getTasksDirectoryPath()
 			const checkpointsDirPath = path.join(HostProvider.get().globalStorageFsPath, "checkpoints")
-
-			if (await fileExistsAtPath(taskDirPath)) {
-				await fs.rm(taskDirPath, { recursive: true, force: true })
-			}
-			if (await fileExistsAtPath(checkpointsDirPath)) {
-				await fs.rm(checkpointsDirPath, { recursive: true, force: true })
-			}
+			if (await fileExistsAtPath(taskDirPath)) await fs.rm(taskDirPath, { recursive: true, force: true })
+			if (await fileExistsAtPath(checkpointsDirPath)) await fs.rm(checkpointsDirPath, { recursive: true, force: true })
 		}
 	} catch (error) {
 		Logger.debug(`Error deleting task ${id}:`, error)

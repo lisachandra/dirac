@@ -41,6 +41,8 @@ import { theme } from "../constants/theme"
  */
 
 import { DiracMessageType, TaskStatus, UIActionButtonType, isFinalStatus } from "@shared/ExtensionMessage"
+import { modelSupportsInferenceSpeed, type ApiProvider } from "@shared/api"
+import type { Settings } from "@shared/storage/state-keys"
 import { DiracAskResponse } from "@shared/WebviewMessage"
 import { getRandomQuote } from "@/shared/quotes"
 import type { Mode } from "@shared/storage/types"
@@ -50,7 +52,6 @@ import Image from "ink-picture"
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { StateManager } from "@/core/storage/StateManager"
 import { Logger } from "@/shared/services/Logger"
-import { COLORS } from "../constants/colors"
 import { useTaskContext, useTaskState } from "../context/TaskContext"
 import { useIsSpinnerActive } from "../hooks/useStateSubscriber"
 import { useTerminalSize } from "../hooks/useTerminalSize"
@@ -77,13 +78,21 @@ import { useChatTimeline } from "../hooks/useChatTimeline"
 import { useChatFooterStatus } from "../hooks/useChatFooterStatus"
 import { useChatTask } from "../hooks/useChatTask"
 import { expandPastedTexts, getAskPromptType, isYoloSuppressed, parseAskOptions } from "../utils/chat"
-import { calculateChatLayoutRows, calculatePermissionModalLayout } from "../utils/chat-layout"
+import {
+	calculateChatLayoutRows,
+	calculateGoalSummaryRows,
+	calculatePermissionModalLayout,
+	shouldShowGoalFooter,
+} from "../utils/chat-layout"
 import { estimateVisualLineCount } from "../utils/text-clipping"
 import { cardBodyForDisplay } from "../utils/card-body"
 import { createCardBodySuppressionPolicy } from "../utils/quiet-mode"
 import { clearTaskDeadline, getTaskDeadline, hasTaskTimedOut, markTaskTimedOut } from "../utils/task-timeout"
 import { CliPanelType } from "../types"
+import { GoalSummary } from "./GoalSummary"
+import { type GoalLifecycleAction, isRunningGoalStatus } from "../utils/goals"
 
+const GOAL_STOP_CONFIRMATION_MS = 5_000
 interface ChatViewProps {
 	controller?: any
 	onExit?: () => void
@@ -114,16 +123,17 @@ export const ChatView: React.FC<ChatViewProps> = ({
 	const { isActive: isSpinnerActive, startTime: spinnerStartTime } = useIsSpinnerActive()
 	const ctrl = useMemo(() => controller || taskController, [controller, taskController])
 
-	const resetComposerInputRef = useRef<() => void>(() => { })
+	const resetComposerInputRef = useRef<() => void>(() => {})
 	const composerActionsRef = useRef<ComposerActions>({
 		handleAskShortcuts: () => false,
-		handleSubmit: () => { },
-		handleExit: () => { },
-		clearViewAndResetTask: () => { },
-		handleButtonAction: () => { },
-		toggleMode: () => { },
-		toggleAutoApproveAll: () => { },
-		toggleQuietMode: () => { },
+		handleSubmit: () => {},
+		handleExit: () => {},
+		clearViewAndResetTask: () => {},
+		handleButtonAction: () => {},
+		toggleMode: () => {},
+		toggleAutoApproveAll: () => {},
+		enableFastMode: () => {},
+		toggleQuietMode: () => {},
 	})
 
 	const [respondedToAsk, setRespondedToAsk] = useState<string | null>(null)
@@ -141,19 +151,25 @@ export const ChatView: React.FC<ChatViewProps> = ({
 	)
 	const [quietMode, setQuietMode] = useState(false)
 	const quietModeRef = useRef(false)
-	const shouldSuppressCardBody = useMemo(
-		() => createCardBodySuppressionPolicy(() => quietModeRef.current),
-		[],
-	)
+	const shouldSuppressCardBody = useMemo(() => createCardBodySuppressionPolicy(() => quietModeRef.current), [])
 
 	const [timelineScrollOffset, setTimelineScrollOffset] = useState(0)
+	const [pendingGoalStopId, setPendingGoalStopId] = useState<string | undefined>()
+	const pendingGoalStopIdRef = useRef<string | undefined>(undefined)
+	const pendingGoalStopTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined)
+	const [goalDetailsExpanded, setGoalDetailsExpanded] = useState(false)
+	const selectedGoal = taskState.goal
+	const goalSummaryRows = selectedGoal ? calculateGoalSummaryRows(terminalRows, goalDetailsExpanded) : 0
+	const goalFooterVisible = !selectedGoal || shouldShowGoalFooter(terminalRows)
 
 	const layoutRows = calculateChatLayoutRows({
 		terminalRows,
 		hasConversationContent: true,
 		hasComposer: activePanel === null,
-		hasFooter: activePanel === null,
+		hasFooter: activePanel === null && goalFooterVisible,
 		hasPanel: activePanel !== null,
+		footerRows: selectedGoal ? 2 : undefined,
+		goalSummaryRows: activePanel === null ? goalSummaryRows : 0,
 	})
 
 	const {
@@ -231,6 +247,48 @@ export const ChatView: React.FC<ChatViewProps> = ({
 		[onError, setLastError],
 	)
 
+	const enableFastMode = useCallback(async () => {
+		const provider = footerStatus.provider as ApiProvider
+		const modelId = footerStatus.modelId
+		if (!provider || !modelId || !modelSupportsInferenceSpeed(provider, modelId)) {
+			setLastError(
+				`No Fast Mode configuration is available for the current provider/model (${provider || "unconfigured"}:${modelId || "unconfigured"}).`,
+			)
+			return
+		}
+
+		setLastError(null)
+		const stateManager = StateManager.get()
+		const targetModes = taskState.planActSeparateModelsSetting ? [mode] : (["plan", "act"] as const)
+		const settings: Partial<Settings> = {}
+		for (const targetMode of targetModes) {
+			const speedKey = targetMode === "act" ? "actModeInferenceSpeed" : "planModeInferenceSpeed"
+			settings[speedKey] = "fast"
+		}
+		const installSessionOverrides = () => {
+			for (const targetMode of targetModes) {
+				const speedKey = targetMode === "act" ? "actModeInferenceSpeed" : "planModeInferenceSpeed"
+				stateManager.setSessionOverride(speedKey, "fast")
+			}
+		}
+
+		try {
+			if (ctrl?.task) await ctrl.task.applyWorkingConfigurationUpdate({ settings }, installSessionOverrides)
+			else installSessionOverrides()
+			await ctrl?.postStateToWebview()
+		} catch (error) {
+			reportInteractionError("Failed to enable Fast Mode", error)
+		}
+	}, [
+		ctrl,
+		footerStatus.modelId,
+		footerStatus.provider,
+		mode,
+		reportInteractionError,
+		setLastError,
+		taskState.planActSeparateModelsSetting,
+	])
+
 	const { isProcessing, setIsProcessing, isExiting, handleCancel, handleExit, clearViewAndResetTask } = useChatTask({
 		ctrl,
 		taskId,
@@ -244,13 +302,75 @@ export const ChatView: React.FC<ChatViewProps> = ({
 		setTaskSwitchKey,
 	})
 
+	const disarmGoalStopConfirmation = useCallback(() => {
+		if (pendingGoalStopTimeoutRef.current) clearTimeout(pendingGoalStopTimeoutRef.current)
+		pendingGoalStopTimeoutRef.current = undefined
+		pendingGoalStopIdRef.current = undefined
+		setPendingGoalStopId(undefined)
+	}, [])
+
+	const toggleGoalDetails = useCallback(() => {
+		disarmGoalStopConfirmation()
+		setGoalDetailsExpanded((expanded) => !expanded)
+	}, [disarmGoalStopConfirmation])
+
+	useEffect(() => {
+		disarmGoalStopConfirmation()
+	}, [disarmGoalStopConfirmation, selectedGoal?.id, selectedGoal?.status])
+
+	useEffect(() => {
+		setGoalDetailsExpanded(false)
+	}, [selectedGoal?.id])
+
+	useEffect(() => disarmGoalStopConfirmation, [disarmGoalStopConfirmation])
+
+	useEffect(() => {
+		if (activePanel) disarmGoalStopConfirmation()
+	}, [activePanel, disarmGoalStopConfirmation])
+
+	const handleGoalControl = useCallback(
+		async (action: GoalLifecycleAction) => {
+			const goal = taskState.goal
+			if (!goal || !ctrl || isProcessing) return
+			if (action === "stop" && pendingGoalStopIdRef.current !== goal.id) {
+				disarmGoalStopConfirmation()
+				pendingGoalStopIdRef.current = goal.id
+				setPendingGoalStopId(goal.id)
+				pendingGoalStopTimeoutRef.current = setTimeout(() => {
+					pendingGoalStopIdRef.current = undefined
+					pendingGoalStopTimeoutRef.current = undefined
+					setPendingGoalStopId(undefined)
+				}, GOAL_STOP_CONFIRMATION_MS)
+				return
+			}
+
+			disarmGoalStopConfirmation()
+			setIsProcessing(true)
+			setLastError(null)
+			try {
+				if (action === "pause") {
+					await ctrl.pauseGoal(goal.id, "Paused from the interactive CLI")
+				} else if (action === "resume") {
+					await ctrl.resumeGoal(goal.id)
+				} else {
+					await ctrl.stopGoal(goal.id, "Stopped from the interactive CLI")
+				}
+			} catch (error) {
+				reportInteractionError(`Failed to ${action} Goal`, error)
+			} finally {
+				setIsProcessing(false)
+			}
+		},
+		[ctrl, disarmGoalStopConfirmation, isProcessing, reportInteractionError, setIsProcessing, setLastError, taskState.goal],
+	)
+
 	const activeTaskId = ctrl?.task?.taskId
 	const isTaskActive =
 		taskState.taskStatus !== TaskStatus.IDLE &&
 		taskState.taskStatus !== TaskStatus.COMPLETED &&
 		taskState.taskStatus !== TaskStatus.CANCELLED
 	useEffect(() => {
-		if (!timeoutSeconds || !activeTaskId) return
+		if (!timeoutSeconds || !activeTaskId || selectedGoal) return
 		if (!isTaskActive) {
 			clearTaskDeadline(activeTaskId)
 			return
@@ -263,12 +383,10 @@ export const ChatView: React.FC<ChatViewProps> = ({
 			markTaskTimedOut(activeTaskId)
 			const timeoutError = new Error(`Task timed out after ${timeoutSeconds} seconds.`)
 			reportInteractionError("Task timeout", timeoutError)
-			ctrl.task
-				?.abortTask()
-				.catch((error: unknown) => reportInteractionError("Failed to cancel timed-out task", error))
+			ctrl.task?.abortTask().catch((error: unknown) => reportInteractionError("Failed to cancel timed-out task", error))
 		}, remainingMs)
 		return () => clearTimeout(timeout)
-	}, [activeTaskId, ctrl, isTaskActive, reportInteractionError, timeoutSeconds])
+	}, [activeTaskId, ctrl, isTaskActive, reportInteractionError, selectedGoal, timeoutSeconds])
 
 	const isEmptyConversation = displayMessages.length === 0
 	const isWelcomeState = isEmptyConversation && !userScrolled && activePanel === null
@@ -278,7 +396,10 @@ export const ChatView: React.FC<ChatViewProps> = ({
 		if (!activeCardId || activeCardId === respondedToAsk) return null
 		return (
 			(taskState.diracMessages || []).find(
-				(message) => message.id === activeCardId && message.content.type === DiracMessageType.CARD,
+				(message) =>
+					message.id === activeCardId &&
+					message.content.type === DiracMessageType.CARD &&
+					!isFinalStatus(message.content.card.status),
 			) || null
 		)
 	}, [activeCardId, respondedToAsk, taskState.diracMessages])
@@ -292,10 +413,10 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
 	const permissionCard =
 		pendingAsk?.content.type === DiracMessageType.CARD &&
-			!isYoloSuppressed(yolo, pendingAsk) &&
-			!isSpinnerActive &&
-			!isFinalStatus(pendingAsk.content.card.status) &&
-			(pendingAsk.content.card.requireApproval || pendingAsk.content.card.requireFeedback)
+		!isYoloSuppressed(yolo, pendingAsk) &&
+		!isSpinnerActive &&
+		!isFinalStatus(pendingAsk.content.card.status) &&
+		(pendingAsk.content.card.requireApproval || pendingAsk.content.card.requireFeedback)
 			? pendingAsk.content.card
 			: null
 	const permissionModalLayout = calculatePermissionModalLayout(terminalColumns, terminalRows)
@@ -367,10 +488,18 @@ export const ChatView: React.FC<ChatViewProps> = ({
 		scrollableCardMaxOffset: activeScrollableMaxOffset,
 		cardScrollOffset: activeScrollOffset,
 		setCardScrollOffset: setActiveScrollOffset,
+		goalStatus: selectedGoal?.status,
+		handleGoalControl,
+		toggleGoalDetails,
+		disarmGoalStopConfirmation,
 	})
 	resetComposerInputRef.current = resetInput
 
 	const toggleMode = useCallback(async () => {
+		if (selectedGoal) {
+			setLastError(selectedGoal.modeSwitchingExplanation)
+			return
+		}
 		const newMode: Mode = mode === "act" ? "plan" : "act"
 		setMode(newMode)
 		if (newMode === "act" && textInput.trim()) {
@@ -379,7 +508,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
 		} else {
 			await ctrl.togglePlanActMode(newMode)
 		}
-	}, [mode, ctrl, textInput, pastedTexts])
+	}, [mode, ctrl, textInput, pastedTexts, selectedGoal, setLastError])
 
 	const sendAskResponse = useCallback(
 		async (responseType: DiracAskResponse | string, text?: string, value?: string, images?: string[]) => {
@@ -399,16 +528,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
 				setIsProcessing(false)
 			}
 		},
-		[
-			ctrl,
-			pendingAsk,
-			pastedTexts,
-			isProcessing,
-			setIsProcessing,
-			resetInput,
-			setLastError,
-			reportInteractionError,
-		],
+		[ctrl, pendingAsk, pastedTexts, isProcessing, setIsProcessing, resetInput, setLastError, reportInteractionError],
 	)
 
 	const submitResumeResponse = useCallback(
@@ -569,6 +689,27 @@ export const ChatView: React.FC<ChatViewProps> = ({
 		async (text: string, images: string[]) => {
 			if (!ctrl || (!text.trim() && images.length === 0) || isProcessing) return
 			setLastError(null)
+			const goal = taskState.goal
+			const isGoalPassthrough =
+				pendingAsk?.content.type === DiracMessageType.CARD &&
+				pendingAsk.content.card.toolName === "resolve_task_interaction"
+			if (goal && (!pendingAsk || isGoalPassthrough)) {
+				if (images.length > 0) {
+					setLastError("Goal messages currently accept text only.")
+					return
+				}
+				setIsProcessing(true)
+				try {
+					const expandedText = expandPastedTexts(text, pastedTexts).trim()
+					await ctrl.sendGoalMessage(goal.id, expandedText)
+					resetInput()
+				} catch (error) {
+					reportInteractionError("Failed to send Goal message", error)
+				} finally {
+					setIsProcessing(false)
+				}
+				return
+			}
 			try {
 				if (await submitResumeTextResponse(text, images)) return
 			} catch (error) {
@@ -591,7 +732,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
 					}
 				}
 
-				if (card.requireApproval && (!card.actions || card.actions.length === 0) && (normalized === "y" || normalized === "yes")) {
+				if (
+					card.requireApproval &&
+					(!card.actions || card.actions.length === 0) &&
+					(normalized === "y" || normalized === "yes")
+				) {
 					await sendAskResponse(DiracAskResponse.APPROVE)
 				} else {
 					const validImages =
@@ -629,12 +774,19 @@ export const ChatView: React.FC<ChatViewProps> = ({
 			setLastError,
 			reportInteractionError,
 			footerStatus.workspacePath,
+			taskState.goal,
 		],
 	)
 
-	const borderColor = mode === "act" ? COLORS.primaryBlue : theme.plan
+	const borderColor = mode === "act" ? theme.primary : theme.plan
 	let inputPrompt = ""
-	if (pendingAsk && !yolo && askType === "options" && askOptions.length > 0) {
+	if (selectedGoal?.followUpActive) {
+		inputPrompt = "(steer follow-up)"
+	} else if (isRunningGoalStatus(selectedGoal?.status)) {
+		inputPrompt = "(steer Goal)"
+	} else if (selectedGoal) {
+		inputPrompt = "(follow up Goal)"
+	} else if (pendingAsk && !yolo && askType === "options" && askOptions.length > 0) {
 		inputPrompt = `(1-${askOptions.length} or type)`
 	} else if (isResumeChoiceActive) {
 		inputPrompt = "(type to resume)"
@@ -647,13 +799,14 @@ export const ChatView: React.FC<ChatViewProps> = ({
 		clearViewAndResetTask,
 		handleButtonAction,
 		toggleMode,
+		enableFastMode,
 		toggleAutoApproveAll,
 		toggleQuietMode,
 	}
 
 	const shouldShowActionButtons = uiActionState && !permissionCard && !activePanel && !isExiting
 	const shouldShowComposerInput = !activePanel && !isExiting
-	const shouldShowFooter = !activePanel
+	const shouldShowFooter = !activePanel && goalFooterVisible
 
 	const renderTurnBoundary = (key: string) => (
 		<Box key={key} paddingX={1}>
@@ -762,6 +915,16 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
 	const composerFooterContent = (
 		<React.Fragment>
+			{selectedGoal && !activePanel && (
+				<GoalSummary
+					detailsExpanded={goalDetailsExpanded}
+					goal={selectedGoal}
+					height={goalSummaryRows}
+					isProcessing={isProcessing}
+					isStopConfirmationPending={pendingGoalStopId === selectedGoal.id}
+					onPageNavigation={disarmGoalStopConfirmation}
+				/>
+			)}
 			{lastError && !activePanel && (
 				<Box paddingLeft={1} paddingRight={1}>
 					<Text color={theme.error}>! {lastError}</Text>
@@ -866,6 +1029,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
 					lastApiReqTotalTokens={footerStatus.lastApiReqTotalTokens}
 					mode={mode}
 					modelId={footerStatus.modelId}
+					fastModeEnabled={footerStatus.fastModeEnabled}
+					isGoalActive={selectedGoal !== undefined}
 					provider={footerStatus.provider}
 					totalCost={footerStatus.totalCost}
 					cacheHitRate={footerStatus.cacheHitRate}

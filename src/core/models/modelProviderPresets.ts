@@ -1,6 +1,7 @@
 import type { StateManager } from "@core/storage/StateManager"
 import type { Controller } from "@core/controller"
 import { applyApiConfigurationTransaction } from "@core/controller/models/apiConfigurationTransaction"
+import { persistApiConfigurationPatch } from "@core/controller/models/apiConfigurationPersistence"
 import type { ApiConfiguration, ApiProvider, ModelInfo, ModelProviderPreset, OpenAiCompatibleProfile } from "@shared/api"
 import type { Mode } from "@shared/storage/types"
 import { modelProviderSelectionUpdates } from "@core/api/modelProviderSelection"
@@ -15,7 +16,7 @@ function openAiProfileName(baseUrl: string, modelId: string): string {
 	let endpoint = baseUrl
 	try {
 		endpoint = new URL(baseUrl).host
-	} catch { }
+	} catch {}
 	return `${endpoint || "OpenAI Compatible"} · ${modelId}`
 }
 
@@ -145,9 +146,15 @@ export function recordSavedOpenAiCompatibleProfileChanges(
 	}
 }
 
-function modeUpdates(mode: Mode, preset: ModelProviderPreset, profile?: OpenAiCompatibleProfile): Partial<ApiConfiguration> {
+function modeUpdates(
+	configuration: ApiConfiguration,
+	mode: Mode,
+	preset: ModelProviderPreset,
+	profile?: OpenAiCompatibleProfile,
+): Partial<ApiConfiguration> {
+	const inferenceSpeed = mode === "plan" ? configuration.planModeInferenceSpeed : configuration.actModeInferenceSpeed
 	const updates: Record<string, unknown> = {
-		...modelProviderSelectionUpdates(mode, preset),
+		...modelProviderSelectionUpdates(mode, preset, inferenceSpeed),
 	}
 	if (preset.provider === "openai" && profile) {
 		updates.openAiBaseUrl = profile.baseUrl
@@ -173,10 +180,15 @@ export async function activateModelProviderPreset(controller: Controller, preset
 
 	const currentMode = controller.stateManager.getGlobalSettingsKey("mode")
 	const updates = controller.stateManager.getGlobalSettingsKey("planActSeparateModelsSetting")
-		? modeUpdates(currentMode, preset, profile)
-		: { ...modeUpdates("plan", preset, profile), ...modeUpdates("act", preset, profile) }
+		? modeUpdates(configuration, currentMode, preset, profile)
+		: {
+				...modeUpdates(configuration, "plan", preset, profile),
+				...modeUpdates(configuration, "act", preset, profile),
+			}
 	const candidateConfiguration = { ...configuration, ...updates }
-	applyApiConfigurationTransaction(controller, candidateConfiguration, () => controller.stateManager.setApiConfiguration(updates))
+	await applyApiConfigurationTransaction(controller, candidateConfiguration, () =>
+		persistApiConfigurationPatch(controller.stateManager, updates),
+	)
 	upsertPreset(controller.stateManager, { ...preset, lastUsedAt: Date.now() })
 	await controller.postStateToWebview()
 }

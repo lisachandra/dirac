@@ -1,6 +1,6 @@
 import { ApiHandler, ApiProviderInfo } from "../../../core/api"
 import { DiffViewProvider } from "../../../integrations/editor/DiffViewProvider"
-import { StateManager } from "../../storage/StateManager"
+import type { StateManager } from "../../storage/StateManager"
 import { MessageStateHandler } from "../message-state"
 import { StreamResponseHandler } from "../StreamResponseHandler"
 import { TaskMessenger } from "../TaskMessenger"

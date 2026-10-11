@@ -27,4 +27,25 @@ export function normalizeOpenaiReasoningEffort(effort?: string): OpenaiReasoning
 	return isOpenaiReasoningEffort(value) ? value : DEFAULT_OPENAI_REASONING_EFFORT
 }
 
+export type InferenceSpeed = "default" | "standard" | "fast"
+
+export const DEFAULT_INFERENCE_SPEED: InferenceSpeed = "default"
+
+export const INFERENCE_SPEED_LABELS = {
+	default: "Default",
+	standard: "Standard",
+	fast: "Fast",
+} as const satisfies Record<InferenceSpeed, string>
+
+export const INFERENCE_SPEED_OPTIONS = Object.freeze(Object.keys(INFERENCE_SPEED_LABELS) as InferenceSpeed[])
+
+export function isInferenceSpeed(value: unknown): value is InferenceSpeed {
+	return typeof value === "string" && INFERENCE_SPEED_OPTIONS.includes(value as InferenceSpeed)
+}
+
+export function normalizeInferenceSpeed(speed?: unknown): InferenceSpeed {
+	const value = typeof speed === "string" ? speed.toLowerCase() : DEFAULT_INFERENCE_SPEED
+	return isInferenceSpeed(value) ? value : DEFAULT_INFERENCE_SPEED
+}
+
 export type Mode = "plan" | "act"

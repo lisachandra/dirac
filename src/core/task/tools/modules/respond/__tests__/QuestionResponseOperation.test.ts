@@ -38,12 +38,9 @@ function createEnvironment(
 			yoloModeToggled: config.yoloModeToggled ?? false,
 			mode: "act",
 			ulid: "test-task",
-			api: { getModel: sinon.stub().returns({ id: "test-model" }) },
-			services: {
-				stateManager: {
-					getApiConfiguration: sinon.stub().returns({ actModeApiProvider: "anthropic" }),
-				},
-			},
+			providerId: "anthropic",
+			model: { id: "test-model", info: {} },
+			services: {},
 		},
 		telemetry: {
 			captureCustomMetadata: sinon.stub(),

@@ -4,7 +4,7 @@ import { type ApiConfiguration, bedrockModels } from "@shared/api"
 import { DiracMessageType, CardStatus, SubagentExecutionStatus } from "@shared/ExtensionMessage"
 import type { DiracMessage } from "@shared/ExtensionMessage"
 import { createSubagentCardInput, createSubagentCardOutput } from "@shared/subagents"
-import type { HistoryItem } from "@shared/HistoryItem"
+import type { HistoryItem, TaskHistoryItem } from "@shared/HistoryItem"
 import type { Meta, StoryObj } from "@storybook/react-vite"
 import { useEffect, useMemo, useState } from "react"
 import { useAppStore } from "@/app/store/appStore"
@@ -104,7 +104,13 @@ const mockApiConfigurationPlan = createApiConfig({
 	planModeApiModelId: "claude-3-5-sonnet-20241022",
 })
 
-const createHistoryItem = (id: string, hoursAgo: number, task: string, metrics: Partial<HistoryItem> = {}): HistoryItem => ({
+const createHistoryItem = (
+	id: string,
+	hoursAgo: number,
+	task: string,
+	metrics: Partial<TaskHistoryItem> = {},
+): TaskHistoryItem => ({
+	runKind: "task",
 	id,
 	ulid: "01HZZZ1A1B2C3D4E5F6G7H8J9K",
 	ts: Date.now() - hoursAgo * 3600000,

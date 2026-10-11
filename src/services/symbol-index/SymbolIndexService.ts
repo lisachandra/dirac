@@ -72,8 +72,7 @@ export class SymbolIndexService {
 	private activeReconciliation: Promise<void> | null = null
 	private queuedReconciliationReason: string | null = null
 	private eligiblePaths = new Set<string>()
-	private watchDirectories = new Set<string>()
-	private gitDirectory: string | null = null
+	private externalControlPaths = new Set<string>()
 	private disposed = false
 
 	private constructor() {}
@@ -118,19 +117,28 @@ export class SymbolIndexService {
 
 		this.disposed = false
 		await this.resetProjectDatabase(projectRoot)
-		await this.requestReconciliation("initial")
 		if (this.disposed) return
 
 		this.runtime = new SymbolIndexRuntime(projectRoot, {
 			admitsPath: (absolutePath) => this.shouldIndexPath(absolutePath),
+			excludesPath: (absolutePath) => this.eligibility?.excludesAbsolutePath(absolutePath) ?? true,
+			isControlPath: (absolutePath) => this.eligibility?.isControlPath(absolutePath) ?? false,
 			applyWatcherEvents: (events) => this.applyWatcherEvents(events),
 			requestReconciliation: (reason) => this.requestReconciliation(reason),
 		})
-		await this.refreshRuntimeWatches()
+		try {
+			const controlPaths = await this.eligibility!.prepareControlPaths()
+			this.externalControlPaths = controlPaths.externalControlPaths
+			this.runtime.refreshExternalControlPaths(this.externalControlPaths)
+		} catch (error) {
+			SymbolIndexTelemetry.recordFailure()
+			Logger.error("[SymbolIndexService] Failed to prepare eligibility control watchers", error)
+		}
+		await this.requestReconciliation("initial")
 	}
 
 	public async updateFile(absolutePath: string): Promise<void> {
-		await this.applyWatcherEvents([{ absolutePath, kind: "upsert" }])
+		await this.applyWatcherEvents([{ absolutePath, kind: "change" }])
 	}
 
 	public async removeFile(absolutePath: string): Promise<void> {
@@ -207,7 +215,6 @@ export class SymbolIndexService {
 		if (!db || !eligibility || this.disposed) return false
 
 		this.isScanningInternal = true
-		const startedAt = Date.now()
 		try {
 			const eligibilityResult = await eligibility.enumerate()
 			if (this.disposed || this.db !== db) return false
@@ -246,10 +253,9 @@ export class SymbolIndexService {
 			if (this.disposed || this.db !== db) return removedBeforeParsing > 0 || candidateResult.changed
 
 			this.eligiblePaths = eligiblePaths
-			this.watchDirectories = eligibilityResult.watchDirectories
-			this.gitDirectory = eligibilityResult.gitDirectory
+			this.externalControlPaths = eligibilityResult.externalControlPaths
 			if (candidateResult.retryRequested) this.rescheduleChangedDuringRead()
-			await this.refreshRuntimeWatches()
+			this.runtime?.refreshExternalControlPaths(this.externalControlPaths)
 			const removed = removedBeforeParsing + candidateResult.removed
 			this.compactDatabaseIfNeeded(db, reason)
 			SymbolIndexTelemetry.recordReconciliation(eligiblePaths.size, removed, candidateResult.replaced)
@@ -276,33 +282,90 @@ export class SymbolIndexService {
 		if (!db || !eligibility || this.disposed) return
 		SymbolIndexTelemetry.recordUpdateRun()
 
-		const eligibilityResult = await eligibility.enumerate()
-		if (this.disposed || this.db !== db) return
-		const removedPaths: string[] = []
-		const candidatePaths: FileCandidate[] = []
+		const removedPaths = new Set<string>()
+		const removedPathHints = new Set<string>()
+		const candidatePaths = new Map<string, FileCandidate>()
+		let directoryChangeDetected = false
+
 		for (const event of events) {
 			const relPath = path.normalize(path.relative(this.projectRoot, event.absolutePath))
-			if (!eligibility.admitsRelativePath(relPath)) {
+			if (relPath === ".." || relPath.startsWith(`..${path.sep}`) || path.isAbsolute(relPath)) {
 				SymbolIndexTelemetry.recordWatcherRejected()
 				continue
 			}
+
 			if (event.kind === "remove") {
-				removedPaths.push(relPath)
+				removedPathHints.add(relPath)
 				continue
 			}
-			if (eligibilityResult.paths.has(relPath)) candidatePaths.push({ absolutePath: event.absolutePath, relPath })
-			else removedPaths.push(relPath)
+
+			let stats
+			try {
+				stats = await fs.stat(event.absolutePath)
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+				removedPathHints.add(relPath)
+				continue
+			}
+
+			if (stats.isDirectory()) {
+				directoryChangeDetected = true
+				continue
+			}
+			if (!stats.isFile() || !eligibility.admitsRelativePath(relPath)) {
+				if (this.eligiblePaths.has(relPath)) removedPaths.add(relPath)
+				SymbolIndexTelemetry.recordWatcherRejected()
+				continue
+			}
+			candidatePaths.set(relPath, { absolutePath: event.absolutePath, relPath })
 		}
 
-		await this.applyRemovalBatches(db, removedPaths, "watcher update")
+		this.collectRemovedPaths(removedPathHints, removedPaths)
+
+		const eligibleAbsolutePaths = await eligibility.filterAbsolutePaths(
+			[...candidatePaths.values()].map((candidate) => candidate.absolutePath),
+		)
+		const eligibleCandidates: FileCandidate[] = []
+		for (const candidate of candidatePaths.values()) {
+			if (eligibleAbsolutePaths.has(candidate.absolutePath)) eligibleCandidates.push(candidate)
+			else removedPaths.add(candidate.relPath)
+		}
+
+		await this.applyRemovalBatches(db, [...removedPaths], "watcher update")
 		if (this.disposed || this.db !== db) return
-		const candidateResult = await this.applyCandidateBatches(db, candidatePaths, "watcher update")
+		const candidateResult = await this.applyCandidateBatches(db, eligibleCandidates, "watcher update")
 		if (this.disposed || this.db !== db) return
-		this.eligiblePaths = eligibilityResult.paths
-		this.watchDirectories = eligibilityResult.watchDirectories
-		this.gitDirectory = eligibilityResult.gitDirectory
+
+		for (const relPath of removedPaths) this.eligiblePaths.delete(relPath)
+		for (const candidate of eligibleCandidates) this.eligiblePaths.add(candidate.relPath)
 		if (candidateResult.retryRequested) this.rescheduleChangedDuringRead()
-		await this.refreshRuntimeWatches()
+		if (directoryChangeDetected) void this.requestReconciliation("watcher directory change")
+	}
+
+	private collectRemovedPaths(relativePathHints: ReadonlySet<string>, removedPaths: Set<string>): void {
+		const possibleDirectoryPaths = new Set<string>()
+		for (const relativePath of relativePathHints) {
+			if (this.eligiblePaths.has(relativePath)) removedPaths.add(relativePath)
+			else possibleDirectoryPaths.add(relativePath)
+		}
+		if (possibleDirectoryPaths.size === 0) return
+		if (possibleDirectoryPaths.has(".")) {
+			for (const eligiblePath of this.eligiblePaths) removedPaths.add(eligiblePath)
+			return
+		}
+
+		for (const eligiblePath of this.eligiblePaths) {
+			let ancestorPath = path.dirname(eligiblePath)
+			while (ancestorPath !== ".") {
+				if (possibleDirectoryPaths.has(ancestorPath)) {
+					removedPaths.add(eligiblePath)
+					break
+				}
+				const parentPath = path.dirname(ancestorPath)
+				if (parentPath === ancestorPath) break
+				ancestorPath = parentPath
+			}
+		}
 	}
 
 	private compactDatabaseIfNeeded(db: SymbolIndexDatabase, reason: string): void {
@@ -461,16 +524,6 @@ export class SymbolIndexService {
 		this.retryTimeout.unref()
 	}
 
-	private async refreshRuntimeWatches(): Promise<void> {
-		if (!this.runtime) return
-		try {
-			await this.runtime.refreshWatchedDirectories(this.watchDirectories, this.gitDirectory)
-		} catch (error) {
-			SymbolIndexTelemetry.recordFailure()
-			Logger.error("[SymbolIndexService] Failed to refresh symbol-index watch directories", error)
-		}
-	}
-
 	private isLikelyMinifiedOrGenerated(fileContent: string): boolean {
 		const lines = fileContent.split(/\r?\n/)
 		if (lines[0]?.length > SymbolIndexService.MAX_FIRST_LINE_LENGTH) return true
@@ -508,8 +561,7 @@ export class SymbolIndexService {
 		this.projectRoot = projectRoot
 		this.eligibility = new SymbolIndexEligibility(projectRoot)
 		this.eligiblePaths = new Set()
-		this.watchDirectories = new Set()
-		this.gitDirectory = null
+		this.externalControlPaths = new Set()
 
 		let databasePath: string | undefined
 		if (this.isPersistenceEnabled) {

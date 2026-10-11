@@ -1,9 +1,10 @@
 import { DiracToolSpec } from "../../../../shared/tools"
+import type { ToolResponse } from "../types/ToolResponse"
 
 import { IToolEnvironment } from "./IToolEnvironment"
 import { SurfaceType } from "./SurfaceType"
 
-export interface IDiracTool<TArgs = any, TResult = any> {
+export interface IDiracTool<TArgs = any, TResult = ToolResponse> {
 	/**
 	 * 1. DEFINITION
 	 * Returns the JSON schema injected into the LLM's system prompt.

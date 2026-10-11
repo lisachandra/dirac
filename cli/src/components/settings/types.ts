@@ -1,12 +1,14 @@
 import type { Controller } from "@/core/controller"
 
 export enum SettingsTab {
-	API = "api",
-	AUTO_APPROVE = "auto-approve",
-	USER_APPROVED_COMMANDS = "user-approved-commands",
-	FEATURES = "features",
+	MODELS_API = "models-api",
+	UTILITY_MODEL = "utility-model",
+	APPROVALS = "approvals",
+	RESPONSES_CONTEXT = "responses-context",
+	RUNNING_TASKS = "running-tasks",
 	TOOLS = "tools",
-	OTHER = "other",
+	TERMINAL = "terminal",
+	GENERAL = "general",
 }
 
 export enum SettingsItemType {
@@ -31,9 +33,24 @@ export interface ListItem {
 	label: string
 	type: SettingsItemType
 	value: any
+	cycleOptions?: readonly string[]
 	description?: string
+	expandedHelp?: string
+	keywords?: string[]
+	persistentHelp?: string
+	alwaysShowHelp?: boolean
+	helpTone?: "muted" | "warning" | "error"
 	isSubItem?: boolean
 	parentKey?: string
+}
+
+export interface SettingsSearchResult {
+	id: string
+	destination: SettingsTab
+	destinationLabel: string
+	itemIndex: number
+	item: ListItem
+	searchText: string
 }
 
 export interface SettingsPanelContentProps {

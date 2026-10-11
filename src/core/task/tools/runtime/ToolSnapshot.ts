@@ -21,6 +21,7 @@ export interface ToolInventorySnapshot {
 export interface ToolRequestSnapshot {
 	inventoryVersion: number
 	requestId: string
+	configurationRevision?: number
 	promptVisibleSpecs: DiracToolSpec[]
 	inventoryEnabledTools: readonly DiscoveredTool[]
 	activeSkillIds: readonly string[]

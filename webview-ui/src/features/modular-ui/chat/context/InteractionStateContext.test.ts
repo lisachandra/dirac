@@ -2,13 +2,6 @@ import { CardKind, CardStatus, DiracMessageType, TaskStatus } from "@shared/Exte
 import { describe, expect, it } from "vitest"
 import { InteractionState, projectInteractionState } from "./InteractionStateContext"
 
-function markdownMessage(id: string) {
-	return {
-		id,
-		ts: 1,
-		content: { type: DiracMessageType.MARKDOWN, content: "message" },
-	}
-}
 
 function cardMessage(status: CardStatus) {
 	return {
@@ -32,21 +25,49 @@ describe("projectInteractionState", () => {
 	it("prioritizes a waiting card over a busy transport flag", () => {
 		expect(
 			projectInteractionState({
-				messages: [markdownMessage("task"), cardMessage(CardStatus.WAITING_FOR_INPUT), markdownMessage("trailing")],
-				activeCardId: "card-message",
+				hasTask: true,
+				activeCardMessage: cardMessage(CardStatus.WAITING_FOR_INPUT),
 				isApiRequestActive: true,
 				taskStatus: TaskStatus.EXECUTING_TOOL,
 			}),
 		).toBe(InteractionState.AWAITING_RESPONSE)
 	})
 
-	it("keeps authoritative completion despite trailing markdown", () => {
+	it("keeps authoritative completion despite a busy transport flag", () => {
 		expect(
 			projectInteractionState({
-				messages: [markdownMessage("task"), markdownMessage("trailing")],
+				hasTask: true,
 				isApiRequestActive: true,
 				taskStatus: TaskStatus.COMPLETED,
 			}),
 		).toBe(InteractionState.COMPLETED)
+	})
+
+	it("does not treat a terminal active card as an outstanding response", () => {
+		expect(
+			projectInteractionState({
+				hasTask: true,
+				activeCardMessage: cardMessage(CardStatus.SUCCESS),
+				taskStatus: TaskStatus.EXECUTING_TOOL,
+			}),
+		).toBe(InteractionState.RUNNING)
+	})
+
+	it("keeps a task running when it has no active card", () => {
+		expect(
+			projectInteractionState({
+				hasTask: true,
+				taskStatus: TaskStatus.EXECUTING_TOOL,
+			}),
+		).toBe(InteractionState.RUNNING)
+	})
+
+	it("is idle only when no task exists", () => {
+		expect(
+			projectInteractionState({
+				hasTask: false,
+				taskStatus: TaskStatus.EXECUTING_TOOL,
+			}),
+		).toBe(InteractionState.IDLE)
 	})
 })

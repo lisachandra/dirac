@@ -1,7 +1,7 @@
 import { getSavedApiConversationHistory, getSavedDiracMessages } from "@core/storage/disk"
 import { DiracWebviewProvider } from "@core/webview"
 import { AutoApprovalSettings, DEFAULT_AUTO_APPROVAL_SETTINGS } from "@shared/AutoApprovalSettings"
-import { HistoryItem } from "@shared/HistoryItem"
+import { type HistoryItem, isTaskHistoryItem, type TaskHistoryItem } from "@shared/HistoryItem"
 import { jsonHeaders } from "@shared/net"
 import { execa } from "execa"
 import * as http from "http"
@@ -293,7 +293,9 @@ export async function createTestServer(controller: Controller): Promise<http.Ser
 
 						// Get task history and metrics
 						const taskHistory = await visibleWebview.controller.getStateToPostToWebview()
-						const taskData = taskHistory.taskHistory?.find((t: HistoryItem) => t.id === taskId)
+						const taskData = taskHistory.taskHistory?.find(
+							(item: HistoryItem): item is TaskHistoryItem => item.id === taskId && isTaskHistoryItem(item),
+						)
 
 						// Get messages and API conversation history
 						let messages: any[] = []

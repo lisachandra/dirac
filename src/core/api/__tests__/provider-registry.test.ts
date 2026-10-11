@@ -4,11 +4,7 @@
 import { describe, it } from "mocha"
 import "should"
 import sinon from "sinon"
-import {
-	type ApiConfiguration,
-	openAiModelInfoSaneDefaults,
-	requestyDefaultModelInfo,
-} from "@shared/api"
+import { type ApiConfiguration, openAiModelInfoSaneDefaults, requestyDefaultModelInfo } from "@shared/api"
 import { buildApiHandler, createRegistryHandler, validateApiConfiguration } from "../index"
 import { TEST_MODEL_IDS } from "@test/fixtures/model-ids"
 import { Logger } from "@shared/services/Logger"
@@ -87,7 +83,7 @@ describe("Provider Registry", () => {
 		},
 		{
 			provider: "deepseek",
-			config: { deepSeekApiKey: "test-key", planModeApiModelId: "deepseek-chat", actModeApiModelId: "deepseek-chat" },
+			config: { deepSeekApiKey: "test-key", planModeApiModelId: "deepseek-flash", actModeApiModelId: "deepseek-flash" },
 		},
 		{
 			provider: "requesty",
@@ -405,7 +401,6 @@ describe("Provider Registry", () => {
 		handler.should.not.be.undefined()
 	})
 
-
 	it("clips an oversized thinking budget without changing the input configuration", () => {
 		const config: ApiConfiguration = {
 			apiProvider: "anthropic",
@@ -478,6 +473,57 @@ describe("Provider Registry", () => {
 			}),
 		).throw("openrouter requires an explicit model ID")
 	})
+	it("rejects inference speed controls for unsupported providers and models", () => {
+		should(() =>
+			validateApiConfiguration(
+				{
+					planModeApiProvider: "deepseek",
+					planModeApiModelId: "deepseek-flash",
+					planModeInferenceSpeed: "fast",
+				},
+				"plan",
+			),
+		).throw("Model deepseek-flash does not support Fast mode")
+	})
+
+	it("rejects Standard for providers without speed controls", () => {
+		should(() =>
+			validateApiConfiguration(
+				{
+					planModeApiProvider: "deepseek",
+					planModeApiModelId: "deepseek-flash",
+					planModeInferenceSpeed: "standard",
+				},
+				"plan",
+			),
+		).throw("Provider deepseek does not support inference speed controls")
+	})
+
+	it("accepts Standard for a supported provider whose model lacks Fast", () => {
+		should(() =>
+			validateApiConfiguration(
+				{
+					planModeApiProvider: "anthropic",
+					planModeApiModelId: "claude-opus-4-6",
+					planModeInferenceSpeed: "standard",
+				},
+				"plan",
+			),
+		).not.throw()
+	})
+	it("accepts Fast for a supported native OpenAI model", () => {
+		should(() =>
+			validateApiConfiguration(
+				{
+					planModeApiProvider: "openai-native",
+					planModeApiModelId: "gpt-5.4",
+					planModeInferenceSpeed: "fast",
+				},
+				"plan",
+			),
+		).not.throw()
+	})
+
 	it("registry returns same number of providers as switch cases in buildApiHandler", () => {
 		// The registry must cover all 37 supported providers.
 		allKnownProviders.length.should.equal(37)

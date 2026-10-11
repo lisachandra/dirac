@@ -1,6 +1,6 @@
 import * as fs from "node:fs"
 import * as path from "node:path"
-import { DatabaseSync, type StatementSync } from "node:sqlite"
+import type { DatabaseSync, StatementSync } from "node:sqlite"
 import { Logger } from "../../shared/services/Logger"
 import type { SymbolLocation } from "./SymbolIndexService"
 import { SymbolIndexTelemetry } from "./SymbolIndexTelemetry"
@@ -41,6 +41,8 @@ export interface SymbolIndexDatabaseAllocation {
 	reclaimableBytes: number
 }
 
+type DatabaseSyncConstructor = typeof import("node:sqlite").DatabaseSync
+
 export class SymbolIndexDatabase {
 	private constructor(
 		private readonly db: DatabaseSync,
@@ -50,19 +52,20 @@ export class SymbolIndexDatabase {
 	}
 
 	public static async create(dbPath?: string): Promise<SymbolIndexDatabase> {
-		if (!dbPath) return SymbolIndexDatabase.open(":memory:")
+		const { DatabaseSync } = await import("node:sqlite")
+		if (!dbPath) return SymbolIndexDatabase.open(":memory:", DatabaseSync)
 
 		Logger.info(`[SymbolIndexDatabase] Initializing database at ${dbPath}`)
 		fs.mkdirSync(path.dirname(dbPath), { recursive: true })
 		try {
-			return SymbolIndexDatabase.open(dbPath)
+			return SymbolIndexDatabase.open(dbPath, DatabaseSync)
 		} catch (error) {
 			if (!SymbolIndexDatabase.isCorruptDatabaseError(error)) throw error
 			const quarantinePath = `${dbPath}.corrupt-${Date.now()}`
 			fs.renameSync(dbPath, quarantinePath)
 			Logger.error(`[SymbolIndexDatabase] Quarantined corrupt database at ${quarantinePath}: ${error}`)
 			SymbolIndexTelemetry.recordFailure()
-			return SymbolIndexDatabase.open(dbPath)
+			return SymbolIndexDatabase.open(dbPath, DatabaseSync)
 		}
 	}
 
@@ -161,8 +164,8 @@ export class SymbolIndexDatabase {
 		this.db.close()
 	}
 
-	private static open(location: string): SymbolIndexDatabase {
-		const database = new DatabaseSync(location)
+	private static open(location: string, DatabaseConstructor: DatabaseSyncConstructor): SymbolIndexDatabase {
+		const database = new DatabaseConstructor(location)
 		try {
 			return new SymbolIndexDatabase(database, location)
 		} catch (error) {

@@ -51,7 +51,12 @@ const AutoApproveMenuItem = ({ action, isChecked, onToggle, showIcon = true, dis
 			</CheckboxWrapper>
 			{action.subAction && (
 				<SubOptionAnimateIn inert={!checked ? "" : undefined} show={checked}>
-					<AutoApproveMenuItem action={action.subAction} isChecked={isChecked} onToggle={onToggle} />
+					<AutoApproveMenuItem
+						action={action.subAction}
+						disabled={disabled}
+						isChecked={isChecked}
+						onToggle={onToggle}
+					/>
 				</SubOptionAnimateIn>
 			)}
 		</div>

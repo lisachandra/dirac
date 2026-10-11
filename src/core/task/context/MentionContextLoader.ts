@@ -18,7 +18,7 @@ export class MentionContextLoader {
 	constructor(
 		private dependencies: ContextLoaderDependencies,
 		private fileContextLoader: FileContextLoader,
-	) {}
+	) { }
 
 	// Parse mentions and slash commands, then optionally enrich with file/symbol context
 	async enrichContext(
@@ -81,28 +81,29 @@ export class MentionContextLoader {
 			includeUserTools: true,
 			forceRefresh: true,
 		})
-		await this.dependencies.postStateToWebview()
-		const registry = ToolRegistry.getInstance()
-		const allTools = registry.getAllTools()
-		const userTools = allTools.filter((t) => t.source !== "builtin")
-		const enabledTools = registry.getEnabledTools()
-		const userToolSummary =
-			userTools.length > 0
-				? userTools
+		const reloadResponse = await ToolRegistry.withExclusiveAccess((registry) => {
+			const allTools = registry.getAllTools()
+			const userTools = allTools.filter((tool) => tool.source !== "builtin")
+			const enabledTools = registry.getEnabledTools()
+			const userToolSummary =
+				userTools.length > 0
+					? userTools
 						.map(
-							(t) =>
-								`  - ${t.id} (${t.source}) — ${enabledTools.some((e) => e.id === t.id) ? "enabled" : "disabled"}`,
+							(tool) =>
+								`  - ${tool.id} (${tool.source}) — ${enabledTools.some((enabled) => enabled.id === tool.id) ? "enabled" : "disabled"}`,
 						)
 						.join("\n")
-				: "  (none found)"
-		const reloadResponse = [
-			`Tools reloaded. Found ${allTools.length} total tools (${userTools.length} user tools).`,
-			"",
-			"User tools:",
-			userToolSummary,
-			"",
-			"Note: User tools are disabled by default. Enable them in Settings \u2192 Tools or by toggling the switch.",
-		].join("\n")
+					: "  (none found)"
+			return [
+				`Tools reloaded. Found ${allTools.length} total tools (${userTools.length} user tools).`,
+				"",
+				"User tools:",
+				userToolSummary,
+				"",
+				"Note: User tools are disabled by default. Enable them in Settings → Tools or by toggling the switch.",
+			].join("\n")
+		})
+		await this.dependencies.postStateToWebview()
 		return { enrichedText: "", needsDiracrulesFileCheck: false, isDirectResponse: true, directResponseText: reloadResponse }
 	}
 
