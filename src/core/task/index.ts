@@ -864,6 +864,9 @@ export class Task {
 			stateManager: this.stateManager,
 			taskMessenger: this.taskMessenger,
 			getApi: () => this.api,
+			createActiveModelHandler: () =>
+				this.createApiHandlerForRuntime(this.stateManager.getApiConfiguration(), this.getCurrentProviderInfo().mode),
+			getCurrentProviderId: () => this.getCurrentProviderInfo().providerId,
 			postStateToWebview: this.postStateToWebview,
 			cancelTask: this.cancelTask,
 			setActiveHookExecution: this.hookManager.setActiveHookExecution.bind(this.hookManager),
@@ -899,7 +902,8 @@ export class Task {
 			cancelTask: this.cancelTask,
 			runUserPromptSubmitHook: this.runUserPromptSubmitHook.bind(this),
 			onContextCompacted: this.notifyContextCompacted.bind(this),
-			runLocalConversationCompaction: (source) => this.localConversationCompaction.run({ source }),
+			runLocalConversationCompaction: (options) =>
+			this.localConversationCompaction.run(typeof options === 'string' ? { source: options } : options),
 		})
 
 		this.responseProcessor = new ResponseProcessor({

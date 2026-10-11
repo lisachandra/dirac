@@ -16,6 +16,9 @@ import { getAutoCondenseContextLimit } from "@shared/context-management"
 import { ApiConversationManagerDependencies } from "./types/api-conversation-manager"
 import type { LocalConversationCompactionOutcome } from "./LocalConversationCompaction"
 
+/** Bound for the unary native-compact call. Without it a stalled provider wedges the post-/smol turn. */
+const PROVIDER_COMPACTION_TIMEOUT_MS = 60_000
+
 type CondensationStoppedStatus = Exclude<LocalConversationCompactionOutcome["status"], "completed">
 
 /** Turn text for condensation attempts that did not compact the conversation. */
@@ -158,6 +161,18 @@ export class ApiConversationManager {
 		)
 	}
 
+	private raceProviderCompaction<T>(request: Promise<T>): Promise<T> {
+		let timer: ReturnType<typeof setTimeout> | undefined
+		const timeout = new Promise<never>((_, reject) => {
+			timer = setTimeout(() => {
+				reject(new Error(`Provider-native conversation compaction timed out after ${PROVIDER_COMPACTION_TIMEOUT_MS}ms; falling back to plaintext condensed history.`))
+			}, PROVIDER_COMPACTION_TIMEOUT_MS)
+		})
+		return Promise.race([request, timeout]).finally(() => {
+			if (timer !== undefined) clearTimeout(timer)
+		}) as Promise<T>
+	}
+
 	private hasCompatibleAssistantAfterBoundary(
 		history: DiracStorageMessage[],
 		boundary: number,
@@ -223,12 +238,13 @@ export class ApiConversationManager {
 							pendingCompaction.previousConversationHistoryDeletedRange,
 						) as DiracStorageMessage[])
 				try {
-					const result = await this.dependencies.api.compactConversation({
+					const compactionRequest = this.dependencies.api.compactConversation({
 						systemPrompt: params.systemPrompt,
 						messages: messages.map(removeProviderBoundaryMetadataFromMessage),
 						tools: params.tools,
 						checkpoint,
 					})
+					const result = await this.raceProviderCompaction(compactionRequest)
 					if (this.dependencies.taskState.abort) throw new Error("Task instance aborted")
 					checkpoint = {
 						providerId: params.providerId,
@@ -400,7 +416,7 @@ export class ApiConversationManager {
 		}
 
 		if (directActions?.some((action) => action.type === "condenseConversation")) {
-			const compaction = await this.dependencies.runLocalConversationCompaction("user")
+			const compaction = await this.dependencies.runLocalConversationCompaction({ source: "user", skipApproval: true })
 			if (compaction.status !== "completed") {
 				return {
 					userContent: parsedUserContent,

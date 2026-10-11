@@ -30,8 +30,12 @@ export async function executeBuiltinCommand(
 	}
 
 	const textWithoutSlashCommand = removeSlashCommand(fullText, contentStartIndex, slashMatch)
-	if ((commandName === "smol" || commandName === "compact") && conversationCondensationAvailable) {
+	if (commandName === "smol" || commandName === "compact") {
 		telemetryService.captureSlashCommandUsed(ulid, commandName, "builtin")
+		// Local condensation always handles the Utility-unavailable case itself:
+		// Utility stays preferred, while an explicit user request falls back to
+		// the active model instead of emitting a condense-tool prompt the model
+		// may ignore. Automatic condensation still requires the Utility model.
 		return {
 			processedText: textWithoutSlashCommand,
 			needsDiracrulesFileCheck: false,

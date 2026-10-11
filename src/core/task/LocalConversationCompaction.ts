@@ -1,4 +1,5 @@
 import { type ApiHandler, buildApiHandlerForSelection } from "@core/api"
+import { ActiveModelTextCondenser } from "@core/text-condensation/ActiveModelTextCondenser"
 import type { ContextManager } from "@core/context/context-management/ContextManager"
 import { getHookModelContext } from "@core/hooks/hook-model-context"
 import { getHooksEnabledSafe } from "@core/hooks/hooks-utils"
@@ -54,6 +55,9 @@ interface LocalConversationCompactionDependencies {
 	stateManager: StateManager
 	taskMessenger: TaskMessenger
 	getApi: () => ApiHandler
+	createActiveModelHandler?: () => ApiHandler
+	getCurrentProviderId?: () => string | undefined
+	getCurrentMode?: () => string
 	postStateToWebview: () => Promise<void>
 	cancelTask: () => Promise<void>
 	setActiveHookExecution: (hookExecution: HookExecution | undefined) => Promise<void>
@@ -61,19 +65,23 @@ interface LocalConversationCompactionDependencies {
 	onContextCompacted?: () => void
 }
 
-interface LocalConversationCompactionOptions {
+export interface LocalConversationCompactionOptions {
 	source: LocalConversationCompactionSource
 	triggerApiRequestIndex?: number
+	/** Explicit /smol already expresses intent; skip the redundant approval card. */
+	skipApproval?: boolean
 }
 
-interface UtilityModelIdentity {
+interface CondensationModelIdentity {
 	providerId: string
 	modelId: string
+	fallback: boolean
 }
 
 /**
  * Runs conversation condensation outside the active model/tool loop. The Utility
- * model produces and validates the summary before any conversation state changes.
+ * model is preferred; the active model is used only as an explicit
+ * user-requested fallback when no Utility model is configured.
  */
 export class LocalConversationCompaction {
 	constructor(private readonly dependencies: LocalConversationCompactionDependencies) {}
@@ -102,23 +110,36 @@ export class LocalConversationCompaction {
 		const selection = getConfiguredUtilityModelSelection(settings.utilityModelSelection)
 		const configuredIdentity = this.getConfiguredIdentity(settings.utilityModelSelection)
 
-		if (!selection || !this.isAvailable()) return { status: "unavailable" }
+		const utilityAvailable = Boolean(selection) && this.isAvailable()
+		const useFallback = !utilityAvailable
+		if (useFallback && options.source !== "user") return { status: "unavailable" }
+		if (useFallback && !templates.has(CONVERSATION_CONTINUATION_TEMPLATE_ID)) return { status: "unavailable" }
 
-		const approval = await this.requestUserApproval(options.source)
+		const approval = await this.requestUserApproval(options.source, options.skipApproval)
 		if (approval.outcome === "declined") return { status: "cancelled" }
 
 		let handler: ApiHandler
-		let identity: UtilityModelIdentity
+		let identity: CondensationModelIdentity
 		try {
-			handler = buildApiHandlerForSelection(this.dependencies.stateManager.getApiConfiguration(), selection, {
-				ulid: this.dependencies.ulid,
-			})
-			identity = {
-				providerId: selection.provider,
-				modelId: handler.getModel().id,
+			if (useFallback) {
+				handler = this.dependencies.createActiveModelHandler?.() ?? this.dependencies.getApi()
+				identity = {
+					providerId: this.dependencies.getCurrentProviderId?.() ?? "active-model",
+					modelId: handler.getModel().id,
+					fallback: true,
+				}
+			} else {
+				handler = buildApiHandlerForSelection(this.dependencies.stateManager.getApiConfiguration(), selection!, {
+					ulid: this.dependencies.ulid,
+				})
+				identity = {
+					providerId: selection!.provider,
+					modelId: handler.getModel().id,
+					fallback: false,
+				}
 			}
 		} catch (error) {
-			await this.displayFailure(configuredIdentity, error, approval.card)
+			await this.displayFailure(useFallback ? undefined : configuredIdentity, error, approval.card, useFallback)
 			return { status: "failed" }
 		}
 
@@ -129,7 +150,7 @@ export class LocalConversationCompaction {
 		let summary: string
 		let continuation: string
 		try {
-			summary = await this.generateSummary(selection, handler, templates)
+			summary = await this.generateSummary(selection, handler, templates, useFallback, this.linkedCondensationSignal(useFallback ? handler : undefined))
 			this.throwIfCancelled()
 			const range = this.dependencies.contextManager.getNextTruncationRange(
 				this.dependencies.messageStateHandler.getApiConversationHistory(),
@@ -155,11 +176,11 @@ export class LocalConversationCompaction {
 			await card.update({
 				header: `Conversation Condensation ${state} · ${this.formatIdentity(identity)}`,
 				status,
-				body: cancelled ? CONDENSE_CANCELLED_BODY : this.buildFailureBody(error),
+				body: cancelled ? CONDENSE_CANCELLED_BODY : this.buildFailureBody(error, identity.fallback),
 				collapsed: false,
 			})
 			await card.finalize(status, true)
-			if (!cancelled) Logger.error("Local Utility conversation condensation failed", error)
+			if (!cancelled) Logger.error("Local conversation condensation failed", error)
 			return { status: cancelled ? "cancelled" : "failed" }
 		}
 
@@ -186,13 +207,16 @@ export class LocalConversationCompaction {
 	}
 
 	/**
-	 * Asks the user before a user-requested condensation. Automatic condensation and
-	 * fully autonomous sessions skip the prompt and get a progress card instead.
+	 * Asks the user before a user-requested condensation. Automatic condensation,
+	 * explicit direct actions, and fully autonomous sessions skip the prompt and
+	 * get a progress card instead.
 	 */
 	private async requestUserApproval(
 		source: LocalConversationCompactionSource,
+		skipApproval = false,
 	): Promise<{ outcome: "approved" | "declined" | "skipped"; card?: ICardHandle }> {
 		if (source !== "user") return { outcome: "skipped" }
+		if (skipApproval) return { outcome: "skipped" }
 		if (this.dependencies.stateManager.getGlobalSettingsKey("yoloModeToggled")) return { outcome: "skipped" }
 
 		const card = await this.dependencies.taskMessenger.createCard({
@@ -217,7 +241,7 @@ export class LocalConversationCompaction {
 	}
 
 	/** Reuses the approval card as the progress and result card. */
-	private async reuseApprovalCard(card: ICardHandle, identity: UtilityModelIdentity): Promise<ICardHandle> {
+	private async reuseApprovalCard(card: ICardHandle, identity: CondensationModelIdentity): Promise<ICardHandle> {
 		await card.update({
 			header: `Condensing Conversation · ${this.formatIdentity(identity)}`,
 			status: CardStatus.RUNNING,
@@ -226,7 +250,7 @@ export class LocalConversationCompaction {
 		return card
 	}
 
-	private async createCondensingCard(identity: UtilityModelIdentity): Promise<ICardHandle> {
+	private async createCondensingCard(identity: CondensationModelIdentity): Promise<ICardHandle> {
 		return await this.dependencies.taskMessenger.createCard({
 			header: `Condensing Conversation · ${this.formatIdentity(identity)}`,
 			status: CardStatus.RUNNING,
@@ -235,17 +259,33 @@ export class LocalConversationCompaction {
 		})
 	}
 
+	private linkedCondensationSignal(disposableHandler?: ApiHandler): AbortSignal | undefined {
+		const parent = this.dependencies.taskState.abortSignal
+		if (parent.aborted) return parent
+		if (!disposableHandler) return parent
+		const controller = new AbortController()
+		const onAbort = () => {
+			try { disposableHandler.abort?.() } catch { /* best effort */ }
+			controller.abort()
+		}
+		parent.addEventListener("abort", onAbort, { once: true })
+		return controller.signal
+	}
+
 	private throwIfCancelled(): void {
 		if (this.dependencies.taskState.abort) throw new UtilityModelCancelledError()
 	}
 
 	private async generateSummary(
-		selection: ModelProviderSelection,
+		selection: ModelProviderSelection | undefined,
 		handler: ApiHandler,
 		templates: ReturnType<typeof createDefaultTextCondensationTemplateRegistry>,
+		useFallback: boolean,
+		signal?: AbortSignal,
 	): Promise<string> {
-		const runner = new UtilityModelRunner(selection, () => handler)
-		const textCondenser = new UtilityModelTextCondenser(runner, templates)
+		const textCondenser = useFallback
+			? new ActiveModelTextCondenser(handler, templates)
+			: new UtilityModelTextCondenser(new UtilityModelRunner(selection!, () => handler), templates)
 		const service = new ConversationCondensationService({
 			messageState: this.dependencies.messageStateHandler,
 			contextManager: this.dependencies.contextManager,
@@ -254,7 +294,7 @@ export class LocalConversationCompaction {
 		})
 		return await service.condenseConversation(CONVERSATION_CONTINUATION_TEMPLATE_ID, {
 			historyScope: "effective",
-			signal: this.dependencies.taskState.abortSignal,
+			signal: signal,
 		})
 	}
 
@@ -327,12 +367,13 @@ export class LocalConversationCompaction {
 	}
 
 	private async displayFailure(
-		identity: UtilityModelIdentity | undefined,
+		identity: CondensationModelIdentity | undefined,
 		error: unknown,
 		existingCard?: ICardHandle,
+		useFallback = false,
 	): Promise<void> {
-		const header = `Conversation Condensation Failed · ${identity ? this.formatIdentity(identity) : "Utility model unavailable"}`
-		const body = this.buildFailureBody(error)
+		const header = `Conversation Condensation Failed · ${identity ? this.formatIdentity(identity) : useFallback ? "active model unavailable" : "Utility model unavailable"}`
+		const body = this.buildFailureBody(error, useFallback)
 		const card =
 			existingCard ??
 			(await this.dependencies.taskMessenger.createCard({
@@ -344,25 +385,27 @@ export class LocalConversationCompaction {
 			}))
 		if (existingCard) await existingCard.update({ header, status: CardStatus.ERROR, body, collapsed: false })
 		await card.finalize(CardStatus.ERROR, true)
-		Logger.error("Failed to initialize Utility conversation condensation", error)
+		Logger.error("Failed to initialize conversation condensation", error)
 	}
 
-	private buildFailureBody(error: unknown): string {
+	private buildFailureBody(error: unknown, useFallback = false): string {
 		const message = getErrorMessage(error)
+		if (useFallback) return `Active-model conversation condensation failed. Retry, or configure a Utility model.\n\n${message}`
 		return `Utility-model conversation condensation failed. Fix or change the configured Utility model, then retry.\n\n${message}`
 	}
 
-	private getConfiguredIdentity(selection: unknown): UtilityModelIdentity | undefined {
+	private getConfiguredIdentity(selection: unknown): CondensationModelIdentity | undefined {
 		if (!selection || typeof selection !== "object") return undefined
 		const { provider, modelId } = selection as {
 			provider?: unknown
 			modelId?: unknown
 		}
 		if (typeof provider !== "string" || typeof modelId !== "string") return undefined
-		return { providerId: provider, modelId }
+		return { providerId: provider, modelId, fallback: false }
 	}
 
-	private formatIdentity(identity: UtilityModelIdentity): string {
-		return `${identity.providerId}/${identity.modelId}`
+	private formatIdentity(identity: CondensationModelIdentity): string {
+		const base = `${identity.providerId}/${identity.modelId}`
+		return identity.fallback ? `${base} (active model)` : base
 	}
 }
