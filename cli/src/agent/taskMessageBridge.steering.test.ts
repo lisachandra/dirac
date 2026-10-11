@@ -36,8 +36,6 @@ const sessionState = {
 	sessionId: "session-1",
 	status: AcpSessionStatus.Processing,
 	pendingToolCalls: new Map(),
-	emittedPlanCardIds: new Set(),
-	emittedCompletionCardIds: new Set(),
 }
 
 describe("TaskMessageBridge steering transcripts", () => {

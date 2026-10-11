@@ -1337,8 +1337,6 @@ export class DiracAgent implements acp.Agent {
 			sessionId,
 			status: AcpSessionStatus.Idle,
 			pendingToolCalls: new Map(),
-			emittedPlanCardIds: new Set(),
-			emittedCompletionCardIds: new Set(),
 		}
 
 		this.sessionStates.set(sessionId, sessionState)
@@ -1467,8 +1465,6 @@ export class DiracAgent implements acp.Agent {
 			sessionId,
 			status: AcpSessionStatus.Idle,
 			pendingToolCalls: new Map(),
-			emittedPlanCardIds: new Set(),
-			emittedCompletionCardIds: new Set(),
 		})
 		this.writeSessionRuntimeConfig(session, sessionOverrides)
 
@@ -2267,8 +2263,6 @@ export class DiracAgent implements acp.Agent {
 					sessionId,
 					status: AcpSessionStatus.Idle,
 					pendingToolCalls: new Map(),
-					emittedPlanCardIds: new Set(),
-					emittedCompletionCardIds: new Set(),
 				}
 				// Re-emit only user inputs interleaved in sequence order is not
 				// possible without resequencing; emit them before persisted updates'
@@ -2298,8 +2292,6 @@ export class DiracAgent implements acp.Agent {
 			sessionId,
 			status: AcpSessionStatus.Idle,
 			pendingToolCalls: new Map(),
-			emittedPlanCardIds: new Set(),
-			emittedCompletionCardIds: new Set(),
 		}
 
 		for (const message of uiMessages) {

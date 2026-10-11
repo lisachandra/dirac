@@ -522,10 +522,11 @@ function readLockOwner(lockPath: string): { pid: number; token: string } | undef
 			pid: number
 			token: string
 		}
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined
-		if (error instanceof SyntaxError) return undefined
-		throw error
+	} catch {
+		// A transient Windows EPERM (another process holding or deleting owner.json)
+		// means ownership cannot be determined; report no owner so callers fall back
+		// to age-based grace handling instead of crashing.
+		return undefined
 	}
 }
 

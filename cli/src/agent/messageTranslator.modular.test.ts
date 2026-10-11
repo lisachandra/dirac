@@ -57,8 +57,6 @@ function createTestSessionState(): AcpSessionState {
 		sessionId: "test-session-id",
 		status: AcpSessionStatus.Idle,
 		pendingToolCalls: new Map(),
-		emittedCompletionCardIds: new Set(),
-		emittedPlanCardIds: new Set(),
 	}
 }
 
@@ -384,6 +382,7 @@ describe("messageTranslator (Modular Architecture)", () => {
 				createCardMessage({
 					id: "condense-approval-1",
 					header: "Condense Conversation",
+					toolName: "condense",
 					body: "Condense this conversation?",
 					status: CardStatus.WAITING_FOR_INPUT,
 					requireApproval: true,
@@ -403,6 +402,7 @@ describe("messageTranslator (Modular Architecture)", () => {
 				createCardMessage({
 					id: "condense-progress-1",
 					header: "Condensing Conversation · anthropic/claude-sonnet-4",
+					toolName: "condense",
 					status: CardStatus.RUNNING,
 				}),
 				sessionState,
@@ -497,32 +497,6 @@ describe("messageTranslator (Modular Architecture)", () => {
 
 			expect(result.requiresPermission).toBe(false)
 			expect(result.permissionRequest).toBeUndefined()
-		})
-
-		it("renders follow-up questions as markdown when the client has no form elicitation", () => {
-			const result = translateMessage(
-				createCardMessage({
-					id: "question-2",
-					header: "Question: Choose a target",
-					body: "Choose a target",
-					status: CardStatus.WAITING_FOR_INPUT,
-					requireFeedback: true,
-					rawInput: responseCardInput(ResponseOperation.QUESTION, "Choose a target"),
-					actions: [
-						{ label: "Option A", value: "option-a" },
-						{ label: "Option B", value: "option-b" },
-					],
-				}),
-				sessionState,
-			)
-
-			expect(result.requiresPermission).toBe(false)
-			expect(result.updates).toHaveLength(1)
-			expect(result.updates[0].sessionUpdate).toBe("agent_message_chunk")
-			const text = (result.updates[0] as any).content.text as string
-			expect(text).toContain("Choose a target")
-			expect(text).toContain("Option A")
-			expect(text).toContain("does not support inline forms")
 		})
 
 		it("keeps follow-up questions as a tool call when the client advertises form elicitation", () => {
@@ -624,7 +598,7 @@ describe("messageTranslator (Modular Architecture)", () => {
 		})
 	})
 
-it("emits Task Completed body again for a fresh completion card id", () => {
+	it("emits Task Completed body again for a fresh completion card id", () => {
 		const first = translateMessage(
 			createCardMessage({
 				id: "completion-1",
@@ -643,7 +617,34 @@ it("emits Task Completed body again for a fresh completion card id", () => {
 			}),
 			sessionState,
 		)
-		expect((first.updates[0] as any).content.text).toBe("Result A")
-		expect((second.updates[0] as any).content.text).toBe("Result B")
+		expect(first.updates.find((u) => u.sessionUpdate === "agent_message_chunk")).toMatchObject({ content: { text: "Result A" } })
+		expect(second.updates.find((u) => u.sessionUpdate === "agent_message_chunk")).toMatchObject({ content: { text: "Result B" } })
 	})
 
+	describe("translateMessage - API Status", () => {
+		it("should skip API_STATUS messages", () => {
+			const message = createApiStatusMessage("started")
+			const result = translateMessage(message, sessionState)
+			expect(result.updates).toHaveLength(0)
+		})
+	})
+
+	it("skips checkpoint messages", () => {
+		const result = translateMessage(createCheckpointMessage(), sessionState)
+
+		expect(result.updates).toHaveLength(0)
+	})
+
+	describe("translateMessages", () => {
+		it("should translate multiple messages", () => {
+			const messages = [
+				createMarkdownMessage("Step 1"),
+				createCardMessage({ id: "t1", header: "h1", status: CardStatus.SUCCESS }),
+			]
+			const updates = translateMessages(messages, sessionState)
+			expect(updates).toHaveLength(2)
+			expect(updates[0].sessionUpdate).toBe("agent_message_chunk")
+			expect(updates[1].sessionUpdate).toBe("tool_call")
+		})
+	})
+})

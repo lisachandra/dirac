@@ -101,8 +101,6 @@ describe("TaskMessageBridge immediate permission responses", () => {
 					sessionId: "session-1",
 					status: AcpSessionStatus.Processing,
 					pendingToolCalls: new Map(),
-					emittedPlanCardIds: new Set(),
-					emittedCompletionCardIds: new Set(),
 				},
 				resolve,
 				reject,

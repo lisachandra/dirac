@@ -228,7 +228,11 @@ function removeAbandonedLock(lockDirectory: string): boolean {
 	try {
 		owner = JSON.parse(fs.readFileSync(path.join(lockDirectory, "owner.json"), "utf8")) as LockOwner
 	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code !== "ENOENT" && !(error instanceof SyntaxError)) throw error
+		// A transient Windows EPERM (another process holding or deleting owner.json)
+		// means ownership cannot be determined; skip reaping this round and let the
+		// acquire loop retry. Corrupt or missing owners fall through to age-based
+		// grace handling below.
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT" && !(error instanceof SyntaxError)) return false
 	}
 
 	if (owner && Number.isSafeInteger(owner.pid) && owner.pid > 0) {

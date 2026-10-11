@@ -35,8 +35,6 @@ function sessionState(): AcpSessionState {
 		sessionId: "session-1",
 		status: AcpSessionStatus.Processing,
 		pendingToolCalls: new Map(),
-		emittedPlanCardIds: new Set(),
-		emittedCompletionCardIds: new Set(),
 	};
 }
 
