@@ -291,6 +291,18 @@ describe("ACP protocol conformance over raw stdio", () => {
 		await waitForUpdate(client, "config_option_update")
 		client.updates.length = 0
 
+		// Paseo selects gateway-qualified ids (its `additionalModels`) through the
+		// unstable model method, which the pinned SDK routes to the catch-all.
+		// Before that route existed the request answered method-not-found and the
+		// client silently kept its previous model.
+		const setModel = await client.request("session/set_model", {
+			sessionId,
+			modelId: "gateway/vendor-model",
+		})
+		expect(setModel.error).toBeUndefined()
+
+		client.updates.length = 0
+
 		const rejected = await client.request("session/set_config_option", {
 			sessionId,
 			configId: "model",

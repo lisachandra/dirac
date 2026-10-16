@@ -39,6 +39,7 @@ const mocks = vi.hoisted(() => {
 		restoreWorkspaceCheckpoint: vi.fn(),
 		integrateSessionWorktree: vi.fn(),
 		shutdown: vi.fn(),
+		unstable_setSessionModel: vi.fn(),
 
 		queueWhisper: vi.fn(),
 		recordClientAnnotation: vi.fn(),
@@ -636,6 +637,32 @@ describe("AcpAgent", () => {
 			code: -32601,
 			message: '"Method not found": dev.dirac/unknown',
 		})
+	})
+
+	it("routes the unstable session/set_model request to DiracAgent", async () => {
+		mocks.diracAgentInstance.unstable_setSessionModel.mockResolvedValue(undefined)
+		const agent = new AcpAgent(connection, {})
+
+		await expect(
+			agent.extMethod("session/set_model", {
+				sessionId: "session-1",
+				modelId: "th/deepseek-v4.1-flash",
+			}),
+		).resolves.toEqual({})
+
+		expect(mocks.diracAgentInstance.unstable_setSessionModel).toHaveBeenCalledWith({
+			sessionId: "session-1",
+			modelId: "th/deepseek-v4.1-flash",
+		})
+	})
+
+	it("rejects a session/set_model request without a model id", async () => {
+		const agent = new AcpAgent(connection, {})
+
+		await expect(
+			agent.extMethod("session/set_model", { sessionId: "session-1", modelId: "  " }),
+		).rejects.toMatchObject({ code: -32602 })
+		expect(mocks.diracAgentInstance.unstable_setSessionModel).not.toHaveBeenCalled()
 	})
 
 	it("ignores unsupported extension notifications", async () => {

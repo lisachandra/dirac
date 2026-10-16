@@ -304,6 +304,18 @@ export class AcpAgent implements acp.Agent {
 			throw RequestError.invalidParams(undefined, "sessionId is required")
 		}
 
+		// ACP's unstable `session/set_model` request reaches this catch-all because the
+		// pinned SDK predates the method. Clients such as Paseo use it to select
+		// gateway-qualified ids the `model` config option cannot advertise.
+		if (method === "session/set_model") {
+			const modelId = params.modelId
+			if (typeof modelId !== "string" || !modelId.trim()) {
+				throw RequestError.invalidParams(undefined, "modelId is required")
+			}
+			await this.diracAgent.unstable_setSessionModel({ sessionId, modelId })
+			return {}
+		}
+
 		switch (method) {
 			case "dev.dirac/session.close":
 				return await this.closeSession({ sessionId })
