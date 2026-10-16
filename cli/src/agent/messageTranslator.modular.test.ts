@@ -359,6 +359,87 @@ describe("messageTranslator (Modular Architecture)", () => {
 			})
 		})
 
+		it("renders a Proposed Plan card as agent markdown instead of an Other tool call", () => {
+			const card = {
+				id: "plan-1",
+				header: "Proposed Plan",
+				toolName: "respond",
+				status: CardStatus.WAITING_FOR_INPUT,
+				requireFeedback: true,
+				body: "## Plan\n\n1. Do the thing\n2. Verify it",
+				rawInput: responseCardInput(ResponseOperation.PLAN, "## Plan\n\n1. Do the thing\n2. Verify it"),
+			}
+			const result = translateMessage(createCardMessage(card), sessionState)
+
+			expect(result.updates).toEqual([
+				{
+					sessionUpdate: "agent_message_chunk",
+					content: { type: "text", text: "## Plan\n\n1. Do the thing\n2. Verify it" },
+				},
+			])
+			expect(result.requiresPermission).toBe(false)
+			expect(sessionState.pendingToolCalls.size).toBe(0)
+		})
+
+		it("unwraps the plan body envelope written after the user answers a plan", () => {
+			const card = {
+				id: "plan-2",
+				header: "Plan Accepted",
+				toolName: "respond",
+				status: CardStatus.SUCCESS,
+				body: JSON.stringify({ response: "## Plan\n\nShip it", options: [], selected: "" }),
+				rawInput: responseCardInput(ResponseOperation.PLAN, "## Plan\n\nShip it"),
+			}
+			const result = translateMessage(createCardMessage(card), sessionState)
+
+			expect(result.updates).toEqual([
+				{
+					sessionUpdate: "agent_message_chunk",
+					content: { type: "text", text: "## Plan\n\nShip it" },
+				},
+			])
+		})
+
+		it("emits nothing for a plan card without a body", () => {
+			const card = {
+				id: "plan-3",
+				header: "Proposed Plan",
+				toolName: "respond",
+				status: CardStatus.RUNNING,
+				rawInput: responseCardInput(ResponseOperation.PLAN, "ignored"),
+			}
+			const result = translateMessage(createCardMessage(card), sessionState)
+
+			expect(result.updates).toHaveLength(0)
+		})
+
+		it("hides PreToolUse and PostToolUse hook indicators in every state", () => {
+			const indicator = (id: string, header: string, status: CardStatus, body: object) =>
+				translateMessage(createCardMessage({ id, header, status, body: JSON.stringify(body) }), sessionState)
+			const running = indicator("h1", "PreToolUse Hook", CardStatus.RUNNING, { hookName: "PreToolUse", status: "running" })
+			const completed = indicator("h2", "PostToolUse Hook", CardStatus.SUCCESS, { hookName: "PostToolUse", status: "completed", hasJsonResponse: true })
+			const failed = indicator("h3", "PreToolUse Hook", CardStatus.ERROR, { hookName: "PreToolUse", status: "failed", exitCode: 1 })
+
+			expect(running.updates).toHaveLength(0)
+			expect(completed.updates).toHaveLength(0)
+			expect(failed.updates).toHaveLength(0)
+			expect(sessionState.pendingToolCalls.size).toBe(0)
+		})
+
+		it("still renders the user-facing hook outcome cards", () => {
+			const blocked = translateMessage(
+				createCardMessage({ id: "hb", header: "Hook: Blocked execute_command", toolName: "hook_block", status: CardStatus.ERROR, body: "blocked" }),
+				sessionState,
+			)
+			const feedback = translateMessage(
+				createCardMessage({ id: "hf", header: "Hook: PostToolUse", toolName: "hook_feedback", status: CardStatus.SUCCESS, body: "lint: ok" }),
+				sessionState,
+			)
+
+			expect(blocked.updates[0]).toMatchObject({ sessionUpdate: "tool_call", name: "hook_block", status: "failed" })
+			expect(feedback.updates[0]).toMatchObject({ sessionUpdate: "tool_call", name: "hook_feedback", status: "completed" })
+		})
+
 		it("offers once and always choices for approval requests", () => {
 			const card = {
 				id: "tool-1",
@@ -499,7 +580,7 @@ describe("messageTranslator (Modular Architecture)", () => {
 			expect(result.permissionRequest).toBeUndefined()
 		})
 
-		it("keeps follow-up questions as a tool call when the client advertises form elicitation", () => {
+		it("renders a follow-up question body as agent markdown instead of an Other tool call", () => {
 			const result = translateMessage(
 				createCardMessage({
 					id: "question-3",
@@ -514,9 +595,16 @@ describe("messageTranslator (Modular Architecture)", () => {
 				{ clientCapabilities: { elicitation: { form: {} } } as any },
 			)
 
-			// Form-capable clients receive a real form via elicitation/create (in the
-			// bridge), so the translator keeps the ordinary tool-call surface.
-			expect(result.updates[0].sessionUpdate).toBe("tool_call")
+			// The question text must be readable markdown; the answer surface is
+			// delivered separately through elicitation/create (in the bridge).
+			expect(result.updates).toEqual([
+				{
+					sessionUpdate: "agent_message_chunk",
+					content: { type: "text", text: "Choose a target" },
+				},
+			])
+			expect(result.requiresPermission).toBe(false)
+			expect(sessionState.pendingToolCalls.size).toBe(0)
 		})
 
 		it("should not create feedback permission when approval has been cleared", () => {

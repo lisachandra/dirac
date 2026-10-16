@@ -18,7 +18,6 @@ import { PROTOCOL_VERSION, RequestError } from "@agentclientprotocol/sdk"
 import { modelSupportsInferenceSpeed, providerSupportsInferenceSpeed, type ApiConfiguration, type ApiProvider } from "@shared/api"
 import type { DiracMessage } from "@shared/ExtensionMessage"
 import { CardStatus, DiracMessageType } from "@shared/ExtensionMessage"
-import { isPlanResponseCard } from "@shared/responseTool"
 import { taskInitializationTimeout } from "@shared/taskInitialization"
 import { CLI_ONLY_COMMANDS, VSCODE_ONLY_COMMANDS } from "@shared/slashCommands"
 import { getExplicitDiracSettingsFromEnv, getProviderFromEnv, getSettingsFromEnv } from "@shared/storage/env-config"
@@ -2309,7 +2308,6 @@ export class DiracAgent implements acp.Agent {
 					continue
 				}
 
-				await this.emitPlanFromMessage(sessionId, message)
 				const result = translateMessage(message, replayState, {
 					clientCapabilities: this.clientCapabilities,
 				})
@@ -2321,56 +2319,6 @@ export class DiracAgent implements acp.Agent {
 			}
 		}
 		await bridge.restoreUsage(sessionId, uiMessages, true)
-	}
-
-	// Dirac's plan tool is a thinking/planning mode, not a Paseo workspace task.
-	// Suppress forwarding: treat Proposed Plan as body markdown like Task Completed.
-	private async emitPlanFromMessage(sessionId: string, message: DiracMessage): Promise<void> {
-		// Intentionally no-op. See messageTranslator: Proposed Plan is suppressed there
-		// and rendered as agent_message_chunk; we don't emit sessionUpdate:"plan" -> todo.
-		void sessionId
-		void message
-	}
-
-	private planFromMessage(message: DiracMessage): acp.Plan | undefined {
-		if (message.content.type !== DiracMessageType.CARD || !isPlanResponseCard(message.content.card)) {
-			return undefined
-		}
-
-		const body = message.content.card.body
-		if (!body) return undefined
-
-		const planText = this.planTextFromCard(body).trim()
-		const numberedItems = planText
-			.split("\n")
-			.map((line) => line.trim())
-			.filter((line) => /^[-*]\s+|^\d+[.)]\s+/.test(line))
-			.map((line) => line.replace(/^[-*]\s+|^\d+[.)]\s+/, "").trim())
-			.filter(Boolean)
-		const planItems = numberedItems.length > 0 ? numberedItems : planText ? [planText] : []
-		const status = this.planStatusFromCard(message.content.card.status)
-		const entries: acp.PlanEntry[] = planItems.map((content, index) => ({
-			content,
-			priority: index === 0 ? "high" : "medium",
-			status,
-		}))
-
-		return entries.length > 0 ? { entries } : undefined
-	}
-
-	private planStatusFromCard(status: CardStatus): acp.PlanEntryStatus {
-		if (status === CardStatus.SUCCESS) return "completed"
-		if (status === CardStatus.RUNNING || status === CardStatus.BUILDING) return "in_progress"
-		return "pending"
-	}
-
-	private planTextFromCard(body: string): string {
-		try {
-			const parsed = JSON.parse(body) as { response?: unknown }
-			return typeof parsed.response === "string" ? parsed.response : body
-		} catch {
-			return body
-		}
 	}
 
 	private async sendAvailableCommands(sessionId: string, controller: Controller): Promise<void> {

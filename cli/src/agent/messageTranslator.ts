@@ -12,6 +12,7 @@ import type * as acp from "@agentclientprotocol/sdk"
 import { isSuccessfulTaskCompletionCard } from "@shared/cardIdentity"
 import type { DiracMessage } from "@shared/ExtensionMessage"
 import { CardStatus, DiracMessageType, isFinalStatus } from "@shared/ExtensionMessage"
+import { isPlanResponseCard, isQuestionResponseCard } from "@shared/responseTool"
 import { getBrowserActionKind } from "./browserActionTranslator.js"
 import type { AcpSessionState, TranslatedMessage } from "./types.js"
 import { AcpSessionStatus } from "./types.js"
@@ -274,6 +275,23 @@ function translateWebSearchMarkerMessage(query: string, sessionState: AcpSession
 }
 
 /**
+ * Extract the markdown body of a response card (Proposed Plan or Question).
+ * After the user answers, Dirac patches the card body with a
+ * `{ response, options, selected }` envelope, so the text is read back out of
+ * that envelope.
+ */
+function responseCardBody(card: { body?: string }): string {
+	const body = card.body?.trim() ?? ""
+	if (!body.startsWith("{")) return body
+	try {
+		const parsed = JSON.parse(body) as { response?: unknown }
+		return typeof parsed.response === "string" ? parsed.response.trim() : body
+	} catch {
+		return body
+	}
+}
+
+/**
  * Translate a CARD type Dirac message to ACP updates.
  */
 function translateCardMessage(
@@ -285,26 +303,34 @@ function translateCardMessage(
 		return { updates: [], requiresPermission: false }
 	}
 	const card = message.content.card
-	// Hook execution indicators are for Dirac internal tracking; hide the
-	// noisy running/completed (hasJsonResponse) markers. Block advisories
-	// are surfaced as separate hook_feedback/hook_block cards instead.
+	// Hook execution indicators (running / completed / failed / cancelled) are
+	// Dirac-internal bookkeeping, never a user-facing tool invocation: a hook
+	// failure does not block the tool, and every outcome a user needs to see is
+	// surfaced through its own `Hook: Blocked ...` (hook_block) or
+	// `Hook: PreToolUse` / `Hook: PostToolUse` (hook_feedback) card. Hiding the
+	// indicator keeps its JSON body from leaking as an opaque "Other" tool call.
 	if (isHookHeader(card.header)) {
-		const isPending =
-			card.status === CardStatus.RUNNING || card.status === CardStatus.BUILDING || card.status === CardStatus.PENDING
-		if (isPending) return { updates: [], requiresPermission: false }
-		// Completed hooks that are just JSON bookkeeping (hasJsonResponse) are hidden;
-		// feedback/blocks are visible via their own cards.
-		try {
-			const bodyObj = JSON.parse(card.body ?? "{}")
-			if (bodyObj?.hasJsonResponse === true || bodyObj?.suppressOutput === true) {
-				// final indicator, not advisory
-				if (!bodyObj?.contextModification?.trim() && !bodyObj?.errorMessage?.trim()) {
-					return { updates: [], requiresPermission: false }
-				}
-			}
-		} catch {}
-		// Falls through only if hook carried advisory/error payload
+		return { updates: [], requiresPermission: false }
 	}
+
+	// Proposed Plans and follow-up Questions are conversational artifacts, not
+	// tool invocations. Emitting their body as agent markdown keeps ACP clients
+	// (e.g. Paseo) from rendering them as an opaque "Other" tool call; a
+	// question answer surface is delivered separately through elicitation.
+	if (isPlanResponseCard(card) || isQuestionResponseCard(card)) {
+		const body = responseCardBody(card)
+		if (!body) return { updates: [], requiresPermission: false }
+		return {
+			updates: [
+				{
+					sessionUpdate: "agent_message_chunk",
+					content: { type: "text", text: body },
+				},
+			],
+			requiresPermission: false,
+		}
+	}
+
 	const toolCallId = card.id
 	const updates: acp.SessionUpdate[] = []
 	let requiresPermission = false

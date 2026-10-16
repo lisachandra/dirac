@@ -109,8 +109,8 @@ export class TaskMessageBridge {
 	private interactionGeneration = 0;
 	/** Steering transcripts whose delivered status has already been reported to ACP. */
 	private readonly reportedSentSteeringMessages = new Set<string>();
-	/** Completion card IDs whose text has already been emitted to avoid duplicate streaming across card state transitions. */
-	private readonly emittedCompletionCardKeys = new Set<string>();
+	/** Card IDs whose body text has already been emitted to avoid duplicate streaming across card state transitions. */
+	private readonly emittedCardBodyKeys = new Set<string>();
 
 	/** Latest cumulative snapshot for every model request observed in this ACP session. */
 	private readonly usageSnapshots = new Map<string, UsageSnapshot>();
@@ -973,33 +973,6 @@ export class TaskMessageBridge {
 		}
 	}
 
-	private async emitPlanFromMessage(
-		sessionId: string,
-		message: DiracMessage,
-	): Promise<void> {
-		// No-op: Dirac's Proposed Plan is a thinking artifact, not a Paseo workspace todo.
-		// The same card is already emitted as agent_message_chunk markdown via messageTranslator,
-		// so emitting sessionUpdate:"plan" would create the duplicate checkbox you reported.
-		void sessionId;
-		void message;
-	}
-
-	private planTextFromCard(body: string): string {
-		try {
-			const parsed = JSON.parse(body) as { response?: unknown };
-			return typeof parsed.response === "string" ? parsed.response : body;
-		} catch {
-			return body;
-		}
-	}
-
-	private planStatusFromCard(status: CardStatus): acp.PlanEntryStatus {
-		if (status === CardStatus.SUCCESS) return "completed";
-		if (status === CardStatus.RUNNING || status === CardStatus.BUILDING)
-			return "in_progress";
-		return "pending";
-	}
-
 	private getInteractionCardKey(
 		sessionId: string,
 		message: DiracMessage,
@@ -1126,10 +1099,10 @@ export class TaskMessageBridge {
 			for (const update of result.updates) {
 				if (update.sessionUpdate === "agent_message_chunk" && message.content.type === DiracMessageType.CARD) {
 					const cardKey = `${sessionId}:${message.content.card.id}`;
-					if (this.emittedCompletionCardKeys.has(cardKey)) {
+					if (this.emittedCardBodyKeys.has(cardKey)) {
 						continue;
 					}
-					this.emittedCompletionCardKeys.add(cardKey);
+					this.emittedCardBodyKeys.add(cardKey);
 				}
 				await this.emitSessionUpdate(sessionId, update);
 			}
