@@ -289,16 +289,17 @@ export class OpenAiHandler implements ApiHandler {
 				stopReason = chunk.choices[0].finish_reason
 			}
 
+			// `reasoning` is a fallback for Ollama's OpenAI-compatible endpoint, which streams the
+			// thinking trace there instead of `reasoning_content` (matches the openrouter/baseten/
+			// wandb/vercel handlers). The two must stay mutually exclusive: endpoints that populate
+			// both fields would otherwise yield every reasoning delta twice, and the consumer appends
+			// each yield — doubling the thinking text in the transcript and in the model's context.
 			if (delta && "reasoning_content" in delta && delta.reasoning_content) {
 				yield {
 					type: "reasoning",
 					reasoning: (delta.reasoning_content as string | undefined) || "",
 				}
-			}
-
-			// Ollama's OpenAI-compatible endpoint streams the thinking trace as `delta.reasoning`,
-			// not `reasoning_content`. Matches the openrouter/baseten/wandb/vercel handlers.
-			if (delta && "reasoning" in delta && delta.reasoning) {
+			} else if (delta && "reasoning" in delta && delta.reasoning) {
 				yield {
 					type: "reasoning",
 					reasoning: typeof delta.reasoning === "string" ? delta.reasoning : JSON.stringify(delta.reasoning),

@@ -52,4 +52,18 @@ describe("openai-compatible reasoning deltas", () => {
 
 		chunks.should.containEql({ type: "reasoning", reasoning: '{"summary":"structured"}' })
 	})
+
+	it("emits reasoning once when a delta carries both field names", async () => {
+		const chunks = await collect([{ reasoning_content: "step one", reasoning: "step one" }])
+
+		const reasoning = chunks.filter((c) => c.type === "reasoning")
+		reasoning.should.have.length(1)
+		reasoning[0].should.eql({ type: "reasoning", reasoning: "step one" })
+	})
+
+	it("prefers `reasoning_content` when both fields carry different text", async () => {
+		const chunks = await collect([{ reasoning_content: "canonical", reasoning: "alias" }])
+
+		chunks.filter((c) => c.type === "reasoning").should.eql([{ type: "reasoning", reasoning: "canonical" }])
+	})
 })
