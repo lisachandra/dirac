@@ -28,6 +28,11 @@ import {
 import { filterOpenRouterModelIds } from "@/shared/utils/model-filters"
 import { getDefaultModelId, getModelList, hasModelPicker, hasStaticModels } from "../utils/model-metadata.js"
 import { fetchOpenRouterModels, usesOpenRouterModels } from "../utils/openrouter-models"
+import {
+	declaredAdditionalModelIds,
+	fetchOpenAiCompatibleModelIds,
+	resolveOpenAiCompatibleEndpoint,
+} from "../utils/openai-compatible-endpoint.js"
 import { getProviderLabel, getValidCliProviders, isValidCliProvider } from "../utils/providers.js"
 import type { ProviderConfigurationManager } from "./providerConfiguration.js"
 import type { DiracAcpSession } from "./public-types.js"
@@ -503,14 +508,27 @@ export class SessionConfigManager {
 			selectedProvider === provider || usesProviderSpecificModel
 				? await this.getCurrentModeModelId(mode, provider, sessionOverrides)
 				: ""
-		const candidates = [...(await this.getProviderModelCandidates(provider, refreshDynamicCatalog, modelCandidates))]
-		const declaredDefault = getDefaultModelId(provider)
-		for (const modelId of [configuredModelId, declaredDefault, ...extraCandidates]) {
+		const configuration = this.getInferenceConfiguration(sessionOverrides)
+		const endpoint = resolveOpenAiCompatibleEndpoint(provider, configuration, mode)
+		const endpointModelIds = endpoint
+			? await this.getEndpointModelIds(endpoint, refreshDynamicCatalog, modelCandidates)
+			: []
+
+		// A gateway endpoint owns its model namespace: only the ids it serves are
+		// selectable, so the static provider list must not leak in as fake options.
+		const candidates = endpoint
+			? [...endpointModelIds]
+			: [...(await this.getProviderModelCandidates(provider, refreshDynamicCatalog, modelCandidates))]
+		// A gateway has no declared default: the session's configured model stays the
+		// selection, and an unreadable endpoint catalog falls back to that model alone.
+		const declaredDefault = endpoint ? "" : getDefaultModelId(provider)
+		for (const modelId of [configuredModelId, declaredDefault, ...extraCandidates, ...declaredAdditionalModelIds()]) {
 			if (modelId && !candidates.includes(modelId)) candidates.push(modelId)
 		}
 
-		const configuration = this.getInferenceConfiguration(sessionOverrides)
-		const modelIds = candidates.filter((modelId) => this.isModelAcceptedByInference(configuration, provider, modelId, mode))
+		const modelIds = endpoint
+			? candidates
+			: candidates.filter((modelId) => this.isModelAcceptedByInference(configuration, provider, modelId, mode))
 		const resolvedDefault = declaredDefault
 			? this.resolveInferenceModelId(configuration, provider, declaredDefault, mode)
 			: undefined
@@ -520,6 +538,21 @@ export class SessionConfigManager {
 			modelIds[0] ||
 			""
 		return { modelIds, defaultModelId }
+	}
+
+	/** Model ids served by a custom OpenAI-compatible endpoint, cached per base URL. */
+	private async getEndpointModelIds(
+		endpoint: { baseUrl: string; apiKey?: string },
+		refresh: boolean,
+		modelCandidates: Map<string, Promise<string[]>>,
+	): Promise<string[]> {
+		const cacheKey = `endpoint:${endpoint.baseUrl}:${refresh ? "refresh" : "configured"}`
+		let candidates = modelCandidates.get(cacheKey)
+		if (!candidates) {
+			candidates = refresh ? fetchOpenAiCompatibleModelIds(endpoint) : Promise.resolve([])
+			modelCandidates.set(cacheKey, candidates)
+		}
+		return candidates
 	}
 
 	private async getProviderModelCandidates(
@@ -551,12 +584,7 @@ export class SessionConfigManager {
 							: []
 					}
 					if (hasStaticModels(provider)) {
-						let models = getModelList(provider)
-						if (provider === "openai" && process.env.DIRAC_OPENAI_ADDITIONAL_MODELS) {
-							const extra = process.env.DIRAC_OPENAI_ADDITIONAL_MODELS.split(",").map((s) => s.trim()).filter(Boolean)
-							models = [...new Set([...models, ...extra])]
-						}
-						return models
+						return getModelList(provider)
 					}
 					if (provider === "dify") return ["dify-workflow"]
 					return []
@@ -611,6 +639,9 @@ export class SessionConfigManager {
 
 		private assertModelAvailable(provider: ApiProvider, modelId: string, modelIds: string[]): void {
 			if (!hasModelPicker(provider) && modelId.trim()) return
+			// An empty catalog means no source could be read (an unreachable gateway, for
+			// example); without one there is no basis to call the requested model unavailable.
+			if (modelIds.length === 0) return
 			if (modelIds.includes(modelId)) return
 			throw new ApiConfigurationError(
 				ApiConfigurationErrorCode.ModelUnavailable,

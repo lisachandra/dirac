@@ -29,6 +29,12 @@ vi.mock("@/core/controller/models/refreshOpenRouterModels", () => ({
 	refreshOpenRouterModels: refreshOpenRouterModelsMock,
 }))
 
+const endpointFetchMock = vi.hoisted(() => vi.fn())
+
+vi.mock("@/shared/net", () => ({
+	fetch: endpointFetchMock,
+}))
+
 const dynamicOpenRouterModelId = "xiaomi/mimo-v2.5-pro"
 const dynamicOpenRouterModelInfo: ModelInfo = {
 	name: "MiMo V2.5 Pro",
@@ -76,12 +82,32 @@ function optionValues(option: ReturnType<typeof selectOption>): string[] {
 	)
 }
 
+/** Ids the fake gateway endpoint serves, including names that collide with provider ids. */
+const gatewayModelIds = ["ag/gemini-3.8-flash-high", "cp/mimo-v2.6-flash", "th/deepseek-v4.1-flash"]
+
+function gatewayRuntime(): Partial<Settings> {
+	return {
+		mode: "act",
+		planActSeparateModelsSetting: false,
+		planModeApiProvider: "openai",
+		actModeApiProvider: "openai",
+		openAiBaseUrl: "http://127.0.0.1:8317/v1",
+		planModeOpenAiModelId: "th/deepseek-v4.1-flash",
+		actModeOpenAiModelId: "th/deepseek-v4.1-flash",
+	}
+}
+
 describe("SessionConfigManager task runtime behavior", () => {
 	beforeEach(() => {
 		refreshGithubCopilotModelsMock.mockClear()
 		refreshGithubCopilotModelsMock.mockResolvedValue({})
 		refreshOpenRouterModelsMock.mockReset()
 		refreshOpenRouterModelsMock.mockResolvedValue({ [dynamicOpenRouterModelId]: dynamicOpenRouterModelInfo })
+		endpointFetchMock.mockReset()
+		endpointFetchMock.mockResolvedValue({
+			ok: true,
+			json: async () => ({ data: gatewayModelIds.map((id) => ({ id })) }),
+		})
 	})
 
 	it("updates both modes only when the task snapshot links their models", async () => {
@@ -426,5 +452,49 @@ describe("SessionConfigManager task runtime behavior", () => {
 		expect(optionValues(modelOption)).toContain(customModel)
 
 		await expect(manager.assertTaskRuntimeAvailable(session(), runtime)).resolves.toBeUndefined()
+	})
+	it("advertises exactly the models a custom gateway endpoint serves", async () => {
+		const manager = new SessionConfigManager()
+		const runtime = gatewayRuntime()
+
+		const model = selectOption(await manager.getSessionConfigOptions(session(), runtime), "model")
+
+		expect(optionValues(model).sort()).toEqual([...gatewayModelIds].sort())
+		expect(model.currentValue).toBe("th/deepseek-v4.1-flash")
+		// The static OpenAI default is not served by the endpoint and must not be offered.
+		expect(optionValues(model)).not.toContain("gpt-6-astra")
+	})
+
+	it("applies a gateway model through the model config option", async () => {
+		const manager = new SessionConfigManager()
+		const runtime = gatewayRuntime()
+
+		await expect(manager.assertTaskRuntimeAvailable(session(), runtime)).resolves.toBeUndefined()
+		const options = await manager.applyModelConfigOption(session(), "cp/mimo-v2.6-flash", runtime)
+
+		expect(runtime.actModeOpenAiModelId).toBe("cp/mimo-v2.6-flash")
+		expect(runtime.planModeOpenAiModelId).toBe("cp/mimo-v2.6-flash")
+		expect(selectOption(options, "model").currentValue).toBe("cp/mimo-v2.6-flash")
+	})
+
+	it("keeps the configured model selectable when the endpoint catalog cannot be read", async () => {
+		endpointFetchMock.mockRejectedValue(new Error("connection refused"))
+		const manager = new SessionConfigManager()
+		const runtime = gatewayRuntime()
+
+		const model = selectOption(await manager.getSessionConfigOptions(session(), runtime), "model")
+
+		expect(optionValues(model)).toEqual(["th/deepseek-v4.1-flash"])
+		await expect(manager.assertTaskRuntimeAvailable(session(), runtime)).resolves.toBeUndefined()
+	})
+
+	it("keeps the static catalog for the official OpenAI endpoint", async () => {
+		const manager = new SessionConfigManager()
+		const runtime = { ...gatewayRuntime(), openAiBaseUrl: "https://api.openai.com/v1" }
+
+		const model = selectOption(await manager.getSessionConfigOptions(session(), runtime), "model")
+
+		expect(optionValues(model)).toContain("gpt-6-astra")
+		expect(endpointFetchMock).not.toHaveBeenCalled()
 	})
 })

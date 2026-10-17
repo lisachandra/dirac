@@ -304,6 +304,16 @@ export class AcpAgent implements acp.Agent {
 			throw RequestError.invalidParams(undefined, "sessionId is required")
 		}
 
+		// A vendor request, not a notification: the client needs the verdict to decide
+		// between folding its message into the running turn and starting a new one.
+		if (method === "dev.dirac/steer") {
+			const text = params.text
+			if (typeof text !== "string" || !text.trim()) {
+				throw RequestError.invalidParams(undefined, "text is required")
+			}
+			return { accepted: await this.diracAgent.steerActiveTurn(sessionId, text) }
+		}
+
 		// ACP's unstable `session/set_model` request reaches this catch-all because the
 		// pinned SDK predates the method. Clients such as Paseo use it to select
 		// gateway-qualified ids the `model` config option cannot advertise.

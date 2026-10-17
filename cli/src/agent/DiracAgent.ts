@@ -459,6 +459,42 @@ export class DiracAgent implements acp.Agent {
 		}
 	}
 
+	/**
+	 * Deliver client guidance into the turn running this session's active prompt.
+	 *
+	 * Reports whether the running task took the guidance, so the client knows if it
+	 * owns the text. Buffering would silently defer guidance the client already
+	 * believes was delivered, so a task that cannot accept it right now is a no.
+	 */
+	async steerActiveTurn(sessionId: string, text: string): Promise<boolean> {
+		const sessionStatus = this.sessionStates.get(sessionId)?.status
+		if (sessionStatus !== AcpSessionStatus.Processing) {
+			Logger.debug(`[DiracAgent] Steering declined: session is ${sessionStatus}`)
+			return false
+		}
+		const task = this.promptTasks.get(sessionId)
+		if (!task) {
+			Logger.debug("[DiracAgent] Steering declined: no prompt task is bound to the session")
+			return false
+		}
+		if (!task.canAcceptSteeringMessage()) {
+			Logger.debug(
+				`[DiracAgent] Steering declined: task ${task.taskId} is ${task.taskState.status} ` +
+				`(waitingCards=${task.taskState.waitingCardIds.length}, abort=${task.taskState.abort})`,
+			)
+			return false
+		}
+
+		try {
+			const steeringMessageId = await task.enqueueSteeringMessage(text)
+			this.emitSteeringStatus(sessionId, steeringMessageId, "queued")
+			return true
+		} catch (error) {
+			Logger.debug("[DiracAgent] The running task rejected steering guidance:", error)
+			return false
+		}
+	}
+
 	private bufferWhisper(sessionId: string, text: string): void {
 		const whispers = this.pendingWhispers.get(sessionId) ?? []
 		whispers.push(text.trim())
@@ -1198,6 +1234,7 @@ export class DiracAgent implements acp.Agent {
 					"dev.dirac/permissions.delete": true,
 
 					"dev.dirac/whisper": true,
+					"dev.dirac/steer": true,
 					"dev.dirac/steering_status": true,
 					"dev.dirac/client_annotation": true,
 
@@ -2085,26 +2122,25 @@ export class DiracAgent implements acp.Agent {
 		const sessionOverrides = this.acpSessionOverrides.get(params.sessionId)
 		if (!sessionOverrides) throw new Error(`Session runtime configuration not found: ${params.sessionId}`)
 
+		Logger.debug("[DiracAgent] unstable_setSessionModel called:", {
+			sessionId: params.sessionId,
+			modelId: params.modelId,
+		})
+
 		const slashIndex = params.modelId.indexOf("/")
-		if (slashIndex === -1) {
-			throw new Error(`Invalid modelId format: ${params.modelId}. Expected "provider/modelId".`)
-		}
+		const parsedProvider = slashIndex === -1 ? undefined : (params.modelId.substring(0, slashIndex) as ApiProvider)
+		const parsedModelId = slashIndex === -1 ? params.modelId : params.modelId.substring(slashIndex + 1)
 
-		const parsedProvider = params.modelId.substring(0, slashIndex) as ApiProvider
-		const parsedModelId = params.modelId.substring(slashIndex + 1)
-
-		if (isValidCliProvider(parsedProvider)) {
+		if (parsedProvider && isValidCliProvider(parsedProvider)) {
 			// Real provider switch (e.g. "anthropic/claude-3-5-sonnet-...")
 			await this.sessionConfig.applyProviderAndModel(session, parsedProvider, parsedModelId, sessionOverrides)
 		} else {
-			// Not a recognized Dirac provider — treat the WHOLE string as the literal
-			// model id for the currently configured provider (e.g. a custom-endpoint
-			// gateway that itself routes on "vendor/model"-style names, as configured
-			// via Paseo's `additionalModels`).
-			const stateManager = StateManager.get()
-			const currentProvider = stateManager.getGlobalSettingsKey(
-				session.mode === "act" ? "actModeApiProvider" : "planModeApiProvider",
-			) as ApiProvider | undefined
+			// Either a bare id (e.g. "gpt-6-astra") or a name whose prefix is not a Dirac
+			// provider: treat the WHOLE string as the literal model id for the session's
+			// current provider, for custom gateways that route on their own names.
+			const mode = this.sessionConfig.computeCurrentAcpModeId(session.mode, sessionOverrides)
+			const providerKey = mode === "act" ? "actModeApiProvider" : "planModeApiProvider"
+			const currentProvider = sessionOverrides[providerKey] as ApiProvider | undefined
 			if (!currentProvider) {
 				throw new Error("Cannot set model before a provider is configured")
 			}

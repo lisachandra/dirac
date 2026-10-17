@@ -40,6 +40,7 @@ const mocks = vi.hoisted(() => {
 		integrateSessionWorktree: vi.fn(),
 		shutdown: vi.fn(),
 		unstable_setSessionModel: vi.fn(),
+		steerActiveTurn: vi.fn(async () => false),
 
 		queueWhisper: vi.fn(),
 		recordClientAnnotation: vi.fn(),
@@ -683,6 +684,25 @@ describe("AcpAgent", () => {
 			sessionId: "session-1",
 			text: "Use the existing helper.",
 		})
+	})
+
+	it("reports whether the running turn accepted steering guidance", async () => {
+		const agent = new AcpAgent(connection, {})
+		mocks.diracAgentInstance.steerActiveTurn.mockResolvedValue(true)
+
+		await expect(agent.extMethod("dev.dirac/steer", { sessionId: "session-1", text: "Also update the docs." })).resolves.toEqual({
+			accepted: true,
+		})
+		expect(mocks.diracAgentInstance.steerActiveTurn).toHaveBeenCalledWith("session-1", "Also update the docs.")
+	})
+
+	it("rejects steering guidance without text", async () => {
+		const agent = new AcpAgent(connection, {})
+
+		await expect(agent.extMethod("dev.dirac/steer", { sessionId: "session-1", text: "  " })).rejects.toMatchObject({
+			code: -32602,
+		})
+		expect(mocks.diracAgentInstance.steerActiveTurn).not.toHaveBeenCalled()
 	})
 
 	it("persists client annotations through the capability-gated notification", async () => {
