@@ -59,8 +59,8 @@ export interface ITaskControllerDependencies {
 	toggleActModeForYoloMode: () => Promise<boolean>
 }
 
-const HISTORICAL_TASK_RESTORE_TIMEOUT_MS = 30_000
-const HISTORICAL_TASK_CLEANUP_TIMEOUT_MS = 5_000
+const HISTORICAL_TASK_RESTORE_TIMEOUT_MS = 120_000
+const HISTORICAL_TASK_CLEANUP_TIMEOUT_MS = 20_000
 export class TaskController {
 	private _task?: Task
 	private _workspaceManager?: WorkspaceRootManager
@@ -75,6 +75,11 @@ export class TaskController {
 	// Promise for the in-flight task run; consumed via Controller.taskRunPromise (from main).
 	get taskRunPromise(): Promise<void> | undefined {
 		return this._taskRunPromise
+	}
+
+	/** True while cancelTask() is still winding down the previous run. */
+	get isCancelling(): boolean {
+		return this.cancelInProgress
 	}
 
 	constructor(

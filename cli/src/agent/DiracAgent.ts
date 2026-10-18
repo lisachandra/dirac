@@ -1833,19 +1833,55 @@ export class DiracAgent implements acp.Agent {
 				}
 			} else {
 				// The ACP session ID is the stable conversation ULID, not the backing task ID.
-				Logger.debug("[DiracAgent] Starting new task")
-				await controller.initTask(
-					textContent,
-					imageContent,
-					fileResources,
-					undefined,
-					undefined,
-					params.sessionId,
-					undefined,
-					this.activePromptInitializationOptions(params.sessionId),
-				)
-				session.taskId = controller.task?.taskId
-				this.persistSessionOverrides(params.sessionId)
+				// A timed-out cancel() leaves cancelTask() running in the background; its own
+				// reinit may still assign controller.task. Give it a bounded window to settle
+				// before deciding that there is no live task to continue.
+				for (let waited = 0; !controller.task && controller.isCancelling && waited < 45_000; waited += 250) {
+					await new Promise((resolve) => setTimeout(resolve, 250))
+				}
+
+				// A task can exist without a live one: a cancellation can drop it mid-restore,
+				// and restarts discard live tasks. Continue the recorded task rather than
+				// starting a fresh one, which would fork the conversation into a second task
+				// sharing this session's ID and lose every prior turn.
+				const recordedTaskId = controller.task?.taskId ?? session.taskId ?? getLatestTaskIdForSession(params.sessionId)
+				if (recordedTaskId) {
+					Logger.debug("[DiracAgent] Restoring persisted task instead of starting a new one:", recordedTaskId)
+					await controller.reinitExistingTaskFromId(
+						recordedTaskId,
+						this.activePromptInitializationOptions(params.sessionId),
+					)
+					const restoredTask = controller.task!
+					session.isLoadedFromHistory = true
+					session.loadedTaskId = restoredTask.taskId
+					subscribeToCurrentTask()
+					await this.bindPromptTask(params.sessionId, restoredTask)
+					await bridge.replayTaskMessages(
+						controller,
+						params.sessionId,
+						sessionState,
+						resolvePrompt!,
+						rejectPrompt!,
+						promptResolved,
+						0,
+						restoredTask.messageStateHandler.getDiracMessages().length,
+					)
+					await restoredTask.submitCardResponse("", DiracAskResponse.MESSAGE, textContent, imageContent, fileResources)
+				} else {
+					Logger.debug("[DiracAgent] Starting new task")
+					await controller.initTask(
+						textContent,
+						imageContent,
+						fileResources,
+						undefined,
+						undefined,
+						params.sessionId,
+						undefined,
+						this.activePromptInitializationOptions(params.sessionId),
+					)
+					session.taskId = controller.task?.taskId
+					this.persistSessionOverrides(params.sessionId)
+				}
 			}
 			session.isLoadedFromHistory = false
 			session.loadedTaskId = undefined
@@ -1978,24 +2014,13 @@ export class DiracAgent implements acp.Agent {
 							session.awaitingCancelledTaskResume = cancelCompleted !== OPERATION_TIMED_OUT
 						}
 
-						// A cancelTask() that times out can leave the reinitialized task parked in
-						// LifecycleManager.resumeTaskFromHistory()'s pWaitFor(askResponse) forever:
-						// the follow-up prompt's status poll never sees COMPLETED/CANCELLED and the
-						// session hangs. Force the parked task to abort so the next prompt's
-						// submitCardResponse wakes it deterministically.
-						if (cancelCompleted === OPERATION_TIMED_OUT && controller.task) {
-							Logger.warn("[DiracAgent] cancelTask timed out; forcing abort of reinitialized task")
-							controller.task.taskState.abort = true
-						}
-
-						// A cancelTask() that times out can leave the reinitialized task parked in
-						// LifecycleManager.resumeTaskFromHistory()'s pWaitFor(askResponse) forever:
-						// the follow-up prompt's status poll never sees COMPLETED/CANCELLED and the
-						// session hangs. Force the parked task to abort so the next prompt's
-						// submitCardResponse wakes it deterministically.
-						if (cancelCompleted === undefined && controller.task) {
-							Logger.warn("[DiracAgent] cancelTask timed out; forcing abort of reinitialized task")
-							controller.task.taskState.abort = true
+						// Do not abort the reinitialized task here. LifecycleManager checks
+						// taskState.abort between every restore step, so an abort flag kills the
+						// restore that is still in flight and leaves the session with no live task.
+						// The next prompt restores persisted history instead (see the
+						// restore-before-new-task fallback in prompt()).
+						if (cancelCompleted === OPERATION_TIMED_OUT || cancelCompleted === undefined) {
+							Logger.warn("[DiracAgent] cancelTask did not complete; the next prompt will restore persisted history")
 						}
 					} catch (error) {
 						Logger.debug("[DiracAgent] Error cancelling task:", error)

@@ -223,9 +223,9 @@ describe("TaskController task replacement", () => {
 		controller.task = task
 
 		const start = (controller as any).startHistoricalTaskAndWaitForRestore(task)
-		await clock.tickAsync(30_000)
+		await clock.tickAsync(120_000)
 
-		await assert.rejects(start, /history restoration timed out after 30 seconds/)
+		await assert.rejects(start, /history restoration timed out after 120 seconds/)
 		sinon.assert.calledOnce(clearTaskSettings)
 		sinon.assert.calledOnce(task.abortTask)
 		assert.equal(controller.task, undefined)

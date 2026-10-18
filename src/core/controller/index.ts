@@ -83,6 +83,11 @@ export class Controller implements ITaskHost {
 		return this.taskController?.taskRunPromise
 	}
 
+	/** True while a cancellation is still winding down the previous run. */
+	get isCancelling(): boolean {
+		return this.taskController?.isCancelling ?? false
+	}
+
 	onTaskReplaced(listener: (taskId: string) => void | Promise<void>): () => void {
 		return this.taskController.onTaskReplaced(listener)
 	}

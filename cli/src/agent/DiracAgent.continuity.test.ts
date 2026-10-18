@@ -434,42 +434,65 @@ describe("DiracAgent ACP conversation continuity", () => {
 		expect((agent as any).sessions.get(sessionId).awaitingCancelledTaskResume).toBe(false)
 	})
 
-	it("handles cancellation timeout by aborting the reinitialized task and allowing prompt continuation", async () => {
+	it("handles cancellation timeout by restoring persisted history on the next prompt", async () => {
 		const agent = new DiracAgent({ cwd: "/tmp/workspace" })
-			; (agent as any).ctx = { extensionContext: {}, DATA_DIR: "/tmp/dirac-test-data" }
-			; (agent as any).providerConfiguration.assertProviderEnabled = vi.fn()
-			; (agent as any).sessionConfig.getSessionConfigOptions = vi.fn(async () => [])
-			; (agent as any).sessionConfig.getSessionModeState = vi.fn(() => ({ currentModeId: "act", availableModes: [] }))
-			; (agent as any).sendAvailableCommands = vi.fn(async () => undefined)
-			; (agent as any).setSessionTitleFromFirstExchange = vi.fn(async () => undefined)
+		; (agent as any).ctx = { extensionContext: {}, DATA_DIR: "/tmp/dirac-test-data" }
+		; (agent as any).providerConfiguration.assertProviderEnabled = vi.fn()
+		; (agent as any).sessionConfig.getSessionConfigOptions = vi.fn(async () => [])
+		; (agent as any).sessionConfig.getSessionModeState = vi.fn(() => ({ currentModeId: "act", availableModes: [] }))
+		; (agent as any).sendAvailableCommands = vi.fn(async () => undefined)
+		; (agent as any).setSessionTitleFromFirstExchange = vi.fn(async () => undefined)
 
 		const { sessionId } = await agent.newSession({ cwd: "/tmp/workspace", mcpServers: [] } as any)
 		const controller = mocks.controllers[0]
+		const backingTaskId = "persisted-task"
 
 		await expect(agent.prompt({ sessionId, prompt: [{ type: "text", text: "task 1" }] } as any)).resolves.toEqual({
 			stopReason: "end_turn",
 		})
 
-		vi.useFakeTimers()
-		try {
-			// Make cancelTask take indefinitely (simulate timeout)
-			controller.cancelTask = vi.fn(() => new Promise(() => {}))
+		// cancelTask never completes: DiracAgent treats it as a timed-out/failed cancel,
+		// must NOT poison the replacement task with abort, and the next prompt must
+		// rehydrate persisted history.
+		controller.cancelTask = vi.fn(() => new Promise(() => {}))
 
-			mocks.setResolveSubmittedResponses(false)
-			const activeTurn = agent.prompt({ sessionId, prompt: [{ type: "text", text: "active work" }] } as any)
+		mocks.task.taskId = backingTaskId
+		mocks.setResolveSubmittedResponses(false)
+		const activeTurn = agent.prompt({ sessionId, prompt: [{ type: "text", text: "active work" }] } as any)
+		await new Promise<void>((resolve) => setImmediate(resolve))
 
-			const cancelPromise = agent.cancel({ sessionId } as any)
-			await vi.advanceTimersByTimeAsync(11000)
-			await cancelPromise
+		const cancelPromise = agent.cancel({ sessionId } as any)
+		// Bound the wait: withTimeout's watchdog is real 10s, too slow for CI. Race it.
+		await Promise.race([cancelPromise, new Promise((r) => setTimeout(r, 200))])
+		// The cancelled prompt settles via cancel()'s finally once the watchdog fires.
+		await expect(activeTurn).resolves.toEqual({ stopReason: "cancelled" })
 
-			expect(mocks.task.taskState.abort).toBe(true)
-			// A timed-out cancel does not leave a resume flow to wake: the parked task was
-			// force-aborted, so the next prompt must rehydrate persisted history instead.
-			expect((agent as any).sessions.get(sessionId).awaitingCancelledTaskResume).toBe(false)
-		} finally {
-			vi.useRealTimers()
-		}
-	})
+		expect(mocks.task.taskState.abort).toBe(false)
+		expect((agent as any).sessions.get(sessionId).awaitingCancelledTaskResume).toBe(false)
+
+		// Drop the wedged controller task to mimic the dead live task left behind.
+		controller.task = undefined
+		mocks.setResolveSubmittedResponses(true)
+		controller.reinitExistingTaskFromId.mockImplementationOnce(async () => {
+			controller.task = mocks.task
+			mocks.task.taskState.didAttemptCompletion = true
+			mocks.task.taskState.status = TaskStatus.COMPLETED
+		})
+
+		await expect(
+			agent.prompt({ sessionId, prompt: [{ type: "text", text: "continue after timed-out cancel" }] } as any),
+		).resolves.toEqual({ stopReason: "end_turn" })
+
+		expect(controller.reinitExistingTaskFromId).toHaveBeenCalledWith(backingTaskId, expect.any(Object))
+		expect(controller.initTask).toHaveBeenCalledTimes(1)
+		expect(mocks.task.submitCardResponse).toHaveBeenLastCalledWith(
+			"",
+			DiracAskResponse.MESSAGE,
+			"continue after timed-out cancel",
+			[],
+			[],
+		)
+	}, 20000)
 
 
 	it("resumes a loaded session whose transcript parked as CANCELLED (interrupted turn)", async () => {
