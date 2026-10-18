@@ -34,6 +34,13 @@ export { captureUnhandledException } from "./utils/errors"
 // Setup CLI commands
 const program = new Command()
 
+// Workspace hook approval is an interactive prompt owned by the extension host,
+// so unattended CLI runs (sandcastle, CI) opt in explicitly. The env var is
+// read by WorkspaceCodeApproval and is inherited by detached ACP respawns.
+function applyTrustWorkspaceHooks(options: { trustWorkspaceHooks?: boolean }): void {
+	if (options.trustWorkspaceHooks) process.env.DIRAC_TRUST_WORKSPACE_HOOKS = "true"
+}
+
 program.name("dirac").description("Dirac CLI - AI coding assistant in your terminal").version(CLI_VERSION)
 
 // Enable positional options to avoid conflicts between root and subcommand options with the same name
@@ -89,11 +96,13 @@ program
 			.conflicts(["enableTool", "disableTool"]),
 	)
 	.option("--hooks-dir <path>", "Path to additional hooks directory for runtime hook injection")
+	.option("--trust-workspace-hooks", "Run workspace hook scripts without the interactive approval prompt (unattended runs only)")
 	.option("--no-index", "Disable symbol indexing for the workspace")
 	.option("--no-emoji", "Disable emoji icons (use unicode/ascii fallbacks)")
 	.option("--headers <headers>", "Custom headers for OpenAI-compatible provider (key1=value1,key2=value2 or JSON)")
 	.option("-T, --taskId <id>", "Resume an existing task by ID")
 	.action(async (prompt, options) => {
+		applyTrustWorkspaceHooks(options)
 		const { combinePromptWithPipedInput, isEmptyPipedInput, readStdinIfPiped } = await import("./utils/piped")
 		const stdinInput = await readStdinIfPiped()
 		if (isEmptyPipedInput(stdinInput) && !prompt && !options.images?.length) {
@@ -246,6 +255,7 @@ program
 	)
 	.option("--headers <headers>", "Custom headers for OpenAI-compatible provider (key1=value1,key2=value2 or JSON)")
 	.option("--hooks-dir <path>", "Path to additional hooks directory for runtime hook injection")
+	.option("--trust-workspace-hooks", "Run workspace hook scripts without the interactive approval prompt (unattended runs only)")
 	.option("--no-index", "Disable symbol indexing for the workspace")
 	.option("--no-emoji", "Disable emoji icons (use unicode/ascii fallbacks)")
 	.option("--acp", "Run in ACP (Agent Client Protocol) mode for editor integration")
@@ -255,6 +265,7 @@ program
 	.option("-T, --taskId <id>", "Resume an existing task by ID")
 	.option("--continue", "Resume the most recent task from the current working directory")
 	.action(async (prompt, options) => {
+		applyTrustWorkspaceHooks(options)
 		const { printWarning } = await import("./utils/display")
 		const { hasToolSelectionOptions } = await import("./utils/tool-options")
 		if (hasToolSelectionOptions(options) && (options.kanban || options.acpAuth || options.acp || options.listen)) {

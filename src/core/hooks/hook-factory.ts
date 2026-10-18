@@ -1,7 +1,7 @@
 import { Logger } from "@/shared/services/Logger"
 import fs from "node:fs/promises"
 import path from "node:path"
-import { approvedWorkspaceCode } from "@/core/security/WorkspaceCodeApproval"
+import { approvedWorkspaceHookBundle } from "@/core/security/WorkspaceCodeApproval"
 import { HostProvider } from "@/hosts/host-provider"
 import { version as diracVersion } from "../../../package.json"
 import { getDistinctId } from "../../services/logging/distinctId"
@@ -187,13 +187,21 @@ class StdioHookRunner<Name extends HookName> extends HookRunner<Name> {
 		let snapshotDir: string | undefined
 		if (this.source === "workspace") {
 			if (!this.cwd) return HookOutput.create({ cancel: false })
-			const approved = await approvedWorkspaceCode(this.cwd, this.scriptPath, undefined, true)
+			const approved = await approvedWorkspaceHookBundle(this.cwd, this.scriptPath, true)
 			if (!approved) return HookOutput.create({ cancel: false })
+			// Materialize the whole hook bundle, not just the entry script, and
+			// preserve its directory layout: hook shims dispatch to sibling
+			// scripts and read the settings file beside their hooks directory
+			// (a flat snapshot would leave them silently allowing everything).
 			const base = path.join(HostProvider.get().globalStorageFsPath, "security", "hook-snapshots")
 			await fs.mkdir(base, { recursive: true })
 			snapshotDir = await fs.mkdtemp(path.join(base, "hook-"))
-			launchPath = path.join(snapshotDir, path.basename(this.scriptPath))
-			await fs.writeFile(launchPath, approved.source, { mode: 0o700 })
+			for (const [relative, content] of approved.files) {
+				const destination = path.join(snapshotDir, relative)
+				await fs.mkdir(path.dirname(destination), { recursive: true })
+				await fs.writeFile(destination, content, { mode: 0o700 })
+			}
+			launchPath = path.join(snapshotDir, approved.entry)
 		}
 
 		// Serialize input to JSON — manually construct to preserve empty string fields (proto3 omits defaults)
