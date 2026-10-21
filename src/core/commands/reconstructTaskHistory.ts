@@ -1,5 +1,7 @@
 import {
+	GlobalFileNames,
 	getSavedDiracMessages,
+	getTaskDirectoryPath,
 	getTaskHistoryStateFilePath,
 	getTaskMetadata,
 	writeTaskHistoryToState,
@@ -13,6 +15,7 @@ import { getApiMetrics } from "@shared/getApiMetrics"
 import { HistoryItem } from "@shared/HistoryItem"
 import { ShowMessageType } from "@shared/proto/host/window"
 import { fileExistsAtPath } from "@utils/fs"
+import fs from "fs/promises"
 import * as path from "path"
 import { getErrorMessage } from "@/shared/errors"
 import { Logger } from "@/shared/services/Logger"
@@ -205,8 +208,19 @@ export async function reconstructTaskHistoryItem(
 ): Promise<HistoryItem | null> {
 	try {
 		// Load UI messages to extract task info
-		const diracMessages = await getSavedDiracMessages(taskId)
-		if (diracMessages.length === 0) {
+		let diracMessages: DiracMessage[]
+		let legacyMetrics: LegacyTranscriptMetrics | undefined
+		try {
+			diracMessages = await getSavedDiracMessages(taskId)
+		} catch (error) {
+			// Pre-modular transcripts use a message format the current reader rejects, but
+			// they still carry the task description and usage needed for a usable history row.
+			// Without a usable legacy record the transcript is as good as empty.
+			legacyMetrics = await readLegacyTranscriptMetrics(taskId)
+			if (!legacyMetrics) return null
+			diracMessages = []
+		}
+		if (diracMessages.length === 0 && !legacyMetrics) {
 			return null // Skip empty tasks
 		}
 
@@ -214,7 +228,12 @@ export async function reconstructTaskHistoryItem(
 		const metadata = await getTaskMetadata(taskId)
 
 		// Extract task information
-		const taskInfo = extractTaskInformation(diracMessages, metadata)
+		const taskInfo = extractTaskInformation(diracMessages, metadata, legacyMetrics)
+
+		// Workspace association is only persisted in the history index, so re-derive it
+		// from the task's own tool-context log when reconstruction runs without the index.
+		const workspaceRootPath = (await deriveWorkspaceRootPath(taskId)) ?? legacyMetrics?.workspaceRootPath
+		const modelId = metadata.model_usage.at(-1)?.model_id ?? legacyMetrics?.modelId
 
 		// Create HistoryItem
 		const historyItem: HistoryItem = {
@@ -232,12 +251,198 @@ export async function reconstructTaskHistoryItem(
 			size: taskInfo.size,
 			isFavorited: taskInfo.isFavorited,
 			conversationHistoryDeletedRange: taskInfo.conversationHistoryDeletedRange,
+			...(workspaceRootPath ? { workspaceRootPath, cwdOnTaskInitialization: workspaceRootPath } : {}),
+			...(modelId ? { modelId } : {}),
 		}
 
 		return historyItem
 	} catch (error) {
 		throw new Error(`Failed to reconstruct task ${taskId}: ${error}`)
 	}
+}
+
+interface LegacyTranscriptMetrics {
+	taskDescription: string
+	timestamp: number
+	metrics: LegacyApiUsage
+	modelId?: string
+	workspaceRootPath?: string
+}
+
+// Minimal record shape of pre-modular transcripts ("type"/"say"/"text"); enough for a history row.
+async function readLegacyTranscriptMetrics(taskId: string): Promise<LegacyTranscriptMetrics | undefined> {
+	const filePath = path.join(getTaskDirectoryPath(taskId), GlobalFileNames.uiMessages)
+	if (!(await fileExistsAtPath(filePath))) return undefined
+
+	let records: unknown
+	try {
+		records = JSON.parse((await fs.readFile(filePath, "utf8")).replace(/\0/g, ""))
+	} catch (error) {
+		Logger.warn(`[Task History] Legacy transcript for task ${taskId} is unreadable: ${getErrorMessage(error)}`)
+		return undefined
+	}
+	if (!Array.isArray(records)) return undefined
+
+	const legacyRecords = records.filter(isLegacyRecord)
+	const firstTask = legacyRecords.find(
+		(record) => record.say === "task" && typeof record.text === "string" && record.text.trim().length > 0,
+	)
+	if (!firstTask || typeof firstTask.text !== "string") return undefined
+
+	const startedRecords = legacyRecords
+		.filter((record) => record.say === "api_req_started" && typeof record.text === "string")
+		.map((record) => parseLegacyApiReqInfo(record.text as string))
+		.filter((info): info is LegacyApiReqInfo => info !== undefined)
+	const modelId =
+		typeof legacyRecords[0]?.modelInfo?.modelId === "string" ? (legacyRecords[0].modelInfo.modelId as string) : undefined
+
+	return {
+		taskDescription: firstTask.text,
+		timestamp: typeof firstTask.ts === "number" ? firstTask.ts : Date.now(),
+		metrics: {
+			totalTokensIn: sumMetric(startedRecords, (info) => info.tokensIn),
+			totalTokensOut: sumMetric(startedRecords, (info) => info.tokensOut),
+			totalCacheWrites: sumOptionalMetric(startedRecords, (info) => info.cacheWrites),
+			totalCacheReads: sumOptionalMetric(startedRecords, (info) => info.cacheReads),
+			totalCost: sumMetric(startedRecords, (info) => info.cost),
+		},
+		...(modelId ? { modelId } : {}),
+		workspaceRootPath: findLegacyWorkspaceRootPath(records),
+	}
+}
+
+function isLegacyRecord(value: unknown): value is LegacyTranscriptRecord {
+	return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+interface LegacyTranscriptRecord {
+	ts?: unknown
+	say?: unknown
+	text?: unknown
+	modelInfo?: { modelId?: unknown }
+}
+
+interface LegacyApiUsage {
+	totalTokensIn: number
+	totalTokensOut: number
+	totalCacheWrites?: number
+	totalCacheReads?: number
+	totalCost: number
+}
+
+interface LegacyApiReqInfo {
+	tokensIn: number
+	tokensOut: number
+	cacheWrites: number
+	cacheReads: number
+	cost: number
+}
+
+function parseLegacyApiReqInfo(text: string): LegacyApiReqInfo | undefined {
+	try {
+		const parsed: unknown = JSON.parse(text)
+		if (typeof parsed !== "object" || parsed === null) return undefined
+		const record = parsed as Record<string, unknown>
+		return {
+			tokensIn: typeof record.tokensIn === "number" ? record.tokensIn : 0,
+			tokensOut: typeof record.tokensOut === "number" ? record.tokensOut : 0,
+			cacheWrites: typeof record.cacheWrites === "number" ? record.cacheWrites : 0,
+			cacheReads: typeof record.cacheReads === "number" ? record.cacheReads : 0,
+			cost: typeof record.cost === "number" ? record.cost : 0,
+		}
+	} catch {
+		return undefined
+	}
+}
+
+function sumMetric(records: LegacyApiReqInfo[], pick: (info: LegacyApiReqInfo) => number): number {
+	return records.reduce((total, info) => total + pick(info), 0)
+}
+
+function sumOptionalMetric(
+	records: LegacyApiReqInfo[],
+	pick: (info: LegacyApiReqInfo) => number,
+): number | undefined {
+	const total = sumMetric(records, pick)
+	return total > 0 ? total : undefined
+}
+
+// Legacy transcripts embed absolute workspace paths in message text, mixed with unrelated
+// paths (URLs, temp files), so the same frequency vote as current transcripts decides.
+function findLegacyWorkspaceRootPath(records: unknown[]): string | undefined {
+	const texts: string[] = []
+	for (const record of records) {
+		if (isLegacyRecord(record) && typeof record.text === "string") texts.push(record.text)
+	}
+	return findWorkspaceRootFromPaths(texts.flatMap(extractAbsolutePaths))
+}
+
+const ABSOLUTE_PATH_PATTERN = /(?<![A-Za-z0-9])[A-Za-z]:[/\\][^\n"'`<>|?*]+/g
+
+function extractAbsolutePaths(text: string): string[] {
+	return [...text.matchAll(ABSOLUTE_PATH_PATTERN)].map((match) =>
+		match[0]
+			.replace(/#[^/\\]*$/, "") // tool-context cache keys carry a "#plain"/"#anchored" fragment
+			.replace(/[)\]},.;:]+$/, "")
+			.trim(),
+	)
+}
+
+// The workspace root contains every distinct absolute path seen in the task, so counting full
+// ancestor prefixes gives it the highest tally (its own ancestors trail by one each, noise
+// paths and their ancestors stay far below). Deepest directory breaks count ties, and a bare
+// drive root never wins because a workspace is never just a drive.
+function findWorkspaceRootFromPaths(candidates: string[]): string | undefined {
+	const counts = new Map<string, number>()
+	for (const raw of new Set(candidates.map((candidate) => candidate.replace(/\\/g, "/").replace(/\/{2,}/g, "/")))) {
+		const segments = raw.split("/").filter((segment) => segment.length > 0)
+		const drive = segments[0]
+		if (!drive || drive.length !== 2 || drive[1] !== ":") continue // drive-letter paths only
+		const isDirectory = !segments.at(-1)?.includes(".")
+		const directories = isDirectory ? segments : segments.slice(0, -1)
+		for (let depth = 1; depth <= directories.length; depth++) {
+			const prefix = directories.slice(0, depth).join("/")
+			counts.set(prefix, (counts.get(prefix) ?? 0) + 1)
+		}
+	}
+
+	let best: { dir: string; count: number; depth: number } | undefined
+	for (const [dir, count] of counts) {
+		if (count < MIN_WORKSPACE_PATH_COUNT || dir.length === 2) continue // bare drive roots excluded
+		const depth = dir.split("/").length
+		if (!best || count > best.count || (count === best.count && depth > best.depth)) best = { dir, count, depth }
+	}
+	return best ? path.normalize(best.dir) : undefined
+}
+
+const TRANSCRIPT_SCAN_BYTES = 256 * 1024
+const MIN_WORKSPACE_PATH_COUNT = 2
+
+// Reads absolute file paths from the task's tool-context log ("fileHashes" keys), which
+// reference files actually opened/edited in the workspace. Transcript text is deliberately
+// not scanned: task descriptions can cite paths from other workspaces (e.g. an orchestrating
+// repo's marker files), which would skew the frequency vote.
+async function deriveWorkspaceRootPath(taskId: string): Promise<string | undefined> {
+	const candidates: string[] = []
+	const taskDirectory = getTaskDirectoryPath(taskId)
+	const opLogPath = path.join(taskDirectory, GlobalFileNames.toolContextOperations)
+	const baselinePath = path.join(taskDirectory, GlobalFileNames.toolContextBaseline)
+	for (const filePath of [opLogPath, baselinePath]) {
+		if (!(await fileExistsAtPath(filePath))) continue
+		let handle: fs.FileHandle | undefined
+		try {
+			handle = await fs.open(filePath, "r")
+			const buffer = Buffer.alloc(TRANSCRIPT_SCAN_BYTES)
+			const { bytesRead } = await handle.read(buffer, 0, TRANSCRIPT_SCAN_BYTES, 0)
+			candidates.push(buffer.subarray(0, bytesRead).toString("utf8"))
+		} catch (error) {
+			Logger.warn(`[Task History] Could not read tool context for task ${taskId}: ${getErrorMessage(error)}`)
+		} finally {
+			await handle?.close()
+		}
+	}
+
+	return findWorkspaceRootFromPaths(candidates.flatMap(extractAbsolutePaths))
 }
 
 interface TaskInfo {
@@ -253,7 +458,25 @@ interface TaskInfo {
 	conversationHistoryDeletedRange?: [number, number]
 }
 
-function extractTaskInformation(diracMessages: DiracMessage[], metadata: TaskMetadata): TaskInfo {
+function extractTaskInformation(
+	diracMessages: DiracMessage[],
+	metadata: TaskMetadata,
+	legacyMetrics?: LegacyTranscriptMetrics,
+): TaskInfo {
+	// Legacy transcripts bypass the DiracMessage pipeline entirely.
+	if (legacyMetrics) {
+		const cleanText = legacyMetrics.taskDescription.replace(/<task>\s*/g, "").replace(/\s*<\/task>/g, "").trim()
+		return {
+			timestamp: legacyMetrics.timestamp,
+			taskDescription: cleanText.split("\n")[0]?.substring(0, 100) || "Untitled Task",
+			tokensIn: legacyMetrics.metrics.totalTokensIn,
+			tokensOut: legacyMetrics.metrics.totalTokensOut,
+			cacheWrites: legacyMetrics.metrics.totalCacheWrites,
+			cacheReads: legacyMetrics.metrics.totalCacheReads,
+			totalCost: legacyMetrics.metrics.totalCost,
+		}
+	}
+
 	// Find the first user message (task description)
 	const firstUserMessage = diracMessages.find(
 		(msg) => msg.content.type === DiracMessageType.MARKDOWN && !msg.content.isReasoning && msg.content.content,
